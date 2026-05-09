@@ -1,49 +1,189 @@
 # OpenClaw Command Center
 
 ![OpenClaw Command Center](public/openclaw_command_center.png)
-A web-based AI command center featuring a pixel art office with 3 AI agents, voice interaction, and real-time system monitoring. Built for Raspberry Pi 5 + 7" touchscreen, but runs anywhere with Node.js.
 
-
+A web-based AI command center with a living pixel-art office, real-time OpenClaw agent activity, voice input/output, companion avatars, wake mode, direct chat, and system monitoring. It was originally built for Raspberry Pi 5 + 7" touchscreen kiosk use, but runs anywhere Node.js can run.
 
 ## Quick Start
 
 ```bash
-git clone <this-repo>
-cd openclaw-command-center
+git clone https://github.com/EpicIsTheOne/CommandCenter.git
+cd CommandCenter
 npm install
 cp .env.example .env
 npm start
 # Open http://localhost:3000
 ```
 
-That's it. With zero config, the app runs in **demo mode** — full UI with simulated agent activity, no gateway or API keys needed.
+With zero config, the app can run in **demo mode** with simulated agent activity. For live OpenClaw integration, configure `.env` and the OpenClaw gateway settings below.
 
 ## What You'll See
 
-The UI has three zones:
+The UI has three main zones:
 
-- **Left** — Animated mascot (tap to talk to Jansky, the boss agent)
-- **Right** — Pixel art office with 3 agents at desks, conference huddles, personality-driven wandering, real system metrics, weather widget, digital clock, kanban whiteboard, ambient sounds
-- **Bottom** — Terminal log showing agent activity
+- **Status / Mascot** — animated mascot canvas that reacts to listening, thinking, working, talking, and error states.
+- **Office** — pixel-art office showing agents at desks, wandering around, gathering at the center table, using companion visuals, and reacting to tasks.
+- **Activity Log** — terminal-style log for agent activity, tool calls, outside-session responses, voice events, and system status.
 
-### The Team
+Additional panels and modals provide:
 
-| Agent | ID | Role | Color | TTS Voice |
-|-------|----|------|-------|-----------|
-| **Jansky** | `main` | Boss/orchestrator | Gold | onyx (deep) |
-| **Orbit** | `claw-1` | Coding/tasks | Cyan | echo (clear) |
-| **Nova** | `claw-2` | Research/web | Purple | fable (warm) |
+- settings for voice providers and per-agent voices
+- companion/pet import and assignment
+- wake-word configuration
+- direct chat with reusable file/link context
+- API/docs access under `/docs`
 
-Tap an agent in the office to start recording a voice message for them. Tap again to send. Agents respond with per-character TTS voices.
+## Current Feature Set
 
-### Office Features
+### Live OpenClaw activity
 
-- **Kanban whiteboard** — Real-time task board showing IDLE / BUSY / DONE columns with agent-colored dots. Tracks session uptime and task completion count.
-- **Ambient sounds** — Subtle keyboard clicks when agents are working, a ding when tasks complete, and an hourly chime synced to the clock.
-- **Time-aware behavior** — Agents visit the coffee machine more in the morning (7-9am), take more sofa breaks in the afternoon (2-4pm), and stay at their desks more during late night hours.
-- **Server rack** — Real system metrics (CPU%, MEM%, DISK%, temperature) with color-coded bars and blinking LEDs for critical thresholds.
-- **Weather widget** — Live weather from wttr.in with rain effect on walls.
-- **Conference huddles** — Agents periodically gather at the round table with rotating discussion topics.
+- WebSocket bridge to the OpenClaw gateway.
+- Demo fallback if the gateway is unavailable.
+- Normalized agent states:
+  - idle
+  - listening
+  - thinking
+  - tool use / working
+  - responding / talking
+  - error
+- Session monitor that watches OpenClaw session files and mirrors outside activity into Command Center.
+- External replies now show in the Activity Log and get spoken by Command Center, even when the conversation started outside the Command Center UI.
+- Duplicate response suppression so mirrored events do not spam the log or double-speak.
+
+### Voice input and speech output
+
+- Tap the mascot to talk to the primary agent.
+- Tap an office agent to talk directly to that agent.
+- Local/server STT route via `/api/voice/transcribe`.
+- TTS playback via `/api/voice/speak`.
+- Stop Voice button to interrupt playback.
+- Per-agent voice assignment.
+- Voice provider settings:
+  - ElevenLabs
+  - Fish Audio through the AIChat tagged API
+- Fish Audio voice search and preview support.
+- Optional asterisk/narration handling for Fish Audio output.
+
+### Wake mode
+
+- Wake Mode button in the Activity Log header.
+- Local wake/name detection flow.
+- Picovoice/Porcupine runtime support through bundled browser vendor scripts.
+- Built-in Porcupine wake words.
+- Uploadable custom `.ppn` wake-word files per agent.
+- Wake aliases for common agent names.
+- Inline wake requests: if the wake phrase includes a request after the name, Command Center can send it directly.
+
+### Direct chat
+
+- Direct text chat with agents without using voice.
+- Persistent per-agent chat history stored under `data/chat-library/history.json`.
+- Reusable file/link library stored under `data/chat-library/`.
+- Upload files for later reference.
+- Save URL/link references with notes.
+- Attach saved files/links to direct chat requests.
+- Direct chat responses broadcast back into the office/activity system.
+
+### Companion visuals and Codex pet imports
+
+- Per-agent visual mode:
+  - default Command Center pixel agent
+  - companion-style animated character
+  - imported Codex pet
+- Companion settings UI.
+- Import Codex pets from:
+  - extracted folder path containing `pet.json` and spritesheet assets
+  - uploaded `.zip` package
+- Codex `pet.json` animation map inference.
+- Codex spritesheet rendering using stable row selection.
+- Fixed Codex pet running animation flicker by locking walking/running render state while moving.
+- Codex pet ambient idle animations:
+  - waiting
+  - review
+  - waving
+  - jumping
+  - failed
+- Direction-aware movement rows for imported pets:
+  - running right
+  - running left
+  - walk up
+  - walk down
+- Safe animation fallbacks when a pet is missing a specific row/frame count.
+
+### Office simulation
+
+- Pixel-art office with desks, server rack, coffee machine, bookshelf, sofa, water cooler, and center table.
+- Mood-driven agent behavior:
+  - focused
+  - restless
+  - curious
+  - social
+  - tired
+  - chaotic
+- Weighted random wandering instead of obvious fixed loops.
+- Recent-action penalties so agents avoid repeating the same destination too often.
+- Idle micro-actions:
+  - brief thoughts
+  - tiny position shifts
+  - facing changes
+  - looking up
+  - short pauses
+- Time-aware behavior:
+  - more coffee behavior in the morning
+  - more sofa breaks during afternoon/tired moods
+  - calmer late-night behavior
+- Rarer center-table huddles.
+- Randomized huddle topics and lines, including shipping, bugs, design, ops, ideas, users, lore, planning, code, and vibes.
+- Huddles now trigger less often and feel less synchronized.
+- State bubbles and thought bubbles for task states and ambient actions.
+- Transient tool bubbles with badges like `WEB`, `RD`, `WR`, `CMD`, `FND`, `MEM`, `IMG`, and `CLK`.
+
+### System and ambient widgets
+
+- Real system health display:
+  - CPU
+  - memory
+  - disk
+  - temperature where available
+- Weather widget powered by wttr.in.
+- Rain ambience when weather codes indicate rain.
+- Kanban-style whiteboard for agent/task state.
+- Digital clock using normal 12-hour time with AM/PM.
+- Hourly chime.
+- Ambient keyboard clicks while agents are working.
+- Task completion ding.
+- Night overlay after hours.
+- Adjustable vignette:
+  - overall strength
+  - top intensity
+  - side intensity
+  - bottom intensity
+
+### API and docs
+
+- Static API docs are served from `/docs` when deployed with the bundled docs files.
+- OpenAPI document at `public/docs/openapi.json`.
+- Auth-protected `/api/v1` routes.
+- API support for:
+  - agents
+  - agent search
+  - file upload/link library
+  - voice settings
+  - sessions
+  - chat messages
+  - streaming chat messages
+
+## The Team
+
+The default/example roster may include agents like:
+
+| Agent | ID | Role | Color | Notes |
+|-------|----|------|-------|-------|
+| Main / Jansky / Astra-style primary | `main` or configured primary | Boss/orchestrator | Gold | Primary voice/masthead agent |
+| Orbit | `claw-1` | Coding/tasks | Cyan | Example sub-agent |
+| Nova | `claw-2` | Research/web | Purple | Example sub-agent |
+
+The actual roster is loaded from the project/OpenClaw agent configuration, so your local names may differ.
 
 ## Architecture
 
@@ -51,27 +191,68 @@ Tap an agent in the office to start recording a voice message for them. Tap agai
 
 | File | Purpose |
 |------|---------|
-| `index.js` | Express + HTTPS/HTTP server, WebSocket, voice routes, agent CLI bridge, weather + health APIs |
-| `openclaw-bridge.js` | Gateway RPC v3 WebSocket connection, event normalization, demo fallback |
-| `voice.js` | Whisper STT + OpenAI TTS with per-agent voice selection |
-| `config.js` | Environment config loader |
+| `index.js` | Express server, HTTP/HTTPS boot, WebSocket server, REST APIs, voice routes, direct chat, settings, docs routing, live call routes |
+| `openclaw-bridge.js` | OpenClaw gateway RPC v3 WebSocket bridge, event normalization, demo fallback |
+| `session-monitor.js` | Watches OpenClaw session JSONL files so outside-session work appears in Command Center |
+| `voice.js` | TTS/STT integrations, ElevenLabs/Fish Audio support, voice resolution |
+| `settings.js` | Voice/settings persistence and masking helpers |
+| `companions.js` | Companion registry, Codex pet import, animation-map normalization |
+| `agents.js` | Agent roster loading and search helpers |
+| `api-auth.js` | Auth middleware for `/api/v1` |
+| `api-chat-runner.js` | API chat turn runner using OpenClaw CLI |
+| `api-session-store.js` | API chat/session persistence |
+| `wake-settings.js` | Wake-word settings persistence |
+| `wake-transcriber.js` | Wake audio transcription wrapper |
+| `wake-keyword-detector.js` | Wake keyword detector wrapper |
+| `gemini-live.js` / `gemini-config.js` | Gemini Live call/session integration |
+| `live-tasks.js` | Background/live task helper logic |
+| `call-session-store.js` | Live call session state |
+| `config.js` | Environment/config loader |
 
 ### Client (`public/`)
 
 | File | Purpose |
 |------|---------|
-| `js/app.js` | Boot sequence, WebSocket client, event routing, tap-to-talk |
-| `js/office.js` | Canvas pixel art office — agents, furniture, wandering AI, huddles, weather ambiance, health metrics, kanban whiteboard, ambient sounds, time-aware behavior |
-| `js/voice.js` | Client-side recording, target agent selection, Web Audio playback (2x volume boost) |
-| `js/mascot.js` | Mascot canvas animation + emotion states |
-| `js/terminal.js` | Terminal log renderer |
+| `js/app.js` | Browser boot, WebSocket client, event routing, settings UI, voice/wake/direct-chat glue |
+| `js/office.js` | Canvas office renderer: agents, furniture, wandering, huddles, Codex pets, health/weather widgets, bubbles, sounds |
+| `js/companions.js` | Companion preview/render helper logic for settings UI |
+| `js/direct-chat.js` | Direct chat UI, file/link library UI, chat event handling |
+| `js/voice.js` | Client recording/playback, TTS playback, audio controls |
+| `js/wake.js` | Wake mode browser-side recording/detection flow |
+| `js/mascot.js` | Mascot canvas animation and emotion states |
+| `js/terminal.js` | Activity Log renderer |
+| `css/styles.css` | Layout, settings modals, responsive/kiosk styling, vignette variables |
+| `docs/` | Static docs and OpenAPI assets |
+| `vendor/picovoice/` | Browser Picovoice/Porcupine vendor scripts |
 
-### Data Flow
+### Data flow
 
+Voice from Command Center:
+
+```text
+Browser tap/record → POST /api/voice/transcribe → STT → openclaw agent CLI
+  → WebSocket agent events → Activity Log + Office animation + TTS playback
 ```
-Browser (tap agent) → MediaRecorder → POST /api/voice/transcribe
-  → Whisper STT → openclaw CLI → agent response
-  → WebSocket broadcast → office animation + TTS playback
+
+Direct chat:
+
+```text
+Direct chat UI → POST /api/chat/direct → openclaw agent CLI
+  → saved chat history → WebSocket response → Activity Log + Office + optional TTS
+```
+
+Outside OpenClaw activity:
+
+```text
+OpenClaw session JSONL changes → session-monitor.js
+  → normalized agent events → WebSocket → Activity Log + Office + speech
+```
+
+Companion import:
+
+```text
+Codex pet folder/zip → server/companions.js → registry/settings
+  → office renderer loads spritesheet → stable animation rows/frames
 ```
 
 ## Environment Variables
@@ -81,148 +262,127 @@ See `.env.example` for the full template.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3000` | Server port |
-| `DEMO_MODE` | `true` | `true` = no gateway needed. `false` = connects to OpenClaw gateway |
+| `DEMO_MODE` | `true` | `true` = no gateway needed; `false` = connect to OpenClaw gateway |
 | `GATEWAY_URL` | `ws://127.0.0.1:18789` | OpenClaw gateway WebSocket URL |
-| `GATEWAY_TOKEN` | — | Gateway auth token (required when `DEMO_MODE=false`) |
-| `OPENAI_API_KEY` | — | Enables Whisper STT + TTS voice features |
-| `WEATHER_LOCATION` | `Kingston,Ontario,Canada` | City,Region,Country for the weather widget (via wttr.in) |
+| `GATEWAY_TOKEN` | — | Gateway auth token, required when `DEMO_MODE=false` |
+| `OPENAI_API_KEY` | — | Enables OpenAI-backed STT/TTS paths if configured |
+| `WEATHER_LOCATION` | `Kingston,Ontario,Canada` | City/region/country for wttr.in weather |
+| `BASE_PATH` | — | Optional mount path, e.g. `/commandcenter` |
+| `OPENCLAW_BIN` | `openclaw` | Override path/name for the OpenClaw CLI |
+
+Additional voice/wake credentials are usually configured through the settings UI and stored in the app settings files rather than manually editing `.env`.
 
 ## Agent Configuration
 
 ### Agent config file
 
-Copy the example to your OpenClaw config directory:
+Copy the example to your OpenClaw config directory if you want the bundled example roster/config:
 
 ```bash
 cp config/openclaw.json.example ~/.openclaw/openclaw.json
 ```
 
-This defines 3 agents with cost-optimized models (kimi-k2.5 for the boss, minimax-m2.5 for sub-agents).
-
 ### System prompts
 
 | Agent | Prompt location |
 |-------|----------------|
-| Jansky (main) | `agents/main/SYSTEM.md` → copy to `~/.openclaw/workspace/SYSTEM.md` |
-| Orbit (claw-1) | `agents/claw-1/SYSTEM.md` (read from repo) |
-| Nova (claw-2) | `agents/claw-2/SYSTEM.md` (read from repo) |
+| Primary/main | `agents/main/SYSTEM.md` → copy/use as appropriate for your OpenClaw setup |
+| Orbit/example sub-agent | `agents/claw-1/SYSTEM.md` |
+| Nova/example sub-agent | `agents/claw-2/SYSTEM.md` |
 
-Sub-agent prompts emphasize speed: 1-3 sentences, no preamble, act-then-report, no markdown.
+Sub-agent prompts are intentionally short and speed-focused.
 
 ### Agent self-setup
 
-If your OpenClaw agent can read files, point it at `SETUP.md` — it contains step-by-step instructions the agent can follow to configure everything automatically.
+If your OpenClaw agent can read files, point it at `SETUP.md`. It contains step-by-step setup instructions the agent can follow.
+
+## Companion / Codex Pet Notes
+
+Codex imports expect a package containing a `pet.json` and spritesheet asset, usually `spritesheet.webp`.
+
+The renderer looks for common animation keys such as:
+
+- `idle`
+- `waiting`
+- `review`
+- `waving` / `wave`
+- `jumping` / `jump`
+- `failed` / `error`
+- `runningRight` / `running-right`
+- `runningLeft` / `running-left`
+- `walkRight`
+- `walkLeft`
+- `walkUp`
+- `walkDown`
+
+If a key is missing, Command Center falls back to the closest available row so pets do not break.
 
 ## Session Architecture & Cross-Channel Awareness
 
-The Command Center runs its own **session** (`agent:main:main`) separate from other channels like Telegram. Each channel has independent conversation context, but all channels **share the same memory**.
+The Command Center has its own UI/session path, but it can now reflect work happening outside the UI through `session-monitor.js`.
 
 This means:
-- **Short-term context** (recent messages) is per-channel — what you say on Telegram stays in the Telegram thread, what you say via voice stays in the Command Center thread
-- **Long-term memory** (distilled knowledge) is shared — if the agent learns something important on any channel, it remembers it everywhere
-- The `session-memory` hook automatically flushes important context to shared memory before compaction
 
-The agent is the same brain with separate short-term memory per channel, but unified long-term knowledge.
+- **Command Center voice/direct chat** still has its own immediate UI flow.
+- **Outside conversations/work** can appear in the Activity Log when OpenClaw session files update.
+- **Final assistant responses** from outside work can be spoken in Command Center.
+- **Long-term memory** remains shared by the underlying OpenClaw setup.
+
+The result: the office feels like a live status board for the agent system, not just a separate toy panel. Shocking. Useful, even.
 
 ## Cost Optimization
 
-Running 3 AI agents can get expensive. Here are copy-paste prompts and configs to keep costs down:
+Running multiple AI agents can get expensive. Suggested practices:
 
-### 1. Use cheap models (default config)
+### 1. Use cheaper models for simple sub-agents
 
-The included `config/openclaw.json.example` already uses cost-optimized models:
-- **kimi-k2.5** (Moonshot) for the boss — good reasoning, low cost
-- **minimax-m2.5** (OpenRouter) for sub-agents — fast, cheap
+For sub-agents that only need to execute simple tasks, use a fast/cheap model and reserve stronger models for the primary orchestrator.
 
-### 2. Even cheaper sub-agents
+### 2. Keep sub-agent prompts short
 
-For sub-agents that only need to execute simple tasks:
+Short prompts, short replies, and low/no reasoning for helper agents reduce cost and latency.
 
-```
-Switch claw-1 and claw-2 to openrouter/google/gemini-2.5-flash-lite. Keep main on kimi-k2.5.
-```
+### 3. Reset long sessions when needed
 
-### 3. Heartbeat cost optimization
+Reset or compact long-running sessions before switching task domains or after very large conversations.
 
-Copy-paste this prompt to your agent:
+### 4. Use the Activity Log as status, not transcript storage
 
-```
-Please configure my heartbeat settings for cost optimization:
+The Activity Log is for live visibility. Long-term continuity should live in memory/session files.
 
-1. Set heartbeat interval to every 60 minutes
-2. Set heartbeat model to openrouter/google/gemini-2.5-flash-lite (the cheapest available)
-3. Set heartbeat target to "last"
-
-This keeps my cache warm while using the cheapest possible model for heartbeats.
-
-Please confirm the changes and show me the updated heartbeat configuration.
-```
-
-### 4. Session management (cost control)
-
-Copy-paste this prompt to your agent:
-
-```
-Please add this session management rule to my system prompt:
-
-## Session Management (Cost Control)
-
-You operate in sessions that accumulate context over time.
-
-When to reset:
-- After 30+ exchanges (context window > 100K tokens)
-- After 30+ minutes of continuous conversation
-- Before switching to a different task domain
-- When you notice you've forgotten early context
-
-How to reset: /reset
-
-Best practice: At reset, output a 2-3 sentence summary of what you learned.
-This preserves knowledge while clearing the context weight.
-
-Confirm the changes and show me the updated system prompt.
-```
-
-### 5. Memory flush before compaction
-
-Copy-paste this prompt to your agent:
-
-```
-Please enable memory flush before compaction with a soft threshold of 4000 tokens.
-This prevents important context from being lost when sessions get compacted.
-
-Confirm the changes are applied.
-```
-
-## Raspberry Pi Deployment
+## Raspberry Pi / Kiosk Deployment
 
 ### Deploy from local machine
 
 ```bash
-rsync -avz ./ jansky@<PI_IP>:/home/jansky/openclaw-command-center/ \
-  --exclude node_modules --exclude .env --exclude .git
-ssh jansky@<PI_IP> 'cd /home/jansky/openclaw-command-center && npm install'
+rsync -avz ./ pi@<PI_IP>:/home/pi/CommandCenter/ \
+  --exclude node_modules --exclude .env --exclude .git --exclude data
+ssh pi@<PI_IP> 'cd /home/pi/CommandCenter && npm install'
 ```
 
-### Generate HTTPS certs (required for Pi kiosk)
+### Generate HTTPS certs if needed
 
 ```bash
-ssh jansky@<PI_IP>
-cd /home/jansky/openclaw-command-center
-openssl req -x509 -newkey rsa:2048 -keyout server/key.pem -out server/cert.pem -days 365 -nodes -subj '/CN=localhost'
+cd /home/pi/CommandCenter
+openssl req -x509 -newkey rsa:2048 \
+  -keyout server/key.pem \
+  -out server/cert.pem \
+  -days 365 -nodes \
+  -subj '/CN=localhost'
 ```
 
-### Start / restart on Pi
+### Start / restart
 
 ```bash
-ssh jansky@<PI_IP> 'fuser -k 3000/tcp; sleep 1; cd /home/jansky/openclaw-command-center && nohup node server/index.js &>/tmp/openclaw.log &'
+cd /home/pi/CommandCenter
+npm start
 ```
 
-Or use the included `start.sh` which also sets audio volume and launches Chromium in kiosk mode.
+Or use `start.sh` for kiosk-style launches where applicable.
 
-### Audio on Pi
+### Audio notes
 
-The Pi has no system-level master mixer for USB audio. Volume boost is handled via Web Audio API GainNode (2x) in the browser. `start.sh` also runs `amixer` to set hardware volume to 100%.
+Browser playback is handled through Web Audio / normal browser audio output. On kiosk hardware, make sure the OS output device and volume are set before launching Chromium.
 
 ## Troubleshooting
 
@@ -235,25 +395,59 @@ npm start
 
 ### Gateway connection keeps dropping
 
-Check that your connect frame uses RPC v3 format (`type: "req"`, `method: "connect"`). See `server/openclaw-bridge.js` for the correct handshake.
+Check:
+
+- `DEMO_MODE=false`
+- `GATEWAY_URL`
+- `GATEWAY_TOKEN`
+- gateway reachable from this machine
+- RPC v3 handshake support in `server/openclaw-bridge.js`
+
+### Outside responses do not show or speak
+
+Restart Command Center after pulling updates. The outside-response fix lives in server-side `session-monitor.js`, so frontend refresh alone is not enough.
 
 ### Voice not working
 
-- Check that `OPENAI_API_KEY` is set in `.env`
-- The server logs `Voice: ENABLED` or `Voice: DISABLED` on startup
+- Check browser mic permissions.
+- Check server logs for voice route errors.
+- Configure provider settings in the Settings modal.
+- For ElevenLabs, verify API key and voice ID.
+- For Fish Audio, verify the AIChat base URL, session cookie, format, and voice/reference ID.
 
-### `openclaw: command not found`
+### Wake mode not detecting
 
-The binary is at `~/.local/bin/openclaw`. The server sets PATH explicitly, but if running manually, add it to your PATH:
+- Verify mic permissions.
+- Check wake settings.
+- For custom wake words, confirm `.ppn` files were uploaded and assigned to the correct agent.
+- Try a built-in Porcupine wake word to isolate custom keyword issues.
 
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
+### Codex pet import fails
 
-### Sub-agents responding slowly
+- Confirm the package includes `pet.json`.
+- Confirm the spritesheet path referenced by the pet metadata exists.
+- Try importing from an extracted folder first, then zip once confirmed.
 
-Sub-agents should use `--thinking off` (set in `server/index.js`). Their system prompts also instruct them to keep replies to 1-3 sentences.
+### Codex pet running animation flickers
+
+This build includes the stable walking-row fix. If flicker returns:
+
+- hard refresh the browser
+- confirm `app.js` and `office.js` cache-busted versions are current
+- inspect the pet's running/walking rows and `frameCounts`
 
 ### Weather widget shows wrong location
 
-Set `WEATHER_LOCATION` in `.env` to your city (format: `City,Region,Country`).
+Set `WEATHER_LOCATION` in `.env` to your city, for example:
+
+```env
+WEATHER_LOCATION=Washington,DC,USA
+```
+
+## Repository
+
+Current project repo:
+
+```text
+https://github.com/EpicIsTheOne/CommandCenter
+```
