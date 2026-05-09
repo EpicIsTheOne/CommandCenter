@@ -213,11 +213,11 @@ The actual roster is loaded from the project/OpenClaw agent configuration, so yo
 
 | File | Purpose |
 |------|---------|
-| `js/app.js` | Browser boot, WebSocket client, event routing, settings UI, voice/wake/direct-chat glue |
+| `js/app.js` | Browser boot, WebSocket client, event routing, settings UI, Fish playback mode controls, voice/wake/direct-chat glue |
 | `js/office.js` | Canvas office renderer: agents, furniture, wandering, huddles, Codex pets, health/weather widgets, bubbles, sounds |
 | `js/companions.js` | Companion preview/render helper logic for settings UI |
 | `js/direct-chat.js` | Direct chat UI, file/link library UI, chat event handling |
-| `js/voice.js` | Client recording/playback, TTS playback, audio controls |
+| `js/voice.js` | Client recording/playback, TTS playback, audio controls, playback mode reporting |
 | `js/wake.js` | Wake mode browser-side recording/detection flow |
 | `js/mascot.js` | Mascot canvas animation and emotion states |
 | `js/terminal.js` | Activity Log renderer |
@@ -437,6 +437,21 @@ This build includes the stable walking-row fix. If flicker returns:
 - inspect the pet's running/walking rows and `frameCounts`
 
 ### Weather widget shows wrong location
+
+Set `WEATHER_LOCATION` in `.env` to your city, for example:
+
+```env
+WEATHER_LOCATION=Washington,DC,USA
+```
+
+## Repository
+
+Current project repo:
+
+```text
+https://github.com/EpicIsTheOne/CommandCenter
+```
+n
 
 Set `WEATHER_LOCATION` in `.env` to your city, for example:
 

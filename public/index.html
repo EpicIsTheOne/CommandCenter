@@ -105,6 +105,19 @@
             <option value="opus">Opus</option>
             <option value="pcm">PCM</option>
           </select>
+          <div style="height:10px"></div>
+          <label for="fish-playback-mode">Fish playback mode</label>
+          <select id="fish-playback-mode">
+            <option value="auto">Auto</option>
+            <option value="stream">Streaming</option>
+            <option value="full">Full audio</option>
+          </select>
+          <div class="setting-hint">Auto waits for full audio on shorter replies and switches to streaming for longer ones.</div>
+          <div class="setting-row between" style="margin-top:10px;">
+            <label for="fish-auto-stream-min-chars">Auto stream threshold</label>
+            <span id="fish-auto-stream-min-chars-value" class="setting-hint">260 chars</span>
+          </div>
+          <input id="fish-auto-stream-min-chars" type="range" min="80" max="1200" step="10" value="260">
           <label class="setting-inline-check"><input id="fish-include-narration" type="checkbox"> Include asterisk narration in spoken audio</label>
         </div>
 
@@ -190,6 +203,6 @@
 
   <script src="vendor/picovoice/web-voice-processor.js"></script>
   <script src="vendor/picovoice/porcupine-web.js"></script>
-  <script type="module" src="js/app.js?v=20260509ae"></script>
+  <script type="module" src="js/app.js?v=20260509af"></script>
 </body>
 </html>

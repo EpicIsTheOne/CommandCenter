@@ -1008,6 +1008,12 @@ function populateSettingsForm(voiceSettings = {}, wakeSettings = {}) {
   fishSessionCookie.value = '';
   fishCookieHint.textContent = voiceSettings.hasFishSessionCookie ? `Saved AIChat session: ${voiceSettings.fishSessionCookieMasked}` : 'No saved AIChat session cookie yet. Paste aichat_session or full cookie.';
   fishFormat.value = voiceSettings.fishFormat || 'mp3';
+  if (fishPlaybackMode) fishPlaybackMode.value = voiceSettings.fishPlaybackMode || 'auto';
+  if (fishAutoStreamMinChars) fishAutoStreamMinChars.value = Number(voiceSettings.fishAutoStreamMinChars || 260);
+  if (fishAutoStreamMinCharsValue) fishAutoStreamMinCharsValue.textContent = `${Number(voiceSettings.fishAutoStreamMinChars || 260)} chars`;
+  if (fishAutoStreamMinChars) fishAutoStreamMinChars.oninput = () => {
+    if (fishAutoStreamMinCharsValue) fishAutoStreamMinCharsValue.textContent = `${fishAutoStreamMinChars.value} chars`;
+  };
   fishIncludeNarration.checked = voiceSettings.fishIncludeAsteriskNarration === true;
   keyInput.value = '';
   keyHint.textContent = voiceSettings.hasApiKey ? `Saved key: ${voiceSettings.apiKeyMasked}` : 'No saved ElevenLabs key yet.';
@@ -1233,7 +1239,7 @@ async function saveSettings() {
     await fetchJson(`${BASE}/api/settings/voice`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider, elevenlabsApiKey: apiKey, defaultVoiceId, fishAudioApiBase, fishVoiceId, fishSessionCookie, fishFormat, fishIncludeAsteriskNarration, agentVoices, elevenlabsAgentVoices, fishAgentVoices }),
+      body: JSON.stringify({ provider, elevenlabsApiKey: apiKey, defaultVoiceId, fishAudioApiBase, fishVoiceId, fishSessionCookie, fishFormat, fishPlaybackMode, fishAutoStreamMinChars, fishIncludeAsteriskNarration, agentVoices, elevenlabsAgentVoices, fishAgentVoices }),
     });
 
     await fetchJson(`${BASE}/api/settings/companions`, {

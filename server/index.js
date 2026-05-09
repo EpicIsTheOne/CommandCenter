@@ -404,6 +404,8 @@ app.get(`${basePath}/api/settings/voice`, async (req, res) => {
       fishSessionCookieMasked: maskSessionCookie(settings.fishSessionCookie),
       fishFormat: settings.fishFormat,
       fishIncludeAsteriskNarration: settings.fishIncludeAsteriskNarration === true,
+      fishPlaybackMode: settings.fishPlaybackMode || 'auto',
+      fishAutoStreamMinChars: settings.fishAutoStreamMinChars || 260,
       agentVoices: settings.agentVoices || {},
       elevenlabsAgentVoices: settings.elevenlabsAgentVoices || {},
       fishAgentVoices: settings.fishAgentVoices || {},
@@ -658,6 +660,8 @@ app.post(`${basePath}/api/settings/voice`, async (req, res) => {
       fishSessionCookie: body.fishSessionCookie ? String(body.fishSessionCookie).trim() : existing.fishSessionCookie,
       fishFormat: String(body.fishFormat || existing.fishFormat || 'mp3').trim(),
       fishIncludeAsteriskNarration: body.fishIncludeAsteriskNarration === true,
+      fishPlaybackMode: String(body.fishPlaybackMode || existing.fishPlaybackMode || 'auto').trim(),
+      fishAutoStreamMinChars: body.fishAutoStreamMinChars ?? existing.fishAutoStreamMinChars ?? 260,
       elevenlabsAgentVoices: body.elevenlabsAgentVoices || existing.elevenlabsAgentVoices || {},
       fishAgentVoices: body.fishAgentVoices || existing.fishAgentVoices || {},
       agentVoices: String(body.provider || existing.provider || '').trim() === 'fish'
@@ -678,6 +682,8 @@ app.post(`${basePath}/api/settings/voice`, async (req, res) => {
         fishSessionCookieMasked: maskSessionCookie(saved.fishSessionCookie),
         fishFormat: saved.fishFormat,
         fishIncludeAsteriskNarration: saved.fishIncludeAsteriskNarration === true,
+        fishPlaybackMode: saved.fishPlaybackMode || 'auto',
+        fishAutoStreamMinChars: saved.fishAutoStreamMinChars || 260,
         agentVoices: saved.agentVoices,
         elevenlabsAgentVoices: saved.elevenlabsAgentVoices || {},
         fishAgentVoices: saved.fishAgentVoices || {},
@@ -1166,6 +1172,7 @@ app.post(`${basePath}/api/voice/speak`, async (req, res) => {
 
     res.set('Content-Type', audio.contentType);
     res.set('Content-Length', audio.buffer.length);
+    res.set('X-TTS-Mode', audio.mode || 'full');
     res.send(audio.buffer);
   } catch (err) {
     console.error('[voice] TTS error:', err.message);
