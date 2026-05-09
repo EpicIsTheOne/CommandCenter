@@ -1,6 +1,6 @@
 # OpenClaw Command Center
 
-![OpenClaw Command Center](public/openclaw_command_center.png)
+![OpenClaw Command Center](public/docs/command-center-preview.png)
 
 A web-based AI command center with a living pixel-art office, real-time OpenClaw agent activity, voice input/output, companion avatars, wake mode, direct chat, and system monitoring. It was originally built for Raspberry Pi 5 + 7" touchscreen kiosk use, but runs anywhere Node.js can run.
 
