@@ -1906,6 +1906,10 @@ export { broadcast, wss };
 const bridge = new OpenClawBridge();
 const stopSessionMonitor = startSessionMonitor({ broadcast, roster, emitResponses: true });
 
+app.get(`${basePath}/api/session-monitor/debug`, (req, res) => {
+  res.json({ ok: true, agents: typeof stopSessionMonitor.getDebugState === 'function' ? stopSessionMonitor.getDebugState() : [] });
+});
+
 bridge.on('connected', (info) => {
   console.log(`[bridge] Connected (${info.mode} mode)`);
   broadcast({ type: 'bridge:connected', data: info });
