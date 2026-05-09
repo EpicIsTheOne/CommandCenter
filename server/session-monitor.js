@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 const HOME = process.env.HOME || '/root';
@@ -11,14 +11,34 @@ function sessionIndexPath(agentId) {
   return join(HOME, '.openclaw', 'agents', agentId, 'sessions', 'sessions.json');
 }
 
+function newestSessionEntries(index, limit = 8) {
+  if (!index || typeof index !== 'object') return [];
+  const seen = new Set();
+  return Object.values(index)
+    .filter((value) => value?.sessionFile)
+    .sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))
+    .filter((value) => {
+      const file = String(value.sessionFile || '');
+      if (!file || seen.has(file)) return false;
+      seen.add(file);
+      return true;
+    })
+    .slice(0, Math.max(1, Number(limit) || 8));
+}
+
 function newestSessionEntry(index) {
-  if (!index || typeof index !== 'object') return null;
-  let best = null;
-  for (const value of Object.values(index)) {
-    if (!value?.sessionFile) continue;
-    if (!best || Number(value.updatedAt || 0) > Number(best.updatedAt || 0)) best = value;
-  }
-  return best;
+  return newestSessionEntries(index, 1)[0] || null;
+}
+
+function existingAgentIds(roster) {
+  const ids = new Set((roster?.agents || []).map((agent) => String(agent.id || '').trim()).filter(Boolean));
+  try {
+    const agentsDir = join(HOME, '.openclaw', 'agents');
+    for (const entry of readdirSync(agentsDir, { withFileTypes: true })) {
+      if (entry.isDirectory()) ids.add(entry.name);
+    }
+  } catch {}
+  return Array.from(ids);
 }
 
 function summarizeAssistantText(message) {
@@ -109,18 +129,13 @@ export function startSessionMonitor({ broadcast, roster, intervalMs = 1000, emit
     }
   }
 
-  function scanAgent(agentId) {
-    const indexPath = sessionIndexPath(agentId);
-    if (!existsSync(indexPath)) return;
+  function scanSessionFile(agentId, sessionFile) {
+    if (!sessionFile || !existsSync(sessionFile)) return;
 
-    const index = safeJsonParse(readFileSync(indexPath, 'utf8'));
-    const session = newestSessionEntry(index);
-    if (!session?.sessionFile || !existsSync(session.sessionFile)) return;
-
-    const size = statSync(session.sessionFile).size;
-    const prior = fileState.get(session.sessionFile);
+    const size = statSync(sessionFile).size;
+    const prior = fileState.get(sessionFile);
     if (!prior) {
-      fileState.set(session.sessionFile, { offset: size, agentId });
+      fileState.set(sessionFile, { offset: size, agentId });
       return;
     }
 
@@ -130,7 +145,7 @@ export function startSessionMonitor({ broadcast, roster, intervalMs = 1000, emit
     }
     if (size === prior.offset) return;
 
-    const chunk = readFileSync(session.sessionFile).subarray(prior.offset).toString('utf8');
+    const chunk = readFileSync(sessionFile).subarray(prior.offset).toString('utf8');
     prior.offset = size;
     prior.agentId = agentId;
 
@@ -142,9 +157,19 @@ export function startSessionMonitor({ broadcast, roster, intervalMs = 1000, emit
     }
   }
 
+  function scanAgent(agentId) {
+    const indexPath = sessionIndexPath(agentId);
+    if (!existsSync(indexPath)) return;
+
+    const index = safeJsonParse(readFileSync(indexPath, 'utf8'));
+    for (const session of newestSessionEntries(index, 12)) {
+      scanSessionFile(agentId, session.sessionFile);
+    }
+  }
+
   const timer = setInterval(() => {
-    for (const agent of roster?.agents || []) {
-      try { scanAgent(agent.id); } catch {}
+    for (const agentId of existingAgentIds(roster)) {
+      try { scanAgent(agentId); } catch {}
     }
   }, intervalMs);
 
