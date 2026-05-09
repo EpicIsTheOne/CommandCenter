@@ -5,15 +5,17 @@ import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, extname, basename } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { execFile, exec } from 'node:child_process';
 import os from 'node:os';
 import multer from 'multer';
 import config from './config.js';
 import OpenClawBridge from './openclaw-bridge.js';
-import { transcribe, speak, listElevenLabsVoices } from './voice.js';
-import { loadAgentRoster } from './agents.js';
-import { loadVoiceSettings, saveVoiceSettings, maskApiKey } from './settings.js';
+import { transcribe, speak, listElevenLabsVoices, searchFishAudioVoices, previewFishAudioVoice, resolveAgentVoice } from './voice.js';
+import { loadAgentRoster, searchAgents } from './agents.js';
+import { loadVoiceSettings, saveVoiceSettings, maskApiKey, maskSessionCookie } from './settings.js';
+import { ensureCompanionRegistry, importCodexPetPackageFromDir, loadCompanionRegistry, loadCompanionSettings, resolveAgentVisual, saveCompanionSettings } from './companions.js';
 import { loadWakeSettings, saveWakeSettings, maskAccessKey } from './wake-settings.js';
 import { transcribeWakeAudio, warmWakeTranscriber } from './wake-transcriber.js';
 import { detectWakeKeyword, warmWakeKeywordDetector } from './wake-keyword-detector.js';
@@ -22,6 +24,23 @@ import { loadGeminiRuntimeConfig } from './gemini-config.js';
 import { createLiveTask, getLiveTask, listLiveTasks, looksComplexRequest, runLiveTask } from './live-tasks.js';
 import { createCallSession, endCallSession, getCallSession, listCallSessions, updateCallSession } from './call-session-store.js';
 import { GeminiLiveSession } from './gemini-live.js';
+import { requireApiAuth } from './api-auth.js';
+import { runApiChatTurn } from './api-chat-runner.js';
+import { appendApiSessionMessage, createApiSession, getApiSession, getApiSessionMeta, listApiSessions, searchApiSessions } from './api-session-store.js';
+
+function apiAttachmentPayload(files = []) {
+  return files.map((file) => ({
+    id: String(file.id || ''),
+    kind: file.kind === 'link' ? 'link' : 'file',
+    name: String(file.name || file.originalName || 'file'),
+    originalName: String(file.originalName || file.name || 'file'),
+    mimeType: String(file.mimeType || 'application/octet-stream'),
+    sourceUrl: String(file.sourceUrl || ''),
+    downloadUrl: String(file.downloadUrl || ''),
+    path: String(file.path || ''),
+    notes: String(file.notes || ''),
+  }));
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -44,6 +63,8 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 
 const chatLibraryDir = join(__dirname, '..', 'data', 'chat-library');
 const chatFilesDir = join(chatLibraryDir, 'files');
 const chatManifestPath = join(chatLibraryDir, 'manifest.json');
+const chatHistoryPath = join(chatLibraryDir, 'history.json');
+const MAX_CHAT_HISTORY_MESSAGES = 120;
 
 function sanitizeName(name = '') {
   return String(name || 'file')
@@ -57,6 +78,9 @@ async function ensureChatLibrary() {
   await fsp.mkdir(chatFilesDir, { recursive: true });
   if (!existsSync(chatManifestPath)) {
     await fsp.writeFile(chatManifestPath, JSON.stringify({ items: [] }, null, 2));
+  }
+  if (!existsSync(chatHistoryPath)) {
+    await fsp.writeFile(chatHistoryPath, JSON.stringify({ agents: {} }, null, 2));
   }
 }
 
@@ -74,6 +98,77 @@ async function readChatManifest() {
 async function writeChatManifest(manifest) {
   await ensureChatLibrary();
   await fsp.writeFile(chatManifestPath, JSON.stringify({ items: manifest.items || [] }, null, 2));
+}
+
+async function readChatHistoryStore() {
+  await ensureChatLibrary();
+  try {
+    const raw = await fsp.readFile(chatHistoryPath, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && parsed.agents && typeof parsed.agents === 'object'
+      ? parsed
+      : { agents: {} };
+  } catch {
+    return { agents: {} };
+  }
+}
+
+async function writeChatHistoryStore(store) {
+  await ensureChatLibrary();
+  await fsp.writeFile(chatHistoryPath, JSON.stringify({ agents: store.agents || {} }, null, 2));
+}
+
+function sanitizeChatMessage(message = {}) {
+  return {
+    id: String(message.id || randomUUID()),
+    role: message.role === 'user' ? 'user' : 'agent',
+    kind: String(message.kind || 'text'),
+    text: String(message.text || ''),
+    timestamp: Number(message.timestamp || Date.now()),
+    files: Array.isArray(message.files)
+      ? message.files.map((file) => ({
+          id: String(file.id || ''),
+          name: String(file.name || file.originalName || 'file'),
+          originalName: String(file.originalName || file.name || 'file'),
+          mimeType: String(file.mimeType || 'application/octet-stream'),
+          kind: file.kind === 'link' ? 'link' : 'file',
+          sourceUrl: String(file.sourceUrl || ''),
+          downloadUrl: String(file.downloadUrl || ''),
+        }))
+      : [],
+  };
+}
+
+async function getChatHistory(agentId) {
+  const store = await readChatHistoryStore();
+  const history = Array.isArray(store.agents?.[agentId]) ? store.agents[agentId] : [];
+  return history.map(sanitizeChatMessage).slice(-MAX_CHAT_HISTORY_MESSAGES);
+}
+
+async function appendChatHistory(agentId, message) {
+  const store = await readChatHistoryStore();
+  if (!Array.isArray(store.agents[agentId])) store.agents[agentId] = [];
+  store.agents[agentId].push(sanitizeChatMessage(message));
+  if (store.agents[agentId].length > MAX_CHAT_HISTORY_MESSAGES) {
+    store.agents[agentId] = store.agents[agentId].slice(-MAX_CHAT_HISTORY_MESSAGES);
+  }
+  await writeChatHistoryStore(store);
+  return store.agents[agentId];
+}
+
+function buildConversationContext(history = []) {
+  if (!Array.isArray(history) || !history.length) return '';
+  const lines = history
+    .slice(-MAX_CHAT_HISTORY_MESSAGES)
+    .map((entry) => {
+      const role = entry.role === 'user' ? 'User' : 'Assistant';
+      const text = String(entry.text || '').trim();
+      const attachments = Array.isArray(entry.files) && entry.files.length
+        ? ` [files: ${entry.files.map((file) => file.name || file.originalName || 'file').join(', ')}]`
+        : '';
+      return `${role}: ${text || '(no text)'}${attachments}`;
+    });
+  return `Previous direct chat conversation with this user:\n${lines.join('\n')}\n\nReply naturally, using the conversation above as context.`;
 }
 
 function toChatFileRecord(item) {
@@ -112,12 +207,15 @@ function buildAttachmentContext(files = []) {
 
 app.use(express.json());
 app.use(basePath || '/', express.static(join(__dirname, '..', 'public')));
+app.use(`${basePath}/api/v1`, requireApiAuth);
+await ensureCompanionRegistry();
 
 const liveGeminiSessions = new Map();
 const liveGeminiWatchdogs = new Map();
 app.use(`${basePath}/wakewords`, express.static(join(__dirname, '..', 'public', 'wakewords')));
 if (basePath) {
   app.get(basePath, (req, res) => res.redirect(basePath + '/'));
+  app.get(`${basePath}/docs`, (req, res) => res.redirect(`${basePath}/docs/`));
 }
 
 function clearLiveWatchdog(sessionId) {
@@ -166,11 +264,129 @@ app.get(`${basePath}/api/status`, (req, res) => {
   });
 });
 
-app.get(`${basePath}/api/agents`, (req, res) => {
+app.get(`${basePath}/api/agents`, async (req, res) => {
+  const companionSettings = await loadCompanionSettings();
+  const companionRegistry = await loadCompanionRegistry(basePath);
   res.json({
-    agents: roster.agents,
+    agents: roster.agents.map((agent) => ({
+      ...agent,
+      visual: resolveAgentVisual(agent.id, companionSettings, companionRegistry),
+    })),
     primaryAgentId: roster.primaryAgentId,
   });
+});
+
+app.get(`${basePath}/api/v1/agents`, async (req, res) => {
+  const companionSettings = await loadCompanionSettings();
+  const companionRegistry = await loadCompanionRegistry(basePath);
+  res.json({
+    ok: true,
+    agents: roster.agents.map((agent) => ({
+      ...agent,
+      visual: resolveAgentVisual(agent.id, companionSettings, companionRegistry),
+    })),
+    primaryAgentId: roster.primaryAgentId,
+  });
+});
+
+app.get(`${basePath}/api/v1/agents/search`, (req, res) => {
+  const q = String(req.query?.q || '').trim();
+  const limit = Number(req.query?.limit || 10);
+  res.json({
+    ok: true,
+    query: q,
+    results: searchAgents(q, roster, limit),
+  });
+});
+
+app.get(`${basePath}/api/v1/files`, async (req, res) => {
+  try {
+    const manifest = await readChatManifest();
+    const items = [...manifest.items].sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0)).map(toChatFileRecord);
+    res.json({ ok: true, items });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/v1/files/upload`, upload.array('files', 10), async (req, res) => {
+  try {
+    await ensureChatLibrary();
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (!files.length) return res.status(400).json({ ok: false, error: 'No files uploaded', code: 'BAD_REQUEST' });
+
+    const manifest = await readChatManifest();
+    const created = [];
+
+    for (const file of files) {
+      const id = randomUUID();
+      const ext = extname(file.originalname || '') || '';
+      const safeOriginal = sanitizeName(file.originalname || `upload${ext}`);
+      const savedName = `${id}${ext}`;
+      const savedPath = join(chatFilesDir, savedName);
+      await fsp.writeFile(savedPath, file.buffer);
+      const item = {
+        id,
+        kind: 'file',
+        name: safeOriginal,
+        originalName: file.originalname || safeOriginal,
+        mimeType: file.mimetype || 'application/octet-stream',
+        size: file.size || file.buffer?.length || 0,
+        createdAt: Date.now(),
+        path: savedPath,
+        ext,
+      };
+      manifest.items.push(item);
+      created.push(toChatFileRecord(item));
+    }
+
+    await writeChatManifest(manifest);
+    res.json({ ok: true, items: created });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/v1/files/link`, async (req, res) => {
+  try {
+    const sourceUrl = String(req.body?.url || '').trim();
+    const name = String(req.body?.name || '').trim() || sourceUrl;
+    const notes = String(req.body?.notes || '').trim();
+    if (!sourceUrl) return res.status(400).json({ ok: false, error: 'url is required', code: 'BAD_REQUEST' });
+
+    const manifest = await readChatManifest();
+    const item = {
+      id: randomUUID(),
+      kind: 'link',
+      name: name.slice(0, 180),
+      originalName: name.slice(0, 180),
+      mimeType: 'text/uri-list',
+      size: 0,
+      createdAt: Date.now(),
+      sourceUrl,
+      notes,
+      path: '',
+      ext: '',
+    };
+    manifest.items.push(item);
+    await writeChatManifest(manifest);
+    res.json({ ok: true, item: toChatFileRecord(item) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get(`${basePath}/api/v1/files/:id/download`, async (req, res) => {
+  try {
+    const manifest = await readChatManifest();
+    const item = manifest.items.find((entry) => String(entry.id) === String(req.params.id));
+    if (!item) return res.status(404).json({ ok: false, error: 'File not found', code: 'FILE_NOT_FOUND' });
+    if (item.kind === 'link') return res.redirect(item.sourceUrl);
+    if (!item.path || !existsSync(item.path)) return res.status(404).json({ ok: false, error: 'Stored file missing', code: 'FILE_NOT_FOUND' });
+    res.download(item.path, item.originalName || item.name || 'download');
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
 });
 
 app.get(`${basePath}/api/settings/voice`, async (req, res) => {
@@ -178,12 +394,255 @@ app.get(`${basePath}/api/settings/voice`, async (req, res) => {
   res.json({
     ok: true,
     settings: {
+      provider: settings.provider || 'elevenlabs',
       hasApiKey: !!settings.elevenlabsApiKey,
       apiKeyMasked: maskApiKey(settings.elevenlabsApiKey),
       defaultVoiceId: settings.defaultVoiceId,
+      fishAudioApiBase: settings.fishAudioApiBase,
+      fishVoiceId: settings.fishVoiceId,
+      hasFishSessionCookie: !!settings.fishSessionCookie,
+      fishSessionCookieMasked: maskSessionCookie(settings.fishSessionCookie),
+      fishFormat: settings.fishFormat,
+      fishIncludeAsteriskNarration: settings.fishIncludeAsteriskNarration === true,
       agentVoices: settings.agentVoices || {},
+      elevenlabsAgentVoices: settings.elevenlabsAgentVoices || {},
+      fishAgentVoices: settings.fishAgentVoices || {},
     },
   });
+});
+
+app.get(`${basePath}/api/settings/companions`, async (req, res) => {
+  const settings = await loadCompanionSettings();
+  const registry = await loadCompanionRegistry(basePath);
+  res.json({
+    ok: true,
+    settings,
+    items: registry,
+    resolved: Object.fromEntries(
+      roster.agents.map((agent) => [agent.id, resolveAgentVisual(agent.id, settings, registry)]),
+    ),
+  });
+});
+
+app.post(`${basePath}/api/settings/companions`, async (req, res) => {
+  try {
+    const existing = await loadCompanionSettings();
+    const registry = await loadCompanionRegistry(basePath);
+    const body = req.body || {};
+
+    if (body.agentVisuals && typeof body.agentVisuals === 'object' && !Array.isArray(body.agentVisuals)) {
+      const nextAgentVisuals = { ...(existing.agentVisuals || {}) };
+      for (const [agentIdRaw, config] of Object.entries(body.agentVisuals || {})) {
+        const agentId = String(agentIdRaw || '').trim();
+        const mode = String(config?.mode || 'default').trim().toLowerCase() === 'companion' ? 'companion' : 'default';
+        const companionId = String(config?.companionId || '').trim();
+        const scaleRaw = Number(config?.scale);
+        const scale = Number.isFinite(scaleRaw) ? Math.min(2, Math.max(0.45, scaleRaw)) : 1;
+        if (!agentId || !roster.agents.find((agent) => agent.id === agentId)) {
+          return res.status(400).json({ ok: false, error: `Unknown agent: ${agentId}`, code: 'UNKNOWN_AGENT' });
+        }
+        if (mode === 'companion' && !registry.find((item) => item.id === companionId)) {
+          return res.status(400).json({ ok: false, error: `Unknown companion package for ${agentId}`, code: 'UNKNOWN_COMPANION' });
+        }
+        nextAgentVisuals[agentId] = {
+          mode,
+          companionId: mode === 'companion' ? companionId : '',
+          scale,
+        };
+      }
+      const saved = await saveCompanionSettings({
+        ...existing,
+        agentVisuals: nextAgentVisuals,
+      });
+      return res.json({
+        ok: true,
+        settings: saved,
+        resolved: Object.fromEntries(
+          roster.agents.map((agent) => [agent.id, resolveAgentVisual(agent.id, saved, registry)]),
+        ),
+      });
+    }
+
+    const agentId = String(body.agentId || '').trim();
+    const mode = String(body.mode || 'default').trim().toLowerCase() === 'companion' ? 'companion' : 'default';
+    const companionId = String(body.companionId || '').trim();
+    const scaleRaw = Number(body.scale);
+    const scale = Number.isFinite(scaleRaw) ? Math.min(2, Math.max(0.45, scaleRaw)) : 1;
+    if (!agentId || !roster.agents.find((agent) => agent.id === agentId)) {
+      return res.status(400).json({ ok: false, error: 'Unknown agent', code: 'UNKNOWN_AGENT' });
+    }
+    if (mode === 'companion' && !registry.find((item) => item.id === companionId)) {
+      return res.status(400).json({ ok: false, error: 'Unknown companion package', code: 'UNKNOWN_COMPANION' });
+    }
+    const saved = await saveCompanionSettings({
+      ...existing,
+      agentVisuals: {
+        ...(existing.agentVisuals || {}),
+        [agentId]: {
+          mode,
+          companionId: mode === 'companion' ? companionId : '',
+          scale,
+        },
+      },
+    });
+    res.json({
+      ok: true,
+      settings: saved,
+      saved: saved.agentVisuals?.[agentId] || { mode: 'default', companionId: '' },
+      resolved: resolveAgentVisual(agentId, saved, registry),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get(`${basePath}/api/companions`, async (req, res) => {
+  const items = await loadCompanionRegistry(basePath);
+  res.json({ ok: true, items });
+});
+
+app.post(`${basePath}/api/companions/import`, async (req, res) => {
+  try {
+    const sourceDir = String(req.body?.sourceDir || '').trim();
+    const imported = await importCodexPetPackageFromDir(sourceDir, basePath);
+    const items = await loadCompanionRegistry(basePath);
+    res.json({ ok: true, item: imported.item, items });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message, code: 'IMPORT_FAILED' });
+  }
+});
+
+app.post(`${basePath}/api/companions/import-zip`, upload.single('package'), async (req, res) => {
+  try {
+    const file = req.file;
+    if (!file?.buffer?.length) {
+      return res.status(400).json({ ok: false, error: 'No zip package uploaded', code: 'BAD_REQUEST' });
+    }
+    const agentId = String(req.body?.agentId || '').trim();
+    const tempDir = await fsp.mkdtemp(join(os.tmpdir(), 'cc-pet-import-'));
+    const zipPath = join(tempDir, 'package.zip');
+    await fsp.writeFile(zipPath, file.buffer);
+    await new Promise((resolve, reject) => {
+      execFile('unzip', ['-o', zipPath, '-d', tempDir], (err) => err ? reject(err) : resolve());
+    });
+    const imported = await importCodexPetPackageFromDir(tempDir, basePath);
+    const items = await loadCompanionRegistry(basePath);
+    let assigned = null;
+    if (agentId && roster.agents.find((agent) => agent.id === agentId)) {
+      const existing = await loadCompanionSettings();
+      const saved = await saveCompanionSettings({
+        ...existing,
+        agentVisuals: {
+          ...(existing.agentVisuals || {}),
+          [agentId]: { mode: 'companion', companionId: imported.item.id, scale: 1 },
+        },
+      });
+      assigned = resolveAgentVisual(agentId, saved, items);
+    }
+    res.json({ ok: true, item: imported.item, items, assigned });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message, code: 'IMPORT_FAILED' });
+  }
+});
+
+app.get(`${basePath}/api/companions/imports/:slug/:file`, async (req, res) => {
+  const slug = basename(String(req.params.slug || ''));
+  const file = basename(String(req.params.file || ''));
+  const fullPath = join(__dirname, '..', 'data', 'companions', 'imports', slug, file);
+  if (!existsSync(fullPath)) return res.status(404).json({ ok: false, error: 'Imported companion asset not found', code: 'NOT_FOUND' });
+  res.sendFile(fullPath);
+});
+
+app.get(`${basePath}/api/companions/:id`, async (req, res) => {
+  const items = await loadCompanionRegistry(basePath);
+  const item = items.find((entry) => String(entry.id) === String(req.params.id));
+  if (!item) return res.status(404).json({ ok: false, error: 'Companion not found', code: 'COMPANION_NOT_FOUND' });
+  res.json({ ok: true, item });
+});
+
+
+app.get(`${basePath}/api/v1/voice`, async (req, res) => {
+  try {
+    const settings = await loadVoiceSettings();
+    const agent = String(req.query?.agent || '').trim();
+    const resolved = agent ? await resolveAgentVoice(settings, agent) : null;
+    res.json({
+      ok: true,
+      settings: {
+        provider: settings.provider || 'elevenlabs',
+        defaultVoiceId: settings.defaultVoiceId,
+        fishVoiceId: settings.fishVoiceId,
+        agentVoices: settings.agentVoices || {},
+        elevenlabsAgentVoices: settings.elevenlabsAgentVoices || {},
+        fishAgentVoices: settings.fishAgentVoices || {},
+      },
+      resolved: agent ? { agent, ...resolved } : null,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get(`${basePath}/api/v1/voice/options`, async (req, res) => {
+  try {
+    const settings = await loadVoiceSettings();
+    const provider = String(req.query?.provider || settings.provider || 'elevenlabs').trim().toLowerCase() === 'fish' ? 'fish' : 'elevenlabs';
+    if (provider === 'fish') {
+      const q = String(req.query?.q || '').trim();
+      if (!q) {
+        return res.status(400).json({ ok: false, error: 'q is required for fish voice search', code: 'BAD_REQUEST' });
+      }
+      const result = await searchFishAudioVoices(q, settings, {
+        limit: req.query?.limit || 8,
+        pageSize: req.query?.pageSize || 12,
+      });
+      return res.json({ ok: true, provider, query: q, items: result.items || [], bestMatch: result.bestMatch || null });
+    }
+
+    const voices = await listElevenLabsVoices(settings.elevenlabsApiKey);
+    return res.json({ ok: true, provider, items: voices });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/v1/voice`, async (req, res) => {
+  try {
+    const existing = await loadVoiceSettings();
+    const provider = String(req.body?.provider || existing.provider || 'elevenlabs').trim().toLowerCase() === 'fish' ? 'fish' : 'elevenlabs';
+    const elevenlabsAgentVoices = { ...(existing.elevenlabsAgentVoices || {}), ...(req.body?.elevenlabsAgentVoices || {}) };
+    const fishAgentVoices = { ...(existing.fishAgentVoices || {}), ...(req.body?.fishAgentVoices || {}) };
+    const agent = String(req.body?.agent || '').trim();
+    const voiceId = String(req.body?.voiceId || '').trim();
+    if (agent && voiceId) {
+      if (provider === 'fish') fishAgentVoices[agent] = voiceId;
+      else elevenlabsAgentVoices[agent] = voiceId;
+    }
+    const saved = await saveVoiceSettings({
+      ...existing,
+      provider,
+      defaultVoiceId: req.body?.defaultVoiceId !== undefined ? String(req.body.defaultVoiceId || '').trim() : existing.defaultVoiceId,
+      fishVoiceId: req.body?.fishVoiceId !== undefined ? String(req.body.fishVoiceId || '').trim() : existing.fishVoiceId,
+      elevenlabsAgentVoices,
+      fishAgentVoices,
+      agentVoices: provider === 'fish' ? fishAgentVoices : elevenlabsAgentVoices,
+    });
+    const resolved = agent ? await resolveAgentVoice(saved, agent) : null;
+    res.json({
+      ok: true,
+      settings: {
+        provider: saved.provider,
+        defaultVoiceId: saved.defaultVoiceId,
+        fishVoiceId: saved.fishVoiceId,
+        agentVoices: saved.agentVoices,
+        elevenlabsAgentVoices: saved.elevenlabsAgentVoices || {},
+        fishAgentVoices: saved.fishAgentVoices || {},
+      },
+      resolved: agent ? { agent, ...resolved } : null,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
 });
 
 app.post(`${basePath}/api/settings/voice`, async (req, res) => {
@@ -191,18 +650,37 @@ app.post(`${basePath}/api/settings/voice`, async (req, res) => {
     const existing = await loadVoiceSettings();
     const body = req.body || {};
     const next = {
+      provider: body.provider || existing.provider || 'elevenlabs',
       elevenlabsApiKey: body.elevenlabsApiKey ? String(body.elevenlabsApiKey).trim() : existing.elevenlabsApiKey,
       defaultVoiceId: String(body.defaultVoiceId || '').trim(),
-      agentVoices: body.agentVoices || {},
+      fishAudioApiBase: String(body.fishAudioApiBase || existing.fishAudioApiBase || 'https://techexplore.us/aichat').trim(),
+      fishVoiceId: String(body.fishVoiceId || '').trim(),
+      fishSessionCookie: body.fishSessionCookie ? String(body.fishSessionCookie).trim() : existing.fishSessionCookie,
+      fishFormat: String(body.fishFormat || existing.fishFormat || 'mp3').trim(),
+      fishIncludeAsteriskNarration: body.fishIncludeAsteriskNarration === true,
+      elevenlabsAgentVoices: body.elevenlabsAgentVoices || existing.elevenlabsAgentVoices || {},
+      fishAgentVoices: body.fishAgentVoices || existing.fishAgentVoices || {},
+      agentVoices: String(body.provider || existing.provider || '').trim() === 'fish'
+        ? (body.fishAgentVoices || existing.fishAgentVoices || {})
+        : (body.elevenlabsAgentVoices || existing.elevenlabsAgentVoices || {}),
     };
     const saved = await saveVoiceSettings(next);
     res.json({
       ok: true,
       settings: {
+        provider: saved.provider || 'elevenlabs',
         hasApiKey: !!saved.elevenlabsApiKey,
         apiKeyMasked: maskApiKey(saved.elevenlabsApiKey),
         defaultVoiceId: saved.defaultVoiceId,
+        fishAudioApiBase: saved.fishAudioApiBase,
+        fishVoiceId: saved.fishVoiceId,
+        hasFishSessionCookie: !!saved.fishSessionCookie,
+        fishSessionCookieMasked: maskSessionCookie(saved.fishSessionCookie),
+        fishFormat: saved.fishFormat,
+        fishIncludeAsteriskNarration: saved.fishIncludeAsteriskNarration === true,
         agentVoices: saved.agentVoices,
+        elevenlabsAgentVoices: saved.elevenlabsAgentVoices || {},
+        fishAgentVoices: saved.fishAgentVoices || {},
       },
     });
   } catch (err) {
@@ -219,6 +697,55 @@ app.post(`${basePath}/api/settings/voice/voices`, async (req, res) => {
     res.json({ ok: true, voices });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+
+
+app.post(`${basePath}/api/settings/voice/fish/preview`, async (req, res) => {
+  try {
+    const existing = await loadVoiceSettings();
+    const body = req.body || {};
+    const voiceId = String(body.voiceId || body.fishVoiceId || body.referenceId || '').trim();
+    if (!voiceId) return res.status(400).json({ error: 'No Fish voice ID provided' });
+    const settings = {
+      ...existing,
+      fishAudioApiBase: String(body.fishAudioApiBase || existing.fishAudioApiBase || 'https://techexplore.us/aichat').trim(),
+      fishSessionCookie: body.fishSessionCookie ? String(body.fishSessionCookie).trim() : existing.fishSessionCookie,
+      fishFormat: String(body.fishFormat || existing.fishFormat || 'mp3').trim(),
+      fishIncludeAsteriskNarration: body.fishIncludeAsteriskNarration === true,
+    };
+    const audio = await previewFishAudioVoice({
+      text: String(body.text || 'Hey, this is a Fish Audio voice preview from Command Center.'),
+      voiceId,
+      settings,
+    });
+    res.set('Content-Type', audio.contentType);
+    res.set('Content-Length', audio.buffer.length);
+    res.send(audio.buffer);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post(`${basePath}/api/settings/voice/fish/search`, async (req, res) => {
+  try {
+    const existing = await loadVoiceSettings();
+    const body = req.body || {};
+    const query = String(body.q || body.query || body.title || '').trim();
+    if (!query) return res.json({ query: '', items: [], bestMatch: null });
+    const settings = {
+      ...existing,
+      fishAudioApiBase: String(body.fishAudioApiBase || existing.fishAudioApiBase || 'https://techexplore.us/aichat').trim(),
+      fishSessionCookie: body.fishSessionCookie ? String(body.fishSessionCookie).trim() : existing.fishSessionCookie,
+    };
+    const result = await searchFishAudioVoices(query, settings, {
+      limit: body.limit || 8,
+      pageSize: body.pageSize || 12,
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message, items: [], bestMatch: null });
   }
 });
 
@@ -993,14 +1520,277 @@ app.get(`${basePath}/api/memory/search`, async (req, res) => {
   res.json({ ok: true, results: [], available: false, reason: 'memory-provider-unavailable-or-not-yet-wired' });
 });
 
+app.get(`${basePath}/api/v1/sessions`, async (req, res) => {
+  try {
+    const agent = String(req.query?.agent || '').trim();
+    const limit = Number(req.query?.limit || 20);
+    const sessions = await listApiSessions({ agent, limit });
+    res.json({ ok: true, sessions });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get(`${basePath}/api/v1/sessions/search`, async (req, res) => {
+  try {
+    const q = String(req.query?.q || '').trim();
+    if (!q) return res.status(400).json({ ok: false, error: 'Missing query', code: 'BAD_REQUEST' });
+    const agent = String(req.query?.agent || '').trim();
+    const limit = Number(req.query?.limit || 20);
+    const results = await searchApiSessions(q, { agent, limit });
+    res.json({ ok: true, query: q, results });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/v1/sessions`, async (req, res) => {
+  try {
+    const agent = String(req.body?.agent || '').trim();
+    const title = String(req.body?.title || '').trim();
+    const metadata = req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {};
+    if (!agent) return res.status(400).json({ ok: false, error: 'agent is required', code: 'BAD_REQUEST' });
+    const exists = roster.agents.some((item) => item.id === agent);
+    if (!exists) return res.status(404).json({ ok: false, error: 'Agent not found', code: 'AGENT_NOT_FOUND' });
+    const session = await createApiSession({ agent, title, metadata });
+    res.json({ ok: true, session: getApiSessionMeta(session) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get(`${basePath}/api/v1/sessions/:id`, async (req, res) => {
+  try {
+    const session = await getApiSession(String(req.params.id || ''));
+    if (!session) return res.status(404).json({ ok: false, error: 'Session not found', code: 'SESSION_NOT_FOUND' });
+    res.json({ ok: true, session: getApiSessionMeta(session) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get(`${basePath}/api/v1/sessions/:id/messages`, async (req, res) => {
+  try {
+    const session = await getApiSession(String(req.params.id || ''));
+    if (!session) return res.status(404).json({ ok: false, error: 'Session not found', code: 'SESSION_NOT_FOUND' });
+    const limit = Number(req.query?.limit || 0);
+    const messages = limit > 0 ? session.messages.slice(-limit) : session.messages;
+    res.json({ ok: true, sessionId: session.id, messages });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/v1/sessions/:id/messages`, async (req, res) => {
+  try {
+    const sessionId = String(req.params.id || '');
+    const text = String(req.body?.message || '').trim();
+    const fileIds = Array.isArray(req.body?.fileIds) ? req.body.fileIds : [];
+    if (!text) return res.status(400).json({ ok: false, error: 'message is required', code: 'MESSAGE_REQUIRED' });
+    let session = await getApiSession(sessionId);
+    if (!session) return res.status(404).json({ ok: false, error: 'Session not found', code: 'SESSION_NOT_FOUND' });
+
+    const attachedFiles = await resolveChatFiles(fileIds);
+    const attachmentPayload = apiAttachmentPayload(attachedFiles.map(toChatFileRecord));
+    const attachmentContext = buildAttachmentContext(attachedFiles);
+
+    const userAppend = await appendApiSessionMessage(session.id, { role: 'user', text, meta: { files: attachmentPayload } });
+    session = userAppend.session;
+
+    const result = await runApiChatTurn({ session, latestMessage: text, attachmentContext });
+    const assistantMeta = { files: [] };
+    let audioPayload = null;
+    if (req.body?.audio === true) {
+      const audio = await speak(result.text, session.agent);
+      audioPayload = {
+        contentType: audio.contentType,
+        base64: audio.buffer.toString('base64'),
+        provider: audio.provider || '',
+        voiceId: audio.voiceId || '',
+      };
+      assistantMeta.audio = {
+        contentType: audioPayload.contentType,
+        provider: audioPayload.provider,
+        voiceId: audioPayload.voiceId,
+      };
+    }
+    const assistantAppend = await appendApiSessionMessage(session.id, { role: 'assistant', text: result.text, meta: assistantMeta });
+
+    res.json({
+      ok: true,
+      sessionId: session.id,
+      agent: session.agent,
+      message: userAppend.message,
+      response: assistantAppend.message,
+      files: attachmentPayload,
+      audio: audioPayload,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/v1/sessions/:id/messages/stream`, async (req, res) => {
+  const sendEvent = (event, data) => {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  try {
+    const sessionId = String(req.params.id || '');
+    const text = String(req.body?.message || '').trim();
+    const fileIds = Array.isArray(req.body?.fileIds) ? req.body.fileIds : [];
+    if (!text) {
+      res.status(400).json({ ok: false, error: 'message is required', code: 'MESSAGE_REQUIRED' });
+      return;
+    }
+    let session = await getApiSession(sessionId);
+    if (!session) {
+      res.status(404).json({ ok: false, error: 'Session not found', code: 'SESSION_NOT_FOUND' });
+      return;
+    }
+
+    const attachedFiles = await resolveChatFiles(fileIds);
+    const attachmentPayload = apiAttachmentPayload(attachedFiles.map(toChatFileRecord));
+    const attachmentContext = buildAttachmentContext(attachedFiles);
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    const userAppend = await appendApiSessionMessage(session.id, { role: 'user', text, meta: { files: attachmentPayload } });
+    session = userAppend.session;
+    sendEvent('accepted', { sessionId: session.id, messageId: userAppend.message.id, agent: session.agent, files: attachmentPayload });
+
+    const result = await runApiChatTurn({
+      session,
+      latestMessage: text,
+      attachmentContext,
+      onEvent: (event) => sendEvent(event.type, event.data || {}),
+    });
+    const assistantMeta = { files: [] };
+    let audioEvent = null;
+    if (req.body?.audio === true) {
+      const audio = await speak(result.text, session.agent);
+      audioEvent = {
+        contentType: audio.contentType,
+        base64: audio.buffer.toString('base64'),
+        provider: audio.provider || '',
+        voiceId: audio.voiceId || '',
+      };
+      assistantMeta.audio = {
+        contentType: audioEvent.contentType,
+        provider: audioEvent.provider,
+        voiceId: audioEvent.voiceId,
+      };
+      sendEvent('audio', audioEvent);
+    }
+    const assistantAppend = await appendApiSessionMessage(session.id, { role: 'assistant', text: result.text, meta: assistantMeta });
+    sendEvent('done', { ok: true, sessionId: session.id, responseId: assistantAppend.message.id, audio: !!audioEvent });
+    res.end();
+  } catch (err) {
+    if (!res.headersSent) {
+      res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+      return;
+    }
+    sendEvent('error', { ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+    res.end();
+  }
+});
+
+app.post(`${basePath}/api/v1/chat`, async (req, res) => {
+  try {
+    const message = String(req.body?.message || '').trim();
+    const existingSessionId = String(req.body?.sessionId || '').trim();
+    const requestedAgent = String(req.body?.agent || '').trim();
+    const title = String(req.body?.title || '').trim();
+    const fileIds = Array.isArray(req.body?.fileIds) ? req.body.fileIds : [];
+    if (!message) return res.status(400).json({ ok: false, error: 'message is required', code: 'MESSAGE_REQUIRED' });
+
+    let session = null;
+    if (existingSessionId) {
+      session = await getApiSession(existingSessionId);
+      if (!session) return res.status(404).json({ ok: false, error: 'Session not found', code: 'SESSION_NOT_FOUND' });
+    } else {
+      if (!requestedAgent) return res.status(400).json({ ok: false, error: 'agent is required when sessionId is missing', code: 'BAD_REQUEST' });
+      const exists = roster.agents.some((item) => item.id === requestedAgent);
+      if (!exists) return res.status(404).json({ ok: false, error: 'Agent not found', code: 'AGENT_NOT_FOUND' });
+      session = await createApiSession({ agent: requestedAgent, title, metadata: req.body?.metadata || {} });
+    }
+
+    const attachedFiles = await resolveChatFiles(fileIds);
+    const attachmentPayload = apiAttachmentPayload(attachedFiles.map(toChatFileRecord));
+    const attachmentContext = buildAttachmentContext(attachedFiles);
+
+    const userAppend = await appendApiSessionMessage(session.id, { role: 'user', text: message, meta: { files: attachmentPayload } });
+    session = userAppend.session;
+    const result = await runApiChatTurn({ session, latestMessage: message, attachmentContext });
+    const assistantMeta = { files: [] };
+    let audioPayload = null;
+    if (req.body?.audio === true) {
+      const audio = await speak(result.text, session.agent);
+      audioPayload = {
+        contentType: audio.contentType,
+        base64: audio.buffer.toString('base64'),
+        provider: audio.provider || '',
+        voiceId: audio.voiceId || '',
+      };
+      assistantMeta.audio = {
+        contentType: audioPayload.contentType,
+        provider: audioPayload.provider,
+        voiceId: audioPayload.voiceId,
+      };
+    }
+    const assistantAppend = await appendApiSessionMessage(session.id, { role: 'assistant', text: result.text, meta: assistantMeta });
+
+    res.json({
+      ok: true,
+      session: getApiSessionMeta(assistantAppend.session),
+      message: userAppend.message,
+      response: assistantAppend.message,
+      files: attachmentPayload,
+      audio: audioPayload,
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get(`${basePath}/api/chat/history/:agent`, async (req, res) => {
+  try {
+    const agentId = String(req.params.agent || '').trim() || roster.primaryAgentId || 'main';
+    const history = await getChatHistory(agentId);
+    res.json({ ok: true, agent: agentId, messages: history });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post(`${basePath}/api/chat/direct`, async (req, res) => {
   try {
     const { text, agent, fileIds = [] } = req.body || {};
     const target = agent || roster.primaryAgentId || 'main';
-    if (!text) return res.status(400).json({ error: 'No text provided' });
+    const userText = String(text || '').trim();
+    if (!userText) return res.status(400).json({ error: 'No text provided' });
 
     const attachedFiles = await resolveChatFiles(fileIds);
-    const finalMessage = `${String(text).trim()}${buildAttachmentContext(attachedFiles)}`;
+    const userMessage = sanitizeChatMessage({
+      role: 'user',
+      kind: 'text',
+      text: userText,
+      timestamp: Date.now(),
+      files: attachedFiles.map(toChatFileRecord),
+    });
+    await appendChatHistory(target, userMessage);
+
+    const history = await getChatHistory(target);
+    const historyContext = buildConversationContext(history.slice(0, -1));
+    const finalMessage = [
+      historyContext,
+      `Latest user message: ${userText}`,
+      buildAttachmentContext(attachedFiles),
+    ].filter(Boolean).join('\n\n');
 
     console.log(`[chat] Direct message to ${target}: "${finalMessage.slice(0, 120)}..."`);
 
@@ -1025,7 +1815,7 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
     ], {
       timeout: 90000,
       env: { ...process.env, PATH: process.env.HOME + '/.local/bin:' + process.env.PATH },
-    }, (err, stdout, stderr) => {
+    }, async (err, stdout, stderr) => {
       if (err) {
         console.error(`[chat] Error from ${target}:`, err.message);
         broadcast({
@@ -1037,6 +1827,13 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
 
       const response = stdout.trim();
       console.log(`[chat] Response from ${target}: "${response.slice(0, 80)}..."`);
+      await appendChatHistory(target, {
+        role: 'agent',
+        kind: 'text',
+        text: response,
+        timestamp: Date.now(),
+        files: [],
+      });
 
       broadcast({
         type: 'agent:responding',
@@ -1044,7 +1841,7 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
       });
     });
 
-    res.json({ ok: true, agent: target, text, fileIds: attachedFiles.map((file) => file.id) });
+    res.json({ ok: true, agent: target, text: userText, fileIds: attachedFiles.map((file) => file.id), message: userMessage });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1065,7 +1862,37 @@ wss.on('connection', (ws) => {
   });
 });
 
+const recentResponseBroadcasts = new Map();
+
+function normalizeResponseForDedupe(text = '') {
+  return String(text || '')
+    .replace(/^\s*\[\[\s*reply_to[^\]]*\]\]\s*/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function shouldSuppressBroadcast(msg) {
+  if (msg?.type !== 'agent:responding' || !msg?.data?.message) return false;
+  const agent = String(msg.data.agent || 'main');
+  const normalized = normalizeResponseForDedupe(msg.data.message);
+  if (!normalized) return false;
+  const key = `${agent}::${normalized}`;
+  const now = Date.now();
+  for (const [entryKey, ts] of recentResponseBroadcasts) {
+    if (now - ts > 30000) recentResponseBroadcasts.delete(entryKey);
+  }
+  const prior = recentResponseBroadcasts.get(key) || 0;
+  if (now - prior < 30000) {
+    console.log(`[broadcast] Suppressed duplicate agent response for ${agent}`);
+    return true;
+  }
+  recentResponseBroadcasts.set(key, now);
+  return false;
+}
+
 function broadcast(msg) {
+  if (shouldSuppressBroadcast(msg)) return;
   const payload = JSON.stringify(msg);
   for (const client of wss.clients) {
     if (client.readyState === 1) {
@@ -1077,7 +1904,7 @@ function broadcast(msg) {
 export { broadcast, wss };
 
 const bridge = new OpenClawBridge();
-const stopSessionMonitor = startSessionMonitor({ broadcast, roster });
+const stopSessionMonitor = startSessionMonitor({ broadcast, roster, emitResponses: true });
 
 bridge.on('connected', (info) => {
   console.log(`[bridge] Connected (${info.mode} mode)`);

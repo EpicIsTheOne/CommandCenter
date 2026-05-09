@@ -1,6 +1,6 @@
 import * as terminal from './terminal.js?v=20260320j';
 import * as mascot from './mascot.js?v=20260509y';
-import * as office from './office.js?v=20260509v';
+import * as office from './office.js?v=20260509w';
 import * as voice from './voice.js?v=20260321a';
 import * as wake from './wake.js?v=20260320l';
 import * as directChat from './direct-chat.js?v=20260321e';
