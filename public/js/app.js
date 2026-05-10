@@ -1194,6 +1194,8 @@ async function saveSettings() {
   const fishVoiceId = document.getElementById('fish-voice-id').value.trim();
   const fishSessionCookie = document.getElementById('fish-session-cookie').value.trim();
   const fishFormat = document.getElementById('fish-format').value.trim() || 'mp3';
+  const fishPlaybackMode = document.getElementById('fish-playback-mode')?.value?.trim() || 'auto';
+  const fishAutoStreamMinChars = Number(document.getElementById('fish-auto-stream-min-chars')?.value || 260);
   const fishIncludeAsteriskNarration = document.getElementById('fish-include-narration').checked;
   const porcupineAccessKey = document.getElementById('porcupine-access-key').value.trim();
   const vignetteStrength = clampVignetteStrength(document.getElementById('vignette-strength')?.value || DEFAULT_VIGNETTE_STRENGTH);
