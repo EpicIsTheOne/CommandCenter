@@ -984,7 +984,10 @@ function populateSettingsForm(voiceSettings = {}, wakeSettings = {}) {
   const fishSessionCookie = document.getElementById('fish-session-cookie');
   const fishCookieHint = document.getElementById('saved-fish-cookie-hint');
   const fishFormat = document.getElementById('fish-format');
+  const fishPlaybackMode = document.getElementById('fish-playback-mode');
   const fishIncludeNarration = document.getElementById('fish-include-narration');
+  const fishAutoStreamMinChars = document.getElementById('fish-auto-stream-min-chars');
+  const fishAutoStreamMinCharsValue = document.getElementById('fish-auto-stream-min-chars-value');
   const voiceList = document.getElementById('agent-voice-list');
   const companionList = document.getElementById('agent-companion-list');
   const wakeList = document.getElementById('wakeword-list');
