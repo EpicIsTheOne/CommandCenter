@@ -1,0 +1,7 @@
+{
+  "id": "jane-doe",
+  "displayName": "简杜",
+  "description": "Jane Doe, a character in the game Zenless Zone Zero, whose name means 'unnamed person,' is a fitting title for this Hian girl who walks the line between the black and white worlds.",
+  "spritesheetPath": "spritesheet.webp",
+  "kind": "creature"
+}
