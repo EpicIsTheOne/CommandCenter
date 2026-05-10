@@ -975,11 +975,15 @@ function buildWakeAliases() {
     const aliases = new Set([
       agent.label,
       agent.id,
-      agent.name?.split('/')[0]?.trim(),
+      agent.name?.split('/')?.[0]?.trim(),
       ...(extraAliases[agent.id] || []),
-    ].filter(Boolean).map((v) => normalizeWakeText(v)));
+    ].filter(Boolean).map((value) => normalizeWakeText(value)));
     return { agentId: agent.id, label: agent.label, aliases: Array.from(aliases).filter(Boolean) };
   });
+}
+
+function escapeRegex(value = '') {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function detectWakeAgent(text = '') {
@@ -989,12 +993,15 @@ function detectWakeAgent(text = '') {
   let best = null;
   for (const agent of buildWakeAliases()) {
     for (const alias of agent.aliases) {
-      const index = normalized.indexOf(alias);
-      if (index === -1) continue;
+      if (!alias) continue;
+      const pattern = new RegExp(`\\b${escapeRegex(alias)}\\b`, 'i');
+      const match = pattern.exec(normalized);
+      if (!match) continue;
+      const index = match.index;
+      const before = normalized.slice(0, index).trim();
+      const after = normalized.slice(index + alias.length).trim();
+      const remainder = [before, after].filter(Boolean).join(' ').trim();
       if (!best || index < best.index || (index === best.index && alias.length > best.alias.length)) {
-        const before = normalized.slice(0, index).trim();
-        const after = normalized.slice(index + alias.length).trim();
-        const remainder = [before, after].filter(Boolean).join(' ').trim();
         best = { ...agent, alias, index, remainder };
       }
     }
