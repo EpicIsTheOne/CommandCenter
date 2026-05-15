@@ -1303,6 +1303,50 @@ function isValidCodexSourceRect(img, sx, sy, sw, sh) {
     && sx + sw <= img.naturalWidth && sy + sh <= img.naturalHeight;
 }
 
+function isCodexFrameVisible(img, sx, sy, sw, sh) {
+  if (!isValidCodexSourceRect(img, sx, sy, sw, sh)) return false;
+  const key = `${sx},${sy},${sw},${sh}`;
+  img._codexFrameVisibility ||= new Map();
+  if (img._codexFrameVisibility.has(key)) return img._codexFrameVisibility.get(key);
+
+  let visible = true;
+  try {
+    const sample = img._codexSampleCanvas || document.createElement('canvas');
+    img._codexSampleCanvas = sample;
+    const sampleW = Math.min(32, Math.max(1, Math.floor(sw)));
+    const sampleH = Math.min(32, Math.max(1, Math.floor(sh)));
+    sample.width = sampleW;
+    sample.height = sampleH;
+    const sampleCtx = sample.getContext('2d', { willReadFrequently: true });
+    sampleCtx.clearRect(0, 0, sampleW, sampleH);
+    sampleCtx.drawImage(img, sx, sy, sw, sh, 0, 0, sampleW, sampleH);
+    const data = sampleCtx.getImageData(0, 0, sampleW, sampleH).data;
+    let opaquePixels = 0;
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] > 12) opaquePixels += 1;
+      if (opaquePixels >= 8) break;
+    }
+    visible = opaquePixels >= 8;
+  } catch {
+    visible = true;
+  }
+
+  img._codexFrameVisibility.set(key, visible);
+  return visible;
+}
+
+function getVisibleCodexFrame(img, layout, row, preferredFrame, frameCount) {
+  const safeFrameCount = Math.max(1, Math.floor(Number(frameCount) || 1));
+  const start = Math.max(0, Math.floor(Number(preferredFrame) || 0)) % safeFrameCount;
+  for (let offset = 0; offset < safeFrameCount; offset += 1) {
+    const frame = (start + offset) % safeFrameCount;
+    const sx = frame * layout.frameWidth;
+    const sy = row * layout.frameHeight;
+    if (isCodexFrameVisible(img, sx, sy, layout.frameWidth, layout.frameHeight)) return frame;
+  }
+  return -1;
+}
+
 function getCodexAmbientState(agent, pet, isWalking = false) {
   if (isWalking || agent.state !== 'idle' || huddleState !== 'idle') {
     agent.codexAmbientState = null;
@@ -1342,10 +1386,11 @@ function drawCodexImportedAgent(agent, companion, { isWalking = false, scale: vi
   const layout = getCodexSheetLayout(pet, img);
   const row = getValidCodexRowForState(pet, renderState, layout.actualRows, { isWalking, directionKey });
   const frameCount = getCodexFrameCountForState(pet, renderState, layout.actualColumns, { isWalking, directionKey });
-  const frame = Math.abs(Math.floor(tick / (isWalking ? 95 : 260))) % frameCount;
+  const preferredFrame = Math.abs(Math.floor(tick / (isWalking ? 95 : 260))) % frameCount;
+  const frame = getVisibleCodexFrame(img, layout, row, preferredFrame, frameCount);
+  if (frame < 0) return drawAgent(agent);
   const sx = frame * layout.frameWidth;
   const sy = row * layout.frameHeight;
-  if (!isValidCodexSourceRect(img, sx, sy, layout.frameWidth, layout.frameHeight)) return drawAgent(agent);
 
   const x = Math.floor(canvas.width * agent.xPct);
   const y = Math.floor(canvas.height * agent.yPct);

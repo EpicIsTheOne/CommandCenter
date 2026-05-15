@@ -1,6 +1,6 @@
 // Direct Chat Module - text-based chat with agents + reusable file library + session switching
 import * as terminal from './terminal.js?v=20260320j';
-import * as companions from './companions.js?v=20260515-noflicker1';
+import * as companions from './companions.js?v=20260515-noflicker2';
 
 const BASE = window.__BASE_PATH__ || '';
 
