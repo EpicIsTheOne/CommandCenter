@@ -1,6 +1,6 @@
 // Direct Chat Module - text-based chat with agents + reusable file library + session switching
 import * as terminal from './terminal.js?v=20260320j';
-import * as voice from './voice.js?v=20260515-voicefix1';
+import * as voice from './voice.js?v=20260515-voicefix2';
 import * as companions from './companions.js?v=20260515-noflicker2';
 
 const BASE = window.__BASE_PATH__ || '';
@@ -438,6 +438,7 @@ async function speakDirectMessage(messageId = '') {
   try {
     if (button) {
       button.disabled = true;
+      button.classList.add('is-playing');
       button.textContent = '■';
     }
     await voice.playSpokenResponse(text, agentId, { force: true });
@@ -446,6 +447,7 @@ async function speakDirectMessage(messageId = '') {
   } finally {
     if (button) {
       button.disabled = false;
+      button.classList.remove('is-playing');
       button.textContent = '▶';
     }
   }
