@@ -341,24 +341,3 @@ export async function speak(text, agentId = 'main') {
   const fallback = await speakWithEspeak(text);
   return { buffer: fallback, contentType: 'audio/wav', provider: 'espeak', voiceId: '' };
 }
-] Fish Audio error:', err.message);
-    }
-  } else {
-    try {
-      const eleven = await speakWithElevenLabs(text, settings, agentId);
-      if (eleven) {
-        return {
-          buffer: eleven,
-          contentType: 'audio/mpeg',
-          provider: 'elevenlabs',
-          voiceId: resolved.voiceId,
-        };
-      }
-    } catch (err) {
-      console.error('[voice] ElevenLabs error:', err.message);
-    }
-  }
-
-  const fallback = await speakWithEspeak(text);
-  return { buffer: fallback, contentType: 'audio/wav', provider: 'espeak', voiceId: '' };
-}
