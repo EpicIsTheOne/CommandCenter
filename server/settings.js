@@ -20,6 +20,7 @@ const DEFAULT_SETTINGS = {
   sttMode: 'api',
   sttApiBase: 'https://your-domain.example/aichat',
   sttApiProvider: 'fish',
+  sttLanguage: 'en',
   sttFishApiKey: '',
   sttOpenAiApiKey: '',
   sttElevenlabsApiKey: '',
@@ -56,6 +57,13 @@ function normalizeSttProvider(value = '') {
   return 'fish';
 }
 
+function normalizeSttLanguage(value = '') {
+  const normalized = String(value || '').trim().toLowerCase().replace('_', '-');
+  if (!normalized || normalized === 'auto' || normalized === 'universal' || normalized === 'detect') return 'auto';
+  const allowed = new Set(['en', 'ja', 'es', 'fr', 'de', 'zh', 'ko', 'ru', 'pt', 'it', 'ar', 'hi', 'nl', 'pl', 'tr', 'vi', 'id']);
+  return allowed.has(normalized) ? normalized : 'en';
+}
+
 function normalize(input = {}) {
   const provider = normalizeProvider(input.provider || DEFAULT_SETTINGS.provider);
   const legacyAgentVoices = normalizeVoiceMap(input.agentVoices || {});
@@ -88,6 +96,7 @@ function normalize(input = {}) {
     sttMode: normalizeSttMode(input.sttMode || DEFAULT_SETTINGS.sttMode),
     sttApiBase: String(input.sttApiBase || DEFAULT_SETTINGS.sttApiBase).trim().replace(/\/+$/, ''),
     sttApiProvider: normalizeSttProvider(input.sttApiProvider || DEFAULT_SETTINGS.sttApiProvider),
+    sttLanguage: normalizeSttLanguage(input.sttLanguage || DEFAULT_SETTINGS.sttLanguage),
     sttFishApiKey: String(input.sttFishApiKey || '').trim(),
     sttOpenAiApiKey: String(input.sttOpenAiApiKey || '').trim(),
     sttElevenlabsApiKey: String(input.sttElevenlabsApiKey || '').trim(),

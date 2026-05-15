@@ -1,10 +1,10 @@
 import * as terminal from './terminal.js?v=20260320j';
 import * as mascot from './mascot.js?v=20260509y';
-import * as office from './office.js?v=20260515-noflicker2';
+import * as office from './office.js?v=20260515-sttlang1';
 import * as voice from './voice.js?v=20260514a';
 import * as wake from './wake.js?v=20260320l';
-import * as directChat from './direct-chat.js?v=20260515-noflicker2';
-import * as companions from './companions.js?v=20260515-noflicker2';
+import * as directChat from './direct-chat.js?v=20260515-sttlang1';
+import * as companions from './companions.js?v=20260515-sttlang1';
 import * as music from './music.js?v=20260514c';
 import * as intro from './intro.js?v=20260514b';
 import * as appearance from './appearance.js?v=20260514b';
@@ -1165,6 +1165,7 @@ function populateSettingsForm(voiceSettings = {}, wakeSettings = {}) {
   const sttMode = document.getElementById('stt-mode');
   const sttApiBase = document.getElementById('stt-api-base');
   const sttApiProvider = document.getElementById('stt-api-provider');
+  const sttLanguage = document.getElementById('stt-language');
   const sttFishKey = document.getElementById('stt-fish-key');
   const sttFishHint = document.getElementById('saved-stt-fish-key-hint');
   const aiChatLearnMoreBtn = document.getElementById('aichat-learn-more-btn');
@@ -1198,6 +1199,7 @@ function populateSettingsForm(voiceSettings = {}, wakeSettings = {}) {
   if (sttMode) sttMode.value = voiceSettings.sttMode || 'api';
   if (sttApiBase) sttApiBase.value = voiceSettings.sttApiBase || 'https://your-domain.example/aichat';
   if (sttApiProvider) sttApiProvider.value = voiceSettings.sttApiProvider || 'fish';
+  if (sttLanguage) sttLanguage.value = voiceSettings.sttLanguage || 'en';
   if (sttFishKey) sttFishKey.value = '';
   if (sttOpenAiKey) sttOpenAiKey.value = '';
   if (sttElevenlabsKey) sttElevenlabsKey.value = '';
@@ -1428,6 +1430,7 @@ async function saveSettings() {
   const sttMode = document.getElementById('stt-mode')?.value?.trim() || 'local';
   const sttApiBase = document.getElementById('stt-api-base')?.value?.trim() || 'https://your-domain.example/aichat';
   const sttApiProvider = document.getElementById('stt-api-provider')?.value?.trim() || 'fish';
+  const sttLanguage = document.getElementById('stt-language')?.value?.trim() || 'en';
   const sttFishApiKey = document.getElementById('stt-fish-key')?.value?.trim() || '';
   const sttOpenAiApiKey = document.getElementById('stt-openai-key')?.value?.trim() || '';
   const sttElevenlabsApiKey = document.getElementById('stt-elevenlabs-key')?.value?.trim() || '';
@@ -1481,7 +1484,7 @@ async function saveSettings() {
     await fetchJson(`${BASE}/api/settings/voice`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider, elevenlabsApiKey: apiKey, defaultVoiceId, fishAudioApiBase, fishVoiceId, fishSessionCookie, fishFormat, fishPlaybackMode, fishAutoStreamMinChars, fishIncludeAsteriskNarration, sttMode, sttApiBase, sttApiProvider, sttFishApiKey, sttOpenAiApiKey, sttElevenlabsApiKey, agentVoices, elevenlabsAgentVoices, fishAgentVoices }),
+      body: JSON.stringify({ provider, elevenlabsApiKey: apiKey, defaultVoiceId, fishAudioApiBase, fishVoiceId, fishSessionCookie, fishFormat, fishPlaybackMode, fishAutoStreamMinChars, fishIncludeAsteriskNarration, sttMode, sttApiBase, sttApiProvider, sttLanguage, sttFishApiKey, sttOpenAiApiKey, sttElevenlabsApiKey, agentVoices, elevenlabsAgentVoices, fishAgentVoices }),
     });
 
     await fetchJson(`${BASE}/api/settings/companions`, {
