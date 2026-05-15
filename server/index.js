@@ -49,7 +49,8 @@ function apiAttachmentPayload(files = []) {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
-const roster = loadAgentRoster();
+const getRoster = () => loadAgentRoster();
+const roster = getRoster();
 const basePath = config.basePath || '';
 
 const certPath = join(__dirname, 'cert.pem');
@@ -394,6 +395,7 @@ app.get(`${basePath}/api/status`, async (req, res) => {
 });
 
 app.get(`${basePath}/api/agents`, async (req, res) => {
+  const roster = getRoster();
   const companionSettings = await loadCompanionSettings();
   const companionRegistry = await loadCompanionRegistry(basePath);
   res.json({
@@ -406,6 +408,7 @@ app.get(`${basePath}/api/agents`, async (req, res) => {
 });
 
 app.get(`${basePath}/api/v1/agents`, async (req, res) => {
+  const roster = getRoster();
   const companionSettings = await loadCompanionSettings();
   const companionRegistry = await loadCompanionRegistry(basePath);
   res.json({
@@ -419,6 +422,7 @@ app.get(`${basePath}/api/v1/agents`, async (req, res) => {
 });
 
 app.get(`${basePath}/api/v1/agents/search`, (req, res) => {
+  const roster = getRoster();
   const q = String(req.query?.q || '').trim();
   const limit = Number(req.query?.limit || 10);
   res.json({
@@ -1462,6 +1466,7 @@ function sendToAgent(agentId, message) {
     return;
   }
 
+  const roster = getRoster();
   const target = agentId || roster.primaryAgentId || 'main';
   console.log(`[agent] Sending to ${target}: "${cleanMessage.slice(0, 80)}..."`);
 
@@ -1505,6 +1510,7 @@ app.post(`${basePath}/api/voice/transcribe`, upload.single('audio'), async (req,
       return res.status(400).json({ error: 'No audio file provided' });
     }
 
+    const roster = getRoster();
     const targetAgent = req.body?.targetAgent || roster.primaryAgentId || 'main';
     console.log(`[voice] Transcribing ${req.file.size} bytes for agent: ${targetAgent}`);
     const text = await transcribe(req.file.buffer, req.file.originalname || 'audio.webm');
@@ -1623,6 +1629,7 @@ app.post(`${basePath}/api/wake/detect`, upload.single('audio'), async (req, res)
 app.post(`${basePath}/api/browser/send`, async (req, res) => {
   try {
     const { text, agent } = req.body || {};
+    const roster = getRoster();
     const target = agent || roster.primaryAgentId || 'main';
     if (!text) return res.status(400).json({ error: 'No text provided' });
 
@@ -1750,6 +1757,7 @@ app.post(`${basePath}/api/voice/speak`, async (req, res) => {
       return res.status(400).json({ error: 'No text provided' });
     }
 
+    const roster = getRoster();
     const speaker = agent || roster.primaryAgentId || 'main';
     console.log(`[voice] Speaking as ${speaker}: "${text.slice(0, 80)}..."`);
     const audio = await speak(text, speaker);
@@ -1796,7 +1804,7 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Gemini API key is not configured in Mission Control' });
     }
     const session = createCallSession({
-      agent: String(req.body?.agent || roster.primaryAgentId || 'orchestrator'),
+      agent: String(req.body?.agent || getRoster().primaryAgentId || 'orchestrator'),
       mode: 'gemini-live',
     });
 
@@ -2061,7 +2069,7 @@ app.post(`${basePath}/api/live/tasks`, async (req, res) => {
       title: String(title || prompt.slice(0, 80) || 'Background task'),
       summary: 'Queued',
       prompt,
-      agent: String(agent || roster.primaryAgentId || 'orchestrator'),
+      agent: String(agent || getRoster().primaryAgentId || 'orchestrator'),
     });
     broadcast({ type: 'live_task:update', data: task });
     runLiveTask(task, { broadcast, roster });
@@ -2082,7 +2090,7 @@ app.post(`${basePath}/api/live/route`, async (req, res) => {
         title: prompt.slice(0, 80) || 'Background task',
         summary: "I'm working on that in the background.",
         prompt,
-        agent: String(agent || roster.primaryAgentId || 'orchestrator'),
+        agent: String(agent || getRoster().primaryAgentId || 'orchestrator'),
       });
       broadcast({ type: 'live_task:update', data: task });
       runLiveTask(task, { broadcast, roster });
@@ -2350,6 +2358,7 @@ app.post(`${basePath}/api/v1/chat`, async (req, res) => {
 
 app.get(`${basePath}/api/chat/history/:agent`, async (req, res) => {
   try {
+    const roster = getRoster();
     const agentId = String(req.params.agent || '').trim() || roster.primaryAgentId || 'main';
     const history = await getChatHistory(agentId);
     res.json({ ok: true, agent: agentId, messages: history });
@@ -2411,6 +2420,7 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
       session = await getApiSession(existingSessionId);
       if (!session) return res.status(404).json({ error: 'Session not found' });
     } else {
+      const roster = getRoster();
       const target = requestedAgent || roster.primaryAgentId || 'main';
       const exists = roster.agents.some((item) => item.id === target);
       if (!exists) return res.status(404).json({ error: 'Agent not found' });
