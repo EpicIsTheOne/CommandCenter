@@ -54,10 +54,42 @@ function getStableCodexRow(companion = {}, state = 'idle') {
 }
 
 function getCodexFrameCount(companion = {}, state = 'idle', columns = 8) {
+  const safeColumns = Math.max(1, Math.floor(Number(columns) || 1));
   const frameCounts = companion?.importedPet?.frameCounts || companion?.importedPet?.animationMap?.frameCounts || {};
   const count = Number(frameCounts?.[state] || 0);
-  if (Number.isFinite(count) && count > 0) return Math.min(columns, count);
-  return Math.min(columns, CODEX_FRAME_FALLBACKS[state] || columns);
+  if (Number.isFinite(count) && count > 0) return Math.max(1, Math.min(safeColumns, Math.floor(count)));
+  return Math.max(1, Math.min(safeColumns, CODEX_FRAME_FALLBACKS[state] || safeColumns));
+}
+
+function getCodexSheetLayout(pet = {}, img) {
+  const declaredRows = Math.max(1, Math.floor(Number(pet.rows || 9) || 9));
+  const declaredColumns = Math.max(1, Math.floor(Number(pet.columns || 8) || 8));
+  const naturalWidth = Math.max(1, Math.floor(Number(img?.naturalWidth || img?.width || 0) || 0));
+  const naturalHeight = Math.max(1, Math.floor(Number(img?.naturalHeight || img?.height || 0) || 0));
+  const frameWidth = Math.max(1, Math.floor(Number(pet.frameWidth || pet.spriteWidth || 0) || (naturalWidth / declaredColumns)));
+  const frameHeight = Math.max(1, Math.floor(Number(pet.frameHeight || pet.spriteHeight || 0) || (naturalHeight / declaredRows)));
+  const actualColumns = Math.max(1, Math.floor(naturalWidth / frameWidth));
+  const actualRows = Math.max(1, Math.floor(naturalHeight / frameHeight));
+  return { frameWidth, frameHeight, columns: Math.min(declaredColumns, actualColumns), rows: Math.min(declaredRows, actualRows), actualColumns, actualRows, naturalWidth, naturalHeight };
+}
+
+function getValidCodexRow(companion = {}, state = 'idle', maxRows = 1) {
+  const rows = getCodexRows(companion, state);
+  const valid = (Array.isArray(rows) ? rows : [rows])
+    .map((row) => Math.floor(Number(row)))
+    .find((row) => Number.isFinite(row) && row >= 0 && row < maxRows);
+  if (Number.isFinite(valid)) return valid;
+  const idleRows = getCodexRows(companion, 'idle');
+  const idle = (Array.isArray(idleRows) ? idleRows : [idleRows])
+    .map((row) => Math.floor(Number(row)))
+    .find((row) => Number.isFinite(row) && row >= 0 && row < maxRows);
+  return Number.isFinite(idle) ? idle : 0;
+}
+
+function isValidCodexSourceRect(img, sx, sy, sw, sh) {
+  return img?.complete && img.naturalWidth > 0 && img.naturalHeight > 0
+    && sw > 0 && sh > 0 && sx >= 0 && sy >= 0
+    && sx + sw <= img.naturalWidth && sy + sh <= img.naturalHeight;
 }
 
 function paletteFor(companion = {}) {
@@ -93,7 +125,6 @@ function drawCompanionCaption(ctx, width, height, label = '') {
 }
 
 function renderCodexImportedCompanion(ctx, width, height, companion, state = 'idle', tick = 0, label = '', options = {}) {
-  ctx.clearRect(0, 0, width, height);
   ctx.imageSmoothingEnabled = false;
   const pet = companion.importedPet || {};
   const img = getCodexImage(pet.spritesheetUrl || '');
@@ -111,30 +142,32 @@ function renderCodexImportedCompanion(ctx, width, height, companion, state = 'id
     return;
   }
 
-  const rows = pet.rows || 9;
-  const columns = pet.columns || 8;
-  const frameWidth = Math.floor((pet.frameWidth || pet.spriteWidth || img.naturalWidth) / (pet.frameWidth ? 1 : columns));
-  const frameHeight = Math.floor((pet.frameHeight || pet.spriteHeight || img.naturalHeight) / (pet.frameHeight ? 1 : rows));
-  const activeRow = getStableCodexRow(companion, state);
-  const frameCount = getCodexFrameCount(companion, state, columns);
+  const layout = getCodexSheetLayout(pet, img);
+  const activeRow = getValidCodexRow(companion, state, layout.actualRows);
+  const frameCount = getCodexFrameCount(companion, state, layout.actualColumns);
   const frame = Math.abs(Math.floor(tick / 140)) % frameCount;
+  const sx = frame * layout.frameWidth;
+  const sy = activeRow * layout.frameHeight;
+
+  if (!isValidCodexSourceRect(img, sx, sy, layout.frameWidth, layout.frameHeight)) return;
 
   const reservedLabelSpace = label ? 18 : 0;
   const availableHeight = Math.max(1, height - reservedLabelSpace);
   const sizeScale = Math.min(2, Math.max(0.45, Number(options.scale || 1) || 1));
-  const scale = Math.min(width / frameWidth, availableHeight / frameHeight) * sizeScale;
-  const drawWidth = Math.floor(frameWidth * scale);
-  const drawHeight = Math.floor(frameHeight * scale);
+  const scale = Math.min(width / layout.frameWidth, availableHeight / layout.frameHeight) * sizeScale;
+  const drawWidth = Math.floor(layout.frameWidth * scale);
+  const drawHeight = Math.floor(layout.frameHeight * scale);
   const dx = Math.floor((width - drawWidth) / 2);
   const dy = Math.floor((availableHeight - drawHeight) / 2);
 
+  ctx.clearRect(0, 0, width, height);
   ctx.save();
   if (typeof ctx.roundRect === 'function') {
     ctx.beginPath();
     ctx.roundRect(2, 2, width - 4, availableHeight - 2, 10);
     ctx.clip();
   }
-  ctx.drawImage(img, frame * frameWidth, activeRow * frameHeight, frameWidth, frameHeight, dx, dy, drawWidth, drawHeight);
+  ctx.drawImage(img, sx, sy, layout.frameWidth, layout.frameHeight, dx, dy, drawWidth, drawHeight);
   ctx.restore();
 
   drawCompanionCaption(ctx, width, height, label);

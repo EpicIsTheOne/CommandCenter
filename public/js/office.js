@@ -1259,16 +1259,48 @@ const CODEX_FRAME_FALLBACKS = {
 };
 
 function getCodexFrameCountForState(pet = {}, state = 'idle', columns = 8, { isWalking = false, directionKey = '' } = {}) {
+  const safeColumns = Math.max(1, Math.floor(Number(columns) || 1));
   const frameCounts = pet.frameCounts || pet.animationMap?.frameCounts || {};
   const keys = isWalking ? [directionKey, directionKey === 'runningRight' ? 'running-right' : directionKey === 'runningLeft' ? 'running-left' : '', 'walking', 'running', 'run', state] : [state];
   for (const key of keys) {
     const count = Number(frameCounts?.[key] || 0);
-    if (Number.isFinite(count) && count > 0) return Math.min(columns, count);
+    if (Number.isFinite(count) && count > 0) return Math.max(1, Math.min(safeColumns, Math.floor(count)));
   }
   for (const key of keys) {
-    if (CODEX_FRAME_FALLBACKS[key]) return Math.min(columns, CODEX_FRAME_FALLBACKS[key]);
+    if (CODEX_FRAME_FALLBACKS[key]) return Math.max(1, Math.min(safeColumns, CODEX_FRAME_FALLBACKS[key]));
   }
-  return Math.min(columns, CODEX_FRAME_FALLBACKS[state] || columns);
+  return Math.max(1, Math.min(safeColumns, CODEX_FRAME_FALLBACKS[state] || safeColumns));
+}
+
+function getCodexSheetLayout(pet = {}, img) {
+  const declaredRows = Math.max(1, Math.floor(Number(pet.rows || 9) || 9));
+  const declaredColumns = Math.max(1, Math.floor(Number(pet.columns || 8) || 8));
+  const naturalWidth = Math.max(1, Math.floor(Number(img?.naturalWidth || img?.width || 0) || 0));
+  const naturalHeight = Math.max(1, Math.floor(Number(img?.naturalHeight || img?.height || 0) || 0));
+  const frameWidth = Math.max(1, Math.floor(Number(pet.frameWidth || pet.spriteWidth || 0) || (naturalWidth / declaredColumns)));
+  const frameHeight = Math.max(1, Math.floor(Number(pet.frameHeight || pet.spriteHeight || 0) || (naturalHeight / declaredRows)));
+  const actualColumns = Math.max(1, Math.floor(naturalWidth / frameWidth));
+  const actualRows = Math.max(1, Math.floor(naturalHeight / frameHeight));
+  return { frameWidth, frameHeight, columns: Math.min(declaredColumns, actualColumns), rows: Math.min(declaredRows, actualRows), actualColumns, actualRows, naturalWidth, naturalHeight };
+}
+
+function getValidCodexRowForState(pet = {}, state = 'idle', maxRows = 1, options = {}) {
+  const rows = getCodexRowsForState(pet, state, options);
+  const valid = (Array.isArray(rows) ? rows : [rows])
+    .map((row) => Math.floor(Number(row)))
+    .find((row) => Number.isFinite(row) && row >= 0 && row < maxRows);
+  if (Number.isFinite(valid)) return valid;
+  const idleRows = getCodexRowsForState(pet, 'idle', { ...options, isWalking: false, directionKey: '' });
+  const idle = (Array.isArray(idleRows) ? idleRows : [idleRows])
+    .map((row) => Math.floor(Number(row)))
+    .find((row) => Number.isFinite(row) && row >= 0 && row < maxRows);
+  return Number.isFinite(idle) ? idle : 0;
+}
+
+function isValidCodexSourceRect(img, sx, sy, sw, sh) {
+  return img?.complete && img.naturalWidth > 0 && img.naturalHeight > 0
+    && sw > 0 && sh > 0 && sx >= 0 && sy >= 0
+    && sx + sw <= img.naturalWidth && sy + sh <= img.naturalHeight;
 }
 
 function getCodexAmbientState(agent, pet, isWalking = false) {
@@ -1307,19 +1339,21 @@ function drawCodexImportedAgent(agent, companion, { isWalking = false, scale: vi
   const directionKey = isWalking ? getCodexDirectionKey(agent) : '';
   const baseState = isWalking ? (directionKey || 'runningRight') : getCodexAmbientState(agent, pet, isWalking);
   const renderState = isWalking ? (directionKey || 'runningRight') : baseState;
-  const row = getStableCodexRowForState(pet, renderState, { isWalking, directionKey });
-  const columns = Number(pet.columns || 8) || 8;
-  const frameWidth = Number(pet.frameWidth || 192) || 192;
-  const frameHeight = Number(pet.frameHeight || 208) || 208;
-  const frameCount = getCodexFrameCountForState(pet, renderState, columns, { isWalking, directionKey });
+  const layout = getCodexSheetLayout(pet, img);
+  const row = getValidCodexRowForState(pet, renderState, layout.actualRows, { isWalking, directionKey });
+  const frameCount = getCodexFrameCountForState(pet, renderState, layout.actualColumns, { isWalking, directionKey });
   const frame = Math.abs(Math.floor(tick / (isWalking ? 95 : 260))) % frameCount;
+  const sx = frame * layout.frameWidth;
+  const sy = row * layout.frameHeight;
+  if (!isValidCodexSourceRect(img, sx, sy, layout.frameWidth, layout.frameHeight)) return drawAgent(agent);
+
   const x = Math.floor(canvas.width * agent.xPct);
   const y = Math.floor(canvas.height * agent.yPct);
   const sizeScale = Math.min(2, Math.max(0.45, Number(visualScale || 1) || 1));
   const targetHeight = PX * 24 * sizeScale;
-  const scale = targetHeight / frameHeight;
-  const drawWidth = Math.floor(frameWidth * scale);
-  const drawHeight = Math.floor(frameHeight * scale);
+  const scale = targetHeight / layout.frameHeight;
+  const drawWidth = Math.floor(layout.frameWidth * scale);
+  const drawHeight = Math.floor(layout.frameHeight * scale);
   const dx = Math.floor(x - drawWidth / 2);
   const artYOffset = PX * 5;
   const dy = Math.floor(y - drawHeight * 0.72 + artYOffset);
@@ -1329,7 +1363,7 @@ function drawCodexImportedAgent(agent, companion, { isWalking = false, scale: vi
   ctx.ellipse(x, y + PX * 4.8 + artYOffset, PX * 4.6, PX * 1.5, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  ctx.drawImage(img, frame * frameWidth, row * frameHeight, frameWidth, frameHeight, dx, dy, drawWidth, drawHeight);
+  ctx.drawImage(img, sx, sy, layout.frameWidth, layout.frameHeight, dx, dy, drawWidth, drawHeight);
   ctx.fillStyle = agent.color; ctx.font = `${PX * 3}px VT323`; ctx.textAlign = 'center';
   ctx.fillText(agent.label.toUpperCase(), x, y + PX * 8 + artYOffset); ctx.textAlign = 'start';
 }
