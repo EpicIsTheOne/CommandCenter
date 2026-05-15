@@ -74,10 +74,12 @@ async function transcribeViaApi(audioBuffer, filename = 'audio.webm', settings =
     await unlink(wavFile).catch(() => {});
   }
 
+  const language = String(settings.sttLanguage || process.env.STT_LANGUAGE || 'en').trim() || 'en';
   const headers = {
     'Content-Type': 'application/octet-stream',
     'X-STT-Provider': provider,
     'X-STT-Filename': outboundName,
+    'X-STT-Language': language,
   };
   const fishKey = String(settings.sttFishApiKey || '').trim();
   const openAiKey = String(settings.sttOpenAiApiKey || '').trim();
