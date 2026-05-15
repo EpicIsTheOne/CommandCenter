@@ -50,6 +50,17 @@ async function transcribeLocal(audioBuffer, filename = 'audio.webm') {
   }
 }
 
+function looksLikeJapaneseMisdetection(text = '') {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  const japaneseMatches = value.match(/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]/g) || [];
+  if (!japaneseMatches.length) return false;
+  const latinMatches = value.match(/[A-Za-z]/g) || [];
+  const signalChars = japaneseMatches.length + latinMatches.length;
+  if (signalChars < 4) return false;
+  return japaneseMatches.length / signalChars >= 0.45;
+}
+
 async function transcribeViaApi(audioBuffer, filename = 'audio.webm', settings = {}) {
   const base = String(settings.sttApiBase || process.env.STT_API_BASE || DEFAULT_STT_API_BASE_URL).trim().replace(/\/+$/, '');
   const rawProvider = String(settings.sttApiProvider || 'fish').trim().toLowerCase();
@@ -97,7 +108,12 @@ async function transcribeViaApi(audioBuffer, filename = 'audio.webm', settings =
   if (!res.ok) {
     throw new Error(data.detail || data.error || `STT API failed (${res.status})`);
   }
-  return String(data.text || '').trim();
+  const text = String(data.text || '').trim();
+  if ((language === 'en' || language === 'english') && provider === 'fish' && looksLikeJapaneseMisdetection(text)) {
+    console.warn('[voice] Fish STT returned Japanese-looking text while English is selected; retrying with local English Whisper fallback.');
+    return await transcribeLocal(audioBuffer, filename);
+  }
+  return text;
 }
 
 export async function transcribe(audioBuffer, filename = 'audio.webm') {
