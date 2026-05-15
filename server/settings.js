@@ -10,7 +10,7 @@ const DEFAULT_SETTINGS = {
   provider: 'elevenlabs',
   elevenlabsApiKey: '',
   defaultVoiceId: '',
-  fishAudioApiBase: 'https://techexplore.us/aichat',
+  fishAudioApiBase: 'https://your-domain.example/aichat',
   fishVoiceId: '',
   fishSessionCookie: '',
   fishFormat: 'mp3',

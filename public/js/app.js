@@ -613,7 +613,7 @@ async function previewFishVoice(voiceId, label = '') {
       body: JSON.stringify({
         voiceId,
         text: `Hey, this is ${label || 'a Fish Audio voice'} previewing inside Command Center.`,
-        fishAudioApiBase: document.getElementById('fish-audio-api-base')?.value?.trim() || 'https://techexplore.us/aichat',
+        fishAudioApiBase: document.getElementById('fish-audio-api-base')?.value?.trim() || 'https://your-domain.example/aichat',
         fishSessionCookie: document.getElementById('fish-session-cookie')?.value?.trim() || '',
         fishFormat: document.getElementById('fish-format')?.value?.trim() || 'mp3',
         fishIncludeAsteriskNarration: document.getElementById('fish-include-narration')?.checked === true,
@@ -651,7 +651,7 @@ async function searchFishVoices() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         q: query,
-        fishAudioApiBase: document.getElementById('fish-audio-api-base')?.value?.trim() || 'https://techexplore.us/aichat',
+        fishAudioApiBase: document.getElementById('fish-audio-api-base')?.value?.trim() || 'https://your-domain.example/aichat',
         fishSessionCookie: document.getElementById('fish-session-cookie')?.value?.trim() || '',
         limit: 8,
         pageSize: 12,
@@ -715,7 +715,7 @@ async function searchAgentFishVoices(agentId) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         q: query,
-        fishAudioApiBase: document.getElementById('fish-audio-api-base')?.value?.trim() || 'https://techexplore.us/aichat',
+        fishAudioApiBase: document.getElementById('fish-audio-api-base')?.value?.trim() || 'https://your-domain.example/aichat',
         fishSessionCookie: document.getElementById('fish-session-cookie')?.value?.trim() || '',
         limit: 6,
         pageSize: 12,
@@ -1006,7 +1006,7 @@ function populateSettingsForm(voiceSettings = {}, wakeSettings = {}) {
       voiceList.appendChild(buildAgentVoiceRow(agent, getProviderAgentVoices(window.__lastVoiceSettings || {}, providerSelect.value)?.[agent.id] || '', providerSelect.value));
     });
   };
-  fishApiBase.value = voiceSettings.fishAudioApiBase || 'https://techexplore.us/aichat';
+  fishApiBase.value = voiceSettings.fishAudioApiBase || 'https://your-domain.example/aichat';
   fishVoiceId.value = voiceSettings.fishVoiceId || '';
   fishSessionCookie.value = '';
   fishCookieHint.textContent = voiceSettings.hasFishSessionCookie ? `Saved AIChat session: ${voiceSettings.fishSessionCookieMasked}` : 'No saved AIChat session cookie yet. Paste aichat_session or full cookie.';
@@ -1190,7 +1190,7 @@ async function saveSettings() {
   const provider = document.getElementById('voice-provider').value.trim() || 'elevenlabs';
   const apiKey = document.getElementById('elevenlabs-key').value.trim();
   const defaultVoiceId = document.getElementById('default-voice-id').value.trim();
-  const fishAudioApiBase = document.getElementById('fish-audio-api-base').value.trim() || 'https://techexplore.us/aichat';
+  const fishAudioApiBase = document.getElementById('fish-audio-api-base').value.trim() || 'https://your-domain.example/aichat';
   const fishVoiceId = document.getElementById('fish-voice-id').value.trim();
   const fishSessionCookie = document.getElementById('fish-session-cookie').value.trim();
   const fishFormat = document.getElementById('fish-format').value.trim() || 'mp3';

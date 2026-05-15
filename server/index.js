@@ -540,7 +540,7 @@ app.get(`${basePath}/api/settings/voice`, async (req, res) => {
       fishPlaybackMode: settings.fishPlaybackMode || 'auto',
       fishAutoStreamMinChars: settings.fishAutoStreamMinChars || 260,
       sttMode: settings.sttMode || 'api',
-      sttApiBase: settings.sttApiBase || 'https://techexplore.us/aichat',
+      sttApiBase: settings.sttApiBase || 'https://your-domain.example/aichat',
       sttApiProvider: settings.sttApiProvider || 'fish',
       hasSttFishApiKey: !!settings.sttFishApiKey,
       sttFishApiKeyMasked: maskApiKey(settings.sttFishApiKey),
@@ -1120,7 +1120,7 @@ app.post(`${basePath}/api/settings/voice`, async (req, res) => {
       provider: body.provider || existing.provider || 'elevenlabs',
       elevenlabsApiKey: body.elevenlabsApiKey ? String(body.elevenlabsApiKey).trim() : existing.elevenlabsApiKey,
       defaultVoiceId: body.defaultVoiceId !== undefined ? String(body.defaultVoiceId || '').trim() : (existing.defaultVoiceId || ''),
-      fishAudioApiBase: String(body.fishAudioApiBase || existing.fishAudioApiBase || 'https://techexplore.us/aichat').trim(),
+      fishAudioApiBase: String(body.fishAudioApiBase || existing.fishAudioApiBase || 'https://your-domain.example/aichat').trim(),
       fishVoiceId: body.fishVoiceId !== undefined ? String(body.fishVoiceId || '').trim() : (existing.fishVoiceId || ''),
       fishSessionCookie: body.fishSessionCookie ? String(body.fishSessionCookie).trim() : existing.fishSessionCookie,
       fishFormat: String(body.fishFormat || existing.fishFormat || 'mp3').trim(),
@@ -1128,7 +1128,7 @@ app.post(`${basePath}/api/settings/voice`, async (req, res) => {
       fishPlaybackMode: String(body.fishPlaybackMode || existing.fishPlaybackMode || 'auto').trim(),
       fishAutoStreamMinChars: body.fishAutoStreamMinChars ?? existing.fishAutoStreamMinChars ?? 260,
       sttMode: body.sttMode || existing.sttMode || 'api',
-      sttApiBase: String(body.sttApiBase || existing.sttApiBase || 'https://techexplore.us/aichat').trim(),
+      sttApiBase: String(body.sttApiBase || existing.sttApiBase || 'https://your-domain.example/aichat').trim(),
       sttApiProvider: body.sttApiProvider || existing.sttApiProvider || 'fish',
       sttFishApiKey: body.sttFishApiKey ? String(body.sttFishApiKey).trim() : existing.sttFishApiKey,
       sttOpenAiApiKey: body.sttOpenAiApiKey ? String(body.sttOpenAiApiKey).trim() : existing.sttOpenAiApiKey,
@@ -1156,7 +1156,7 @@ app.post(`${basePath}/api/settings/voice`, async (req, res) => {
         fishPlaybackMode: saved.fishPlaybackMode || 'auto',
         fishAutoStreamMinChars: saved.fishAutoStreamMinChars || 260,
         sttMode: saved.sttMode || 'api',
-        sttApiBase: saved.sttApiBase || 'https://techexplore.us/aichat',
+        sttApiBase: saved.sttApiBase || 'https://your-domain.example/aichat',
         sttApiProvider: saved.sttApiProvider || 'fish',
         hasSttFishApiKey: !!saved.sttFishApiKey,
         sttFishApiKeyMasked: maskApiKey(saved.sttFishApiKey),
@@ -1296,7 +1296,7 @@ app.post(`${basePath}/api/settings/voice/fish/preview`, async (req, res) => {
     if (!voiceId) return res.status(400).json({ error: 'No Fish voice ID provided' });
     const settings = {
       ...existing,
-      fishAudioApiBase: String(body.fishAudioApiBase || existing.fishAudioApiBase || 'https://techexplore.us/aichat').trim(),
+      fishAudioApiBase: String(body.fishAudioApiBase || existing.fishAudioApiBase || 'https://your-domain.example/aichat').trim(),
       fishSessionCookie: body.fishSessionCookie ? String(body.fishSessionCookie).trim() : existing.fishSessionCookie,
       fishFormat: String(body.fishFormat || existing.fishFormat || 'mp3').trim(),
       fishIncludeAsteriskNarration: body.fishIncludeAsteriskNarration === true,
@@ -1322,7 +1322,7 @@ app.post(`${basePath}/api/settings/voice/fish/search`, async (req, res) => {
     if (!query) return res.json({ query: '', items: [], bestMatch: null });
     const settings = {
       ...existing,
-      fishAudioApiBase: String(body.fishAudioApiBase || existing.fishAudioApiBase || 'https://techexplore.us/aichat').trim(),
+      fishAudioApiBase: String(body.fishAudioApiBase || existing.fishAudioApiBase || 'https://your-domain.example/aichat').trim(),
       fishSessionCookie: body.fishSessionCookie ? String(body.fishSessionCookie).trim() : existing.fishSessionCookie,
     };
     const result = await searchFishAudioVoices(query, settings, {

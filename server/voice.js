@@ -9,7 +9,7 @@ const ROOT = process.cwd();
 const PYTHONPATH = join(ROOT, '.pydeps');
 const WHISPER_CACHE_DIR = join(ROOT, '.cache', 'whisper');
 const ELEVENLABS_BASE_URL = 'https://api.elevenlabs.io';
-const DEFAULT_FISH_AUDIO_BASE_URL = 'https://techexplore.us/aichat';
+const DEFAULT_FISH_AUDIO_BASE_URL = 'https://your-domain.example/aichat';
 
 async function ensureDirs() {
   await mkdir(WHISPER_CACHE_DIR, { recursive: true });
