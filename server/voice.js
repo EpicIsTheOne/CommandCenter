@@ -321,6 +321,64 @@ async function speakWithElevenLabs(text, settings, agentId = 'main') {
   return Buffer.from(arrayBuffer);
 }
 
+export async function streamSpeak(text, agentId = 'main', outRes) {
+  const settings = await loadVoiceSettings();
+  const resolved = await resolveAgentVoice(settings, agentId);
+  if (resolved.provider !== 'fish') return false;
+  if (resolveFishPlaybackMode(text, settings) !== 'stream') return false;
+
+  const voiceId = String(resolved.voiceId || resolveFishVoiceId(settings, agentId) || '').trim();
+  if (!voiceId) return false;
+
+  const base = getFishApiBase(settings);
+  const cookie = getFishSessionCookie(settings);
+  const headers = {
+    'Content-Type': 'application/json',
+    Accept: 'audio/mpeg,audio/*,*/*',
+  };
+  if (cookie) headers.Cookie = cookie;
+
+  const upstream = await fetch(`${base}/api/tts/audio`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      text,
+      voiceId,
+      format: 'mp3',
+      includeAsteriskNarration: settings.fishIncludeAsteriskNarration === true,
+      stream: true,
+      latency: 'low',
+    }),
+  });
+
+  if (!upstream.ok) {
+    const errText = await upstream.text().catch(() => '');
+    throw new Error(`Fish Audio TTS stream failed (${upstream.status}): ${errText || 'request failed'}`);
+  }
+
+  outRes.status(200);
+  outRes.set('Content-Type', upstream.headers.get('content-type') || 'audio/mpeg');
+  outRes.set('Cache-Control', 'no-store');
+  outRes.set('X-TTS-Mode', upstream.headers.get('x-tts-mode') || 'stream');
+  const taggedText = upstream.headers.get('x-tts-tagged-text');
+  if (taggedText) outRes.set('X-TTS-Tagged-Text', taggedText);
+
+  if (!upstream.body) {
+    const arrayBuffer = await upstream.arrayBuffer();
+    outRes.end(Buffer.from(arrayBuffer));
+    return true;
+  }
+
+  for await (const chunk of upstream.body) {
+    if (!chunk?.length) continue;
+    if (!outRes.write(Buffer.from(chunk))) {
+      await new Promise((resolve) => outRes.once('drain', resolve));
+    }
+  }
+  outRes.end();
+  return true;
+}
+
 export async function speak(text, agentId = 'main') {
   const settings = await loadVoiceSettings();
   const resolved = await resolveAgentVoice(settings, agentId);

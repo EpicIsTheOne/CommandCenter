@@ -12,7 +12,7 @@ import os from 'node:os';
 import multer from 'multer';
 import config from './config.js';
 import OpenClawBridge from './openclaw-bridge.js';
-import { transcribe, speak, listElevenLabsVoices, searchFishAudioVoices, previewFishAudioVoice, resolveAgentVoice } from './voice.js';
+import { transcribe, speak, streamSpeak, listElevenLabsVoices, searchFishAudioVoices, previewFishAudioVoice, resolveAgentVoice } from './voice.js';
 import { loadAgentRoster, searchAgents } from './agents.js';
 import { loadVoiceSettings, saveVoiceSettings, maskApiKey, maskSessionCookie } from './settings.js';
 import { ensureCompanionRegistry, importCodexPetPackageFromDir, loadCompanionRegistry, loadCompanionSettings, resolveAgentVisual, saveCompanionSettings } from './companions.js';
@@ -1763,6 +1763,9 @@ app.post(`${basePath}/api/voice/speak`, async (req, res) => {
     const roster = getRoster();
     const speaker = agent || roster.primaryAgentId || 'main';
     console.log(`[voice] Speaking as ${speaker}: "${text.slice(0, 80)}..."`);
+    const streamed = await streamSpeak(text, speaker, res);
+    if (streamed) return;
+
     const audio = await speak(text, speaker);
 
     res.set('Content-Type', audio.contentType);

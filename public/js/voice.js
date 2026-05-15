@@ -243,6 +243,109 @@ export async function toggleRecording(options = {}) {
   return isRecording;
 }
 
+function supportsStreamingAudioMime(mime = 'audio/mpeg') {
+  return typeof MediaSource !== 'undefined'
+    && typeof MediaSource.isTypeSupported === 'function'
+    && MediaSource.isTypeSupported(mime);
+}
+
+async function playStreamedAudioResponse(res, { playbackToken, controller } = {}) {
+  const mime = (res.headers.get('content-type') || 'audio/mpeg').split(';')[0] || 'audio/mpeg';
+  if (!res.body || !supportsStreamingAudioMime(mime)) return null;
+
+  const mediaSource = new MediaSource();
+  const audioUrl = URL.createObjectURL(mediaSource);
+  const audio = new Audio(audioUrl);
+  audio.volume = 1.0;
+  currentAudioUrl = audioUrl;
+  currentAudio = audio;
+
+  return await new Promise((resolve, reject) => {
+    let finished = false;
+    let reader = null;
+    const chunks = [];
+    let appending = false;
+    let sourceBuffer = null;
+    let startedPlayback = false;
+
+    const cleanup = (completed) => {
+      if (finished) return;
+      finished = true;
+      reader?.cancel?.().catch(() => {});
+      if (currentAudio === audio) currentAudio = null;
+      if (currentAudioUrl === audioUrl) currentAudioUrl = null;
+      URL.revokeObjectURL(audioUrl);
+      releaseSpeakerLock();
+      emitPlaybackEvent('commandcenter:voice-playback-stop');
+      resolve(completed);
+    };
+
+    const fail = (err) => {
+      if (finished) return;
+      finished = true;
+      reader?.cancel?.().catch(() => {});
+      URL.revokeObjectURL(audioUrl);
+      releaseSpeakerLock();
+      reject(err);
+    };
+
+    const pumpAppend = () => {
+      if (!sourceBuffer || sourceBuffer.updating || appending || !chunks.length || finished) return;
+      appending = true;
+      const chunk = chunks.shift();
+      try {
+        sourceBuffer.appendBuffer(chunk);
+      } catch (err) {
+        fail(err);
+      } finally {
+        appending = false;
+      }
+    };
+
+    mediaSource.addEventListener('sourceopen', async () => {
+      try {
+        sourceBuffer = mediaSource.addSourceBuffer(mime);
+        sourceBuffer.mode = 'sequence';
+        sourceBuffer.addEventListener('updateend', () => {
+          pumpAppend();
+          if (!startedPlayback && audio.readyState >= 2) {
+            startedPlayback = true;
+            audio.play().catch(fail);
+          }
+          if (reader === null && !chunks.length && !sourceBuffer.updating && mediaSource.readyState === 'open') {
+            try { mediaSource.endOfStream(); } catch (_) {}
+          }
+        });
+
+        reader = res.body.getReader();
+        emitPlaybackEvent('commandcenter:voice-playback-start');
+        while (playbackToken === currentPlaybackToken && !controller.signal.aborted) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value?.length) {
+            chunks.push(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+            pumpAppend();
+            if (!startedPlayback && audio.paused && chunks.length >= 1) {
+              startedPlayback = true;
+              audio.play().catch(() => {});
+            }
+          }
+        }
+        reader = null;
+        if (!chunks.length && !sourceBuffer.updating && mediaSource.readyState === 'open') {
+          try { mediaSource.endOfStream(); } catch (_) {}
+        }
+      } catch (err) {
+        fail(err);
+      }
+    }, { once: true });
+
+    audio.onended = () => cleanup(true);
+    audio.onerror = () => fail(new Error('Streaming audio playback failed'));
+    controller.signal.addEventListener('abort', () => cleanup(false), { once: true });
+  });
+}
+
 async function sendToServer(blob) {
   const form = new FormData();
   form.append('audio', blob, 'recording.webm');
@@ -295,6 +398,12 @@ export async function playSpokenResponse(text, agentId = 'main') {
 
     const ttsMode = (res.headers.get('x-tts-mode') || 'full').toLowerCase();
     console.log(`[voice] Playback mode: ${ttsMode}`);
+
+    if (ttsMode === 'stream') {
+      const streamed = await playStreamedAudioResponse(res, { playbackToken, controller });
+      if (streamed !== null) return streamed;
+      console.log('[voice] MediaSource streaming unsupported for this audio type; falling back to full-buffer playback');
+    }
 
     const audioBlob = await res.blob();
     if (controller.signal.aborted || playbackToken !== currentPlaybackToken) return false;

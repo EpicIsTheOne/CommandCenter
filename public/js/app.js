@@ -1,10 +1,10 @@
 import * as terminal from './terminal.js?v=20260320j';
 import * as mascot from './mascot.js?v=20260509y';
-import * as office from './office.js?v=20260515-stop1';
-import * as voice from './voice.js?v=20260515-stop1';
+import * as office from './office.js?v=20260515-stream1';
+import * as voice from './voice.js?v=20260515-stream1';
 import * as wake from './wake.js?v=20260320l';
-import * as directChat from './direct-chat.js?v=20260515-stop1';
-import * as companions from './companions.js?v=20260515-stop1';
+import * as directChat from './direct-chat.js?v=20260515-stream1';
+import * as companions from './companions.js?v=20260515-stream1';
 import * as music from './music.js?v=20260514c';
 import * as intro from './intro.js?v=20260514b';
 import * as appearance from './appearance.js?v=20260514b';
