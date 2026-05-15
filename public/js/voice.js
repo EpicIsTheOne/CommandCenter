@@ -15,6 +15,7 @@ function humanizeVoiceError(err) {
   return message;
 }
 let isRecording = false;
+let isStoppingRecording = false;
 let onTranscription = null;
 let onRecordingStopped = null;
 let maxRecordTimer = null;
@@ -37,6 +38,7 @@ const BASE = window.__BASE_PATH__ || '';
 const MAX_RECORD_SECONDS = 15;
 const DEFAULT_SILENCE_TIMEOUT_MS = 0;
 const DEFAULT_SILENCE_THRESHOLD = 0.018;
+const MANUAL_STOP_TAIL_MS = 450;
 
 export function init(opts = {}) {
   onTranscription = opts.onTranscription || null;
@@ -44,7 +46,7 @@ export function init(opts = {}) {
 }
 
 export function getIsRecording() {
-  return isRecording;
+  return isRecording || isStoppingRecording;
 }
 
 export function setTargetAgent(agentId) {
@@ -149,7 +151,7 @@ function startSilenceDetection(stream, silenceTimeoutMs, threshold) {
       return;
     }
     if (Date.now() - lastSpeechAt >= silenceTimeoutMs) {
-      stopRecording();
+      stopRecording({ immediate: true });
     }
   }, 150);
 }
@@ -178,6 +180,7 @@ export async function startRecording(options = {}) {
     mediaRecorder.onstop = async () => {
       cleanupMonitoring();
       cleanupStream();
+      isStoppingRecording = false;
       if (onRecordingStopped) onRecordingStopped(targetAgent);
       if (audioChunks.length === 0) return;
       const blob = new Blob(audioChunks, { type: 'audio/webm' });
@@ -185,11 +188,12 @@ export async function startRecording(options = {}) {
       await sendToServer(blob);
     };
 
-    mediaRecorder.start(250);
+    mediaRecorder.start(100);
     isRecording = true;
+    isStoppingRecording = false;
 
     maxRecordTimer = setTimeout(() => {
-      if (isRecording) stopRecording();
+      if (isRecording) stopRecording({ immediate: true });
     }, maxRecordSeconds * 1000);
 
     startSilenceDetection(stream, silenceTimeoutMs, silenceThreshold);
@@ -202,9 +206,35 @@ export async function startRecording(options = {}) {
   }
 }
 
-export function stopRecording() {
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+export function stopRecording(options = {}) {
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+    isRecording = false;
+    isStoppingRecording = false;
+    return;
+  }
+  if (isStoppingRecording) return;
+
   isRecording = false;
+  isStoppingRecording = true;
+  cleanupMonitoring();
+
+  try {
+    if (mediaRecorder.state === 'recording') mediaRecorder.requestData?.();
+  } catch (_) {}
+
+  const tailMs = options.immediate === true ? 0 : MANUAL_STOP_TAIL_MS;
+  setTimeout(() => {
+    try {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.requestData?.();
+        mediaRecorder.stop();
+      }
+    } catch (err) {
+      console.error('[voice] Stop recording failed:', err);
+      isStoppingRecording = false;
+      cleanupStream();
+    }
+  }, tailMs);
 }
 
 export async function toggleRecording(options = {}) {
