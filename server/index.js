@@ -16,6 +16,11 @@ import { transcribe, speak, listElevenLabsVoices, searchFishAudioVoices, preview
 import { loadAgentRoster, searchAgents } from './agents.js';
 import { loadVoiceSettings, saveVoiceSettings, maskApiKey, maskSessionCookie } from './settings.js';
 import { ensureCompanionRegistry, importCodexPetPackageFromDir, loadCompanionRegistry, loadCompanionSettings, resolveAgentVisual, saveCompanionSettings } from './companions.js';
+import { ensureMusicStorage, getMusicDir, loadMusicSettings, saveMusicSettings } from './music-settings.js';
+import { ensureIntroStorage, getIntroDir, loadIntroSettings, saveIntroSettings } from './intro-settings.js';
+import { BUILT_IN_THEMES, DEFAULT_THEME_ID, DEFAULT_WORKSPACE_ID, ensureAppearanceStorage, getAppearanceBackgroundDir, loadAppearanceSettings, saveAppearanceSettings } from './appearance-settings.js';
+import { ensureBrandingStorage, getBrandingDir, loadBrandingSettings, saveBrandingSettings } from './branding-settings.js';
+import { ALLOWED_WIDGET_IDS, loadLayoutSettings, saveLayoutSettings } from './layout-settings.js';
 import { loadWakeSettings, saveWakeSettings, maskAccessKey } from './wake-settings.js';
 import { transcribeWakeAudio, warmWakeTranscriber } from './wake-transcriber.js';
 import { detectWakeKeyword, warmWakeKeywordDetector } from './wake-keyword-detector.js';
@@ -72,6 +77,83 @@ function sanitizeName(name = '') {
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '')
     .slice(0, 120) || 'file';
+}
+
+function isAllowedMusicExt(ext = '') {
+  return ['.mp3', '.wav', '.ogg', '.m4a', '.aac', '.flac', '.webm'].includes(String(ext || '').toLowerCase());
+}
+
+function isAllowedIntroExt(ext = '') {
+  return ['.mp4', '.webm', '.mov', '.m4v'].includes(String(ext || '').toLowerCase());
+}
+
+function isAllowedBackgroundExt(ext = '') {
+  return ['.png', '.jpg', '.jpeg', '.webp'].includes(String(ext || '').toLowerCase());
+}
+
+async function listMusicTracks() {
+  await ensureMusicStorage();
+  const musicDir = getMusicDir();
+  const entries = await fsp.readdir(musicDir, { withFileTypes: true }).catch(() => []);
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => {
+      const ext = extname(entry.name || '').toLowerCase();
+      const id = basename(entry.name, ext);
+      return {
+        id,
+        filename: entry.name,
+        name: id.replace(/[-_]+/g, ' ').trim() || id,
+        ext,
+        url: `${basePath}/media/music/${encodeURIComponent(entry.name)}`,
+      };
+    })
+    .filter((track) => isAllowedMusicExt(track.ext))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function listIntroVideos() {
+  await ensureIntroStorage();
+  const introDir = getIntroDir();
+  const entries = await fsp.readdir(introDir, { withFileTypes: true }).catch(() => []);
+  return entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => {
+      const ext = extname(entry.name || '').toLowerCase();
+      const id = basename(entry.name, ext);
+      return {
+        id,
+        filename: entry.name,
+        name: id.replace(/[-_]+/g, ' ').trim() || id,
+        ext,
+        url: `${basePath}/media/intros/${encodeURIComponent(entry.name)}`,
+      };
+    })
+    .filter((intro) => isAllowedIntroExt(intro.ext))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function listWorkspaceBackgrounds() {
+  await ensureAppearanceStorage();
+  const dir = getAppearanceBackgroundDir();
+  const entries = await fsp.readdir(dir, { withFileTypes: true }).catch(() => []);
+  const builtIn = [{ id: DEFAULT_WORKSPACE_ID, filename: 'room-background.png', name: 'Default Office', ext: '.png', url: `${basePath}/assets/office-art/room-background.png`, builtIn: true }];
+  const uploaded = entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => {
+      const ext = extname(entry.name || '').toLowerCase();
+      const id = basename(entry.name, ext);
+      return {
+        id,
+        filename: entry.name,
+        name: id.replace(/[-_]+/g, ' ').trim() || id,
+        ext,
+        url: `${basePath}/media/appearance/backgrounds/${encodeURIComponent(entry.name)}`,
+        builtIn: false,
+      };
+    })
+    .filter((bg) => isAllowedBackgroundExt(bg.ext));
+  return [...builtIn, ...uploaded].sort((a, b) => (a.builtIn === b.builtIn ? a.name.localeCompare(b.name) : a.builtIn ? -1 : 1));
 }
 
 async function ensureChatLibrary() {
@@ -206,9 +288,17 @@ function buildAttachmentContext(files = []) {
 }
 
 app.use(express.json());
+app.use(`${basePath}/media/music`, express.static(getMusicDir()));
+app.use(`${basePath}/media/intros`, express.static(getIntroDir()));
+app.use(`${basePath}/media/appearance/backgrounds`, express.static(getAppearanceBackgroundDir()));
+app.use(`${basePath}/media/branding`, express.static(getBrandingDir()));
 app.use(basePath || '/', express.static(join(__dirname, '..', 'public')));
 app.use(`${basePath}/api/v1`, requireApiAuth);
 await ensureCompanionRegistry();
+await ensureMusicStorage();
+await ensureIntroStorage();
+await ensureAppearanceStorage();
+await ensureBrandingStorage();
 
 const liveGeminiSessions = new Map();
 const liveGeminiWatchdogs = new Map();
@@ -253,14 +343,53 @@ function armLiveWatchdog(sessionId, text, { broadcast }) {
   liveGeminiWatchdogs.set(sessionId, timer);
 }
 
-app.get(`${basePath}/api/status`, (req, res) => {
+app.get(`${basePath}/api/status`, async (req, res) => {
+  const bridgeStatus = bridge.getStatus();
+  const voiceSettings = await loadVoiceSettings();
+  const issues = [];
+  const configuredDemo = !!bridgeStatus.configuredDemo;
+  const fellBackToDemo = !configuredDemo && bridgeStatus.mode === 'demo';
+  const liveConnected = !configuredDemo && bridgeStatus.mode === 'live' && bridgeStatus.connected;
+
+  if (configuredDemo) {
+    issues.push({ level: 'info', code: 'DEMO_MODE_ENABLED', message: 'CommandCenter is running in demo mode. Agent activity may be simulated.' });
+  } else if (fellBackToDemo) {
+    issues.push({ level: 'warn', code: 'FALLBACK_TO_DEMO', message: `Live gateway connection failed, so CommandCenter fell back to demo mode${bridgeStatus.lastFallbackReason ? ` (${bridgeStatus.lastFallbackReason})` : ''}.` });
+  }
+
+  if (!configuredDemo && !bridgeStatus.gatewayTokenConfigured) {
+    issues.push({ level: 'warn', code: 'GATEWAY_TOKEN_MISSING', message: 'No gateway token is configured for live OpenClaw mode.' });
+  }
+
+  if (bridgeStatus.lastAuthError) {
+    issues.push({ level: 'error', code: 'GATEWAY_AUTH_FAILED', message: `Gateway authentication failed: ${bridgeStatus.lastAuthError}` });
+  }
+
+  if (!voiceSettings.sttApiBase && voiceSettings.sttMode === 'api') {
+    issues.push({ level: 'warn', code: 'STT_API_BASE_MISSING', message: 'AIChat STT API mode is selected, but no STT API base URL is configured.' });
+  }
+
   res.json({
     uptime: process.uptime(),
-    bridge: bridge.getStatus(),
+    bridge: bridgeStatus,
     clients: wss.clients.size,
     voiceEnabled: true,
     agents: roster.agents,
     primaryAgentId: roster.primaryAgentId,
+    setup: {
+      mode: configuredDemo ? 'demo' : fellBackToDemo ? 'demo-fallback' : liveConnected ? 'live' : 'connecting',
+      modeLabel: configuredDemo ? 'Demo mode' : fellBackToDemo ? 'Demo fallback' : liveConnected ? 'Live OpenClaw' : 'Connecting to OpenClaw',
+      demoMode: configuredDemo,
+      requestedMode: bridgeStatus.requestedMode,
+      actualMode: bridgeStatus.mode,
+      gatewayConnected: bridgeStatus.connected,
+      gatewayTokenConfigured: bridgeStatus.gatewayTokenConfigured,
+      gatewayTokenSource: bridgeStatus.gatewayTokenSource,
+      sttMode: voiceSettings.sttMode || 'api',
+      sttProvider: voiceSettings.sttApiProvider || 'fish',
+      ttsProvider: voiceSettings.provider || 'elevenlabs',
+      issues,
+    },
   });
 });
 
@@ -406,6 +535,16 @@ app.get(`${basePath}/api/settings/voice`, async (req, res) => {
       fishIncludeAsteriskNarration: settings.fishIncludeAsteriskNarration === true,
       fishPlaybackMode: settings.fishPlaybackMode || 'auto',
       fishAutoStreamMinChars: settings.fishAutoStreamMinChars || 260,
+      sttMode: settings.sttMode || 'api',
+      sttApiBase: settings.sttApiBase || 'https://techexplore.us/aichat',
+      sttApiProvider: settings.sttApiProvider || 'fish',
+      hasSttFishApiKey: !!settings.sttFishApiKey,
+      sttFishApiKeyMasked: maskApiKey(settings.sttFishApiKey),
+      sttFishUsesServerKey: true,
+      hasSttOpenAiApiKey: !!settings.sttOpenAiApiKey,
+      sttOpenAiApiKeyMasked: maskApiKey(settings.sttOpenAiApiKey),
+      hasSttElevenlabsApiKey: !!settings.sttElevenlabsApiKey,
+      sttElevenlabsApiKeyMasked: maskApiKey(settings.sttElevenlabsApiKey),
       agentVoices: settings.agentVoices || {},
       elevenlabsAgentVoices: settings.elevenlabsAgentVoices || {},
       fishAgentVoices: settings.fishAgentVoices || {},
@@ -547,9 +686,48 @@ app.post(`${basePath}/api/companions/import-zip`, upload.single('package'), asyn
   }
 });
 
-app.get(`${basePath}/api/companions/imports/:slug/:file`, async (req, res) => {
+app.post(`${basePath}/api/companions/import-folder`, upload.array('files', 500), async (req, res) => {
+  try {
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (!files.length) {
+      return res.status(400).json({ ok: false, error: 'No folder files uploaded', code: 'BAD_REQUEST' });
+    }
+    const uploadedPaths = files.map((file) => String(file.originalname || '').replace(/\\/g, '/')).filter(Boolean);
+    console.log('[companions] import-folder upload received', { count: uploadedPaths.length, first: uploadedPaths[0], paths: uploadedPaths.slice(0, 20) });
+    const agentId = String(req.body?.agentId || '').trim();
+    const tempDir = await fsp.mkdtemp(join(os.tmpdir(), 'cc-pet-folder-import-'));
+    for (const file of files) {
+      const relativePath = String(file.originalname || '').replace(/\\/g, '/').replace(/^\/+/, '');
+      if (!relativePath || relativePath.includes('..')) continue;
+      const destPath = join(tempDir, relativePath);
+      await fsp.mkdir(dirname(destPath), { recursive: true });
+      await fsp.writeFile(destPath, file.buffer);
+    }
+    const imported = await importCodexPetPackageFromDir(tempDir, basePath);
+    const items = await loadCompanionRegistry(basePath);
+    let assigned = null;
+    if (agentId && roster.agents.find((agent) => agent.id === agentId)) {
+      const existing = await loadCompanionSettings();
+      const saved = await saveCompanionSettings({
+        ...existing,
+        agentVisuals: {
+          ...(existing.agentVisuals || {}),
+          [agentId]: { mode: 'companion', companionId: imported.item.id, scale: 1 },
+        },
+      });
+      assigned = resolveAgentVisual(agentId, saved, items);
+    }
+    res.json({ ok: true, item: imported.item, items, assigned });
+  } catch (err) {
+    console.error('[companions] import-folder failed:', err?.message || err);
+    res.status(400).json({ ok: false, error: err.message, code: 'IMPORT_FAILED' });
+  }
+});
+
+app.get(`${basePath}/api/companions/imports/:slug/*`, async (req, res) => {
   const slug = basename(String(req.params.slug || ''));
-  const file = basename(String(req.params.file || ''));
+  const file = String(req.params[0] || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!file || file.includes('..')) return res.status(400).json({ ok: false, error: 'Invalid import asset path', code: 'BAD_REQUEST' });
   const fullPath = join(__dirname, '..', 'data', 'companions', 'imports', slug, file);
   if (!existsSync(fullPath)) return res.status(404).json({ ok: false, error: 'Imported companion asset not found', code: 'NOT_FOUND' });
   res.sendFile(fullPath);
@@ -562,6 +740,289 @@ app.get(`${basePath}/api/companions/:id`, async (req, res) => {
   res.json({ ok: true, item });
 });
 
+
+app.get(`${basePath}/api/settings/appearance`, async (req, res) => {
+  try {
+    const settings = await loadAppearanceSettings();
+    const backgrounds = await listWorkspaceBackgrounds();
+    const customThemes = Array.isArray(settings.customThemes) ? settings.customThemes : [];
+    const themes = [...BUILT_IN_THEMES, ...customThemes];
+    const themeId = themes.find((theme) => theme.id === settings.themeId) ? settings.themeId : DEFAULT_THEME_ID;
+    const workspaceBackgroundId = backgrounds.find((bg) => bg.id === settings.workspaceBackgroundId) ? settings.workspaceBackgroundId : DEFAULT_WORKSPACE_ID;
+    res.json({ ok: true, settings: { ...settings, themeId, workspaceBackgroundId }, themes, backgrounds });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/settings/appearance`, async (req, res) => {
+  try {
+    const existing = await loadAppearanceSettings();
+    const backgrounds = await listWorkspaceBackgrounds();
+    const customThemes = Array.isArray(existing.customThemes) ? existing.customThemes : [];
+    const themes = [...BUILT_IN_THEMES, ...customThemes];
+    const themeId = String(req.body?.themeId || existing.themeId || DEFAULT_THEME_ID).trim();
+    const workspaceBackgroundId = String(req.body?.workspaceBackgroundId || existing.workspaceBackgroundId || DEFAULT_WORKSPACE_ID).trim();
+    const saved = await saveAppearanceSettings({
+      ...existing,
+      ...req.body,
+      themeId: themes.find((theme) => theme.id === themeId) ? themeId : DEFAULT_THEME_ID,
+      workspaceBackgroundId: backgrounds.find((bg) => bg.id === workspaceBackgroundId) ? workspaceBackgroundId : DEFAULT_WORKSPACE_ID,
+    });
+    res.json({ ok: true, settings: saved, themes, backgrounds });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/settings/appearance/theme`, async (req, res) => {
+  try {
+    const existing = await loadAppearanceSettings();
+    const theme = req.body?.theme;
+    if (!theme || typeof theme !== 'object') return res.status(400).json({ ok: false, error: 'Missing theme', code: 'BAD_REQUEST' });
+    const nextCustomThemes = [...(existing.customThemes || []).filter((item) => item.id !== String(theme.id || '').trim()), {
+      id: String(theme.id || '').trim() || `custom-theme-${Date.now()}`,
+      name: String(theme.name || 'Custom Theme').trim(),
+      builtIn: false,
+      colors: theme.colors || {},
+    }];
+    const saved = await saveAppearanceSettings({ ...existing, themeId: String(theme.id || '').trim(), customThemes: nextCustomThemes });
+    res.json({ ok: true, settings: saved, themes: [...BUILT_IN_THEMES, ...(saved.customThemes || [])] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/settings/appearance/background`, upload.single('background'), async (req, res) => {
+  try {
+    if (!req.file?.buffer?.length) return res.status(400).json({ ok: false, error: 'No background image uploaded', code: 'BAD_REQUEST' });
+    const ext = extname(String(req.file.originalname || '')).toLowerCase();
+    if (!isAllowedBackgroundExt(ext)) return res.status(400).json({ ok: false, error: 'Unsupported background format', code: 'BAD_REQUEST' });
+    const dir = getAppearanceBackgroundDir();
+    const base = sanitizeName(basename(String(req.file.originalname || 'workspace'), ext)) || 'workspace';
+    let fileName = `${base}${ext}`;
+    let fullPath = join(dir, fileName);
+    let counter = 2;
+    while (existsSync(fullPath)) {
+      fileName = `${base}-${counter}${ext}`;
+      fullPath = join(dir, fileName);
+      counter += 1;
+    }
+    await fsp.writeFile(fullPath, req.file.buffer);
+    const backgrounds = await listWorkspaceBackgrounds();
+    const uploaded = backgrounds.find((bg) => bg.filename === fileName) || null;
+    const saved = await saveAppearanceSettings({ ...(await loadAppearanceSettings()), workspaceBackgroundId: uploaded?.id || DEFAULT_WORKSPACE_ID });
+    res.json({ ok: true, background: uploaded, backgrounds, settings: saved, themes: [...BUILT_IN_THEMES, ...((await loadAppearanceSettings()).customThemes || [])] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get(`${basePath}/api/settings/branding`, async (req, res) => {
+  try {
+    res.json({ ok: true, settings: await loadBrandingSettings() });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/settings/branding`, async (req, res) => {
+  try {
+    const existing = await loadBrandingSettings();
+    const saved = await saveBrandingSettings({ ...existing, ...req.body });
+    res.json({ ok: true, settings: saved });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/settings/branding/logo`, upload.single('logo'), async (req, res) => {
+  try {
+    if (!req.file?.buffer?.length) return res.status(400).json({ ok: false, error: 'No logo uploaded', code: 'BAD_REQUEST' });
+    const ext = extname(String(req.file.originalname || '')).toLowerCase();
+    if (!['.png', '.jpg', '.jpeg', '.webp', '.svg'].includes(ext)) return res.status(400).json({ ok: false, error: 'Unsupported logo format', code: 'BAD_REQUEST' });
+    const name = `logo-${Date.now()}${ext}`;
+    await fsp.writeFile(join(getBrandingDir(), name), req.file.buffer);
+    const saved = await saveBrandingSettings({ ...(await loadBrandingSettings()), logoUrl: `${basePath}/media/branding/${encodeURIComponent(name)}` });
+    res.json({ ok: true, settings: saved });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' }); }
+});
+
+app.post(`${basePath}/api/settings/branding/favicon`, upload.single('favicon'), async (req, res) => {
+  try {
+    if (!req.file?.buffer?.length) return res.status(400).json({ ok: false, error: 'No favicon uploaded', code: 'BAD_REQUEST' });
+    const ext = extname(String(req.file.originalname || '')).toLowerCase();
+    if (!['.ico', '.png', '.svg'].includes(ext)) return res.status(400).json({ ok: false, error: 'Unsupported favicon format', code: 'BAD_REQUEST' });
+    const name = `favicon-${Date.now()}${ext}`;
+    await fsp.writeFile(join(getBrandingDir(), name), req.file.buffer);
+    const saved = await saveBrandingSettings({ ...(await loadBrandingSettings()), faviconUrl: `${basePath}/media/branding/${encodeURIComponent(name)}` });
+    res.json({ ok: true, settings: saved });
+  } catch (err) { res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' }); }
+});
+
+app.get(`${basePath}/api/settings/layout`, async (req, res) => {
+  try { res.json({ ok: true, settings: await loadLayoutSettings() }); }
+  catch (err) { res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' }); }
+});
+
+app.post(`${basePath}/api/settings/layout`, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const invalidIds = [
+      ...((Array.isArray(body.widgetOrder) ? body.widgetOrder : []).filter((id) => !ALLOWED_WIDGET_IDS.includes(String(id || '').trim()))),
+      ...((Array.isArray(body.hiddenWidgets) ? body.hiddenWidgets : []).filter((id) => !ALLOWED_WIDGET_IDS.includes(String(id || '').trim()))),
+      ...Object.keys(body.collapsedWidgets || {}).filter((id) => !ALLOWED_WIDGET_IDS.includes(String(id || '').trim())),
+    ];
+    if (invalidIds.length) {
+      return res.status(400).json({ ok: false, error: `Unknown widget id(s): ${[...new Set(invalidIds)].join(', ')}`, code: 'BAD_REQUEST' });
+    }
+    const existing = await loadLayoutSettings();
+    const saved = await saveLayoutSettings({ ...existing, ...body });
+    res.json({ ok: true, settings: saved });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get(`${basePath}/api/settings/intro`, async (req, res) => {
+  try {
+    const settings = await loadIntroSettings();
+    const intros = await listIntroVideos();
+    let selectedIntroId = String(settings.selectedIntroId || '').trim();
+    if (selectedIntroId && !intros.find((intro) => intro.id === selectedIntroId)) selectedIntroId = '';
+    if (!selectedIntroId && intros[0]?.id) selectedIntroId = intros[0].id;
+    res.json({ ok: true, settings: { ...settings, selectedIntroId } });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/settings/intro`, async (req, res) => {
+  try {
+    const existing = await loadIntroSettings();
+    const intros = await listIntroVideos();
+    const requestedIntroId = String(req.body?.selectedIntroId || '').trim();
+    const safeIntroId = !requestedIntroId || intros.find((intro) => intro.id === requestedIntroId) ? requestedIntroId : '';
+    const saved = await saveIntroSettings({
+      ...existing,
+      enabled: req.body?.enabled === true,
+      volume: req.body?.volume,
+      selectedIntroId: safeIntroId,
+    });
+    res.json({ ok: true, settings: saved });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get(`${basePath}/api/intro/videos`, async (req, res) => {
+  try {
+    const intros = await listIntroVideos();
+    res.json({ ok: true, intros });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/intro/upload`, upload.single('intro'), async (req, res) => {
+  try {
+    if (!req.file?.buffer?.length) {
+      return res.status(400).json({ ok: false, error: 'No intro video uploaded', code: 'BAD_REQUEST' });
+    }
+    const ext = extname(String(req.file.originalname || '')).toLowerCase();
+    if (!isAllowedIntroExt(ext)) {
+      return res.status(400).json({ ok: false, error: 'Unsupported intro video format', code: 'BAD_REQUEST' });
+    }
+    const introDir = getIntroDir();
+    const base = sanitizeName(basename(String(req.file.originalname || 'intro'), ext)) || 'intro';
+    let fileName = `${base}${ext}`;
+    let fullPath = join(introDir, fileName);
+    let counter = 2;
+    while (existsSync(fullPath)) {
+      fileName = `${base}-${counter}${ext}`;
+      fullPath = join(introDir, fileName);
+      counter += 1;
+    }
+    await fsp.writeFile(fullPath, req.file.buffer);
+    const intros = await listIntroVideos();
+    const uploaded = intros.find((intro) => intro.filename === fileName) || null;
+    const saved = await saveIntroSettings({ ...(await loadIntroSettings()), selectedIntroId: uploaded?.id || '' });
+    res.json({ ok: true, intro: uploaded, intros, settings: saved });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get(`${basePath}/api/settings/music`, async (req, res) => {
+  try {
+    const settings = await loadMusicSettings();
+    const tracks = await listMusicTracks();
+    let selectedTrackId = String(settings.selectedTrackId || '').trim();
+    if (selectedTrackId && !tracks.find((track) => track.id === selectedTrackId)) selectedTrackId = '';
+    if (!selectedTrackId && tracks[0]?.id) selectedTrackId = tracks[0].id;
+    res.json({ ok: true, settings: { ...settings, selectedTrackId } });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/settings/music`, async (req, res) => {
+  try {
+    const existing = await loadMusicSettings();
+    const tracks = await listMusicTracks();
+    const requestedTrackId = String(req.body?.selectedTrackId || '').trim();
+    const safeTrackId = !requestedTrackId || tracks.find((track) => track.id === requestedTrackId) ? requestedTrackId : '';
+    const saved = await saveMusicSettings({
+      ...existing,
+      enabled: req.body?.enabled === true,
+      volume: req.body?.volume,
+      speechDuckLevel: req.body?.speechDuckLevel,
+      playbackScope: req.body?.playbackScope,
+      selectedTrackId: safeTrackId,
+    });
+    res.json({ ok: true, settings: saved });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get(`${basePath}/api/music/tracks`, async (req, res) => {
+  try {
+    const tracks = await listMusicTracks();
+    res.json({ ok: true, tracks });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/music/upload`, upload.single('track'), async (req, res) => {
+  try {
+    if (!req.file?.buffer?.length) {
+      return res.status(400).json({ ok: false, error: 'No audio file uploaded', code: 'BAD_REQUEST' });
+    }
+    const ext = extname(String(req.file.originalname || '')).toLowerCase();
+    if (!isAllowedMusicExt(ext)) {
+      return res.status(400).json({ ok: false, error: 'Unsupported audio format', code: 'BAD_REQUEST' });
+    }
+    const musicDir = getMusicDir();
+    const base = sanitizeName(basename(String(req.file.originalname || 'track'), ext)) || 'track';
+    let fileName = `${base}${ext}`;
+    let fullPath = join(musicDir, fileName);
+    let counter = 2;
+    while (existsSync(fullPath)) {
+      fileName = `${base}-${counter}${ext}`;
+      fullPath = join(musicDir, fileName);
+      counter += 1;
+    }
+    await fsp.writeFile(fullPath, req.file.buffer);
+    const tracks = await listMusicTracks();
+    const uploaded = tracks.find((track) => track.filename === fileName) || null;
+    const saved = await saveMusicSettings({ ...(await loadMusicSettings()), selectedTrackId: uploaded?.id || '' });
+    res.json({ ok: true, track: uploaded, tracks, settings: saved });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
 
 app.get(`${basePath}/api/v1/voice`, async (req, res) => {
   try {
@@ -654,14 +1115,20 @@ app.post(`${basePath}/api/settings/voice`, async (req, res) => {
     const next = {
       provider: body.provider || existing.provider || 'elevenlabs',
       elevenlabsApiKey: body.elevenlabsApiKey ? String(body.elevenlabsApiKey).trim() : existing.elevenlabsApiKey,
-      defaultVoiceId: String(body.defaultVoiceId || '').trim(),
+      defaultVoiceId: body.defaultVoiceId !== undefined ? String(body.defaultVoiceId || '').trim() : (existing.defaultVoiceId || ''),
       fishAudioApiBase: String(body.fishAudioApiBase || existing.fishAudioApiBase || 'https://techexplore.us/aichat').trim(),
-      fishVoiceId: String(body.fishVoiceId || '').trim(),
+      fishVoiceId: body.fishVoiceId !== undefined ? String(body.fishVoiceId || '').trim() : (existing.fishVoiceId || ''),
       fishSessionCookie: body.fishSessionCookie ? String(body.fishSessionCookie).trim() : existing.fishSessionCookie,
       fishFormat: String(body.fishFormat || existing.fishFormat || 'mp3').trim(),
       fishIncludeAsteriskNarration: body.fishIncludeAsteriskNarration === true,
       fishPlaybackMode: String(body.fishPlaybackMode || existing.fishPlaybackMode || 'auto').trim(),
       fishAutoStreamMinChars: body.fishAutoStreamMinChars ?? existing.fishAutoStreamMinChars ?? 260,
+      sttMode: body.sttMode || existing.sttMode || 'api',
+      sttApiBase: String(body.sttApiBase || existing.sttApiBase || 'https://techexplore.us/aichat').trim(),
+      sttApiProvider: body.sttApiProvider || existing.sttApiProvider || 'fish',
+      sttFishApiKey: body.sttFishApiKey ? String(body.sttFishApiKey).trim() : existing.sttFishApiKey,
+      sttOpenAiApiKey: body.sttOpenAiApiKey ? String(body.sttOpenAiApiKey).trim() : existing.sttOpenAiApiKey,
+      sttElevenlabsApiKey: body.sttElevenlabsApiKey ? String(body.sttElevenlabsApiKey).trim() : existing.sttElevenlabsApiKey,
       elevenlabsAgentVoices: body.elevenlabsAgentVoices || existing.elevenlabsAgentVoices || {},
       fishAgentVoices: body.fishAgentVoices || existing.fishAgentVoices || {},
       agentVoices: String(body.provider || existing.provider || '').trim() === 'fish'
@@ -684,6 +1151,16 @@ app.post(`${basePath}/api/settings/voice`, async (req, res) => {
         fishIncludeAsteriskNarration: saved.fishIncludeAsteriskNarration === true,
         fishPlaybackMode: saved.fishPlaybackMode || 'auto',
         fishAutoStreamMinChars: saved.fishAutoStreamMinChars || 260,
+        sttMode: saved.sttMode || 'api',
+        sttApiBase: saved.sttApiBase || 'https://techexplore.us/aichat',
+        sttApiProvider: saved.sttApiProvider || 'fish',
+        hasSttFishApiKey: !!saved.sttFishApiKey,
+        sttFishApiKeyMasked: maskApiKey(saved.sttFishApiKey),
+        sttFishUsesServerKey: true,
+        hasSttOpenAiApiKey: !!saved.sttOpenAiApiKey,
+        sttOpenAiApiKeyMasked: maskApiKey(saved.sttOpenAiApiKey),
+        hasSttElevenlabsApiKey: !!saved.sttElevenlabsApiKey,
+        sttElevenlabsApiKeyMasked: maskApiKey(saved.sttElevenlabsApiKey),
         agentVoices: saved.agentVoices,
         elevenlabsAgentVoices: saved.elevenlabsAgentVoices || {},
         fishAgentVoices: saved.fishAgentVoices || {},
@@ -706,7 +1183,106 @@ app.post(`${basePath}/api/settings/voice/voices`, async (req, res) => {
   }
 });
 
+app.post(`${basePath}/api/setup/test`, async (req, res) => {
+  const bridgeStatus = bridge.getStatus();
+  const settings = await loadVoiceSettings();
+  const checks = [];
 
+  checks.push({
+    key: 'gateway-mode',
+    ok: bridgeStatus.configuredDemo ? true : bridgeStatus.mode === 'live',
+    level: bridgeStatus.configuredDemo ? 'info' : (bridgeStatus.mode === 'live' ? 'ok' : 'warn'),
+    message: bridgeStatus.configuredDemo
+      ? 'CommandCenter is intentionally running in demo mode.'
+      : bridgeStatus.mode === 'live'
+        ? 'Live OpenClaw gateway connection is active.'
+        : bridgeStatus.mode === 'demo'
+          ? `Live OpenClaw failed and CommandCenter fell back to demo mode${bridgeStatus.lastFallbackReason ? ` (${bridgeStatus.lastFallbackReason})` : ''}.`
+          : 'Live OpenClaw gateway is not connected right now.',
+  });
+
+  if (!bridgeStatus.configuredDemo) {
+    checks.push({
+      key: 'gateway-token',
+      ok: !!bridgeStatus.gatewayTokenConfigured,
+      level: bridgeStatus.gatewayTokenConfigured ? 'ok' : 'warn',
+      message: bridgeStatus.gatewayTokenConfigured
+        ? `Gateway token is configured (${bridgeStatus.gatewayTokenSource || 'unknown source'}).`
+        : 'Gateway token is missing for live mode.',
+    });
+  }
+
+  if (bridgeStatus.lastAuthError) {
+    checks.push({
+      key: 'gateway-auth',
+      ok: false,
+      level: 'error',
+      message: `Gateway authentication failed: ${bridgeStatus.lastAuthError}`,
+    });
+  }
+
+  if ((settings.sttMode || 'api') === 'local') {
+    checks.push({
+      key: 'stt',
+      ok: true,
+      level: 'ok',
+      message: 'STT is set to local Whisper on this server.',
+    });
+  } else {
+    const provider = String(settings.sttApiProvider || 'fish');
+    const base = String(settings.sttApiBase || '').trim();
+    const hasProviderKey = provider === 'fish'
+      ? true
+      : provider === 'openai'
+        ? !!settings.sttOpenAiApiKey
+        : !!settings.sttElevenlabsApiKey;
+    checks.push({
+      key: 'stt-api-base',
+      ok: !!base,
+      level: base ? 'ok' : 'warn',
+      message: base ? `STT API base is set to ${base}.` : 'STT API base URL is missing.',
+    });
+    checks.push({
+      key: 'stt-provider',
+      ok: hasProviderKey || provider === 'fish',
+      level: hasProviderKey || provider === 'fish' ? 'ok' : 'warn',
+      message: provider === 'fish'
+        ? 'STT is set to AIChat API → Fish Audio.'
+        : hasProviderKey
+          ? `STT is set to AIChat API → ${provider}.`
+          : `${provider} STT is selected but its API key is missing.`,
+    });
+  }
+
+  if ((settings.provider || 'elevenlabs') === 'fish') {
+    checks.push({
+      key: 'tts',
+      ok: !!String(settings.fishAudioApiBase || '').trim() && !!String(settings.fishVoiceId || '').trim(),
+      level: (!!String(settings.fishAudioApiBase || '').trim() && !!String(settings.fishVoiceId || '').trim()) ? 'ok' : 'warn',
+      message: (!!String(settings.fishAudioApiBase || '').trim() && !!String(settings.fishVoiceId || '').trim())
+        ? 'Fish Audio TTS looks configured.'
+        : 'Fish Audio TTS is selected but the API base or voice ID is missing.',
+    });
+  } else {
+    checks.push({
+      key: 'tts',
+      ok: !!String(settings.elevenlabsApiKey || '').trim(),
+      level: !!String(settings.elevenlabsApiKey || '').trim() ? 'ok' : 'warn',
+      message: !!String(settings.elevenlabsApiKey || '').trim()
+        ? 'ElevenLabs TTS looks configured.'
+        : 'ElevenLabs TTS is selected but no API key is saved. CommandCenter will fall back to espeak-ng.',
+    });
+  }
+
+  const hasError = checks.some((check) => check.level === 'error');
+  const hasWarn = checks.some((check) => check.level === 'warn');
+  res.json({
+    ok: !hasError,
+    summary: hasError ? 'Setup test found blocking problems.' : hasWarn ? 'Setup test found a few things to fix.' : 'Setup test passed.',
+    tone: hasError ? 'error' : hasWarn ? 'warn' : 'ok',
+    checks,
+  });
+});
 
 app.post(`${basePath}/api/settings/voice/fish/preview`, async (req, res) => {
   try {
@@ -963,8 +1539,9 @@ function normalizeWakeText(text = '') {
 function buildWakeAliases() {
   const extraAliases = {
     orchestrator: ['astra', 'astrah'],
-    builder: ['kairo', 'cairo', 'kyro'],
+    builder: ['miyabi', 'miyabby', 'miyaby'],
     qa: ['mina', 'meena'],
+    ui: ['jane doe', 'jane', 'janedoe'],
     researcher: ['lyra', 'lira'],
     comms: ['niko', 'nico', 'neeko'],
     'emotional-support-1': ['pip', 'pipp'],
@@ -1781,81 +2358,110 @@ app.get(`${basePath}/api/chat/history/:agent`, async (req, res) => {
   }
 });
 
+app.get(`${basePath}/api/chat/sessions`, async (req, res) => {
+  try {
+    const agent = String(req.query?.agent || '').trim();
+    const limit = Number(req.query?.limit || 20);
+    const sessions = await listApiSessions({ agent, limit });
+    res.json({ ok: true, sessions });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post(`${basePath}/api/chat/sessions`, async (req, res) => {
+  try {
+    const agent = String(req.body?.agent || '').trim();
+    const title = String(req.body?.title || '').trim();
+    const metadata = req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {};
+    if (!agent) return res.status(400).json({ ok: false, error: 'agent is required' });
+    const exists = roster.agents.some((item) => item.id === agent);
+    if (!exists) return res.status(404).json({ ok: false, error: 'Agent not found' });
+    const session = await createApiSession({ agent, title, metadata });
+    res.json({ ok: true, session: getApiSessionMeta(session) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.get(`${basePath}/api/chat/sessions/:id/messages`, async (req, res) => {
+  try {
+    const session = await getApiSession(String(req.params.id || ''));
+    if (!session) return res.status(404).json({ ok: false, error: 'Session not found' });
+    const limit = Number(req.query?.limit || 0);
+    const messages = limit > 0 ? session.messages.slice(-limit) : session.messages;
+    res.json({ ok: true, sessionId: session.id, messages });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 app.post(`${basePath}/api/chat/direct`, async (req, res) => {
   try {
-    const { text, agent, fileIds = [] } = req.body || {};
-    const target = agent || roster.primaryAgentId || 'main';
-    const userText = String(text || '').trim();
+    const incomingText = req.body?.message ?? req.body?.text;
+    const userText = String(incomingText || '').trim();
+    const requestedAgent = String(req.body?.agent || '').trim();
+    const existingSessionId = String(req.body?.sessionId || '').trim();
+    const title = String(req.body?.title || '').trim();
+    const fileIds = Array.isArray(req.body?.fileIds) ? req.body.fileIds : [];
     if (!userText) return res.status(400).json({ error: 'No text provided' });
 
+    let session = null;
+    if (existingSessionId) {
+      session = await getApiSession(existingSessionId);
+      if (!session) return res.status(404).json({ error: 'Session not found' });
+    } else {
+      const target = requestedAgent || roster.primaryAgentId || 'main';
+      const exists = roster.agents.some((item) => item.id === target);
+      if (!exists) return res.status(404).json({ error: 'Agent not found' });
+      session = await createApiSession({ agent: target, title, metadata: req.body?.metadata || {} });
+    }
+
     const attachedFiles = await resolveChatFiles(fileIds);
-    const userMessage = sanitizeChatMessage({
-      role: 'user',
-      kind: 'text',
-      text: userText,
-      timestamp: Date.now(),
-      files: attachedFiles.map(toChatFileRecord),
-    });
-    await appendChatHistory(target, userMessage);
+    const attachmentPayload = apiAttachmentPayload(attachedFiles.map(toChatFileRecord));
+    const attachmentContext = buildAttachmentContext(attachedFiles);
 
-    const history = await getChatHistory(target);
-    const historyContext = buildConversationContext(history.slice(0, -1));
-    const finalMessage = [
-      historyContext,
-      `Latest user message: ${userText}`,
-      buildAttachmentContext(attachedFiles),
-    ].filter(Boolean).join('\n\n');
-
-    console.log(`[chat] Direct message to ${target}: "${finalMessage.slice(0, 120)}..."`);
+    const userAppend = await appendApiSessionMessage(session.id, { role: 'user', text: userText, meta: { files: attachmentPayload } });
+    session = userAppend.session;
 
     broadcast({
       type: 'agent:thinking',
       data: {
-        agent: target,
+        agent: session.agent,
         status: 'Processing...',
         source: 'direct-chat',
         chat: true,
+        sessionId: session.id,
         fileIds: attachedFiles.map((file) => file.id),
       },
     });
 
-    const openclawBin = process.env.OPENCLAW_BIN || 'openclaw';
-    const thinkingLevel = (target === roster.primaryAgentId || target === 'main') ? 'low' : 'off';
+    const result = await runApiChatTurn({ session, latestMessage: userText, attachmentContext });
+    const assistantMeta = { files: [] };
+    const assistantAppend = await appendApiSessionMessage(session.id, { role: 'assistant', text: result.text, meta: assistantMeta });
 
-    execFile(openclawBin, [
-      'agent', '--agent', target,
-      '--thinking', thinkingLevel,
-      '--message', finalMessage,
-    ], {
-      timeout: 90000,
-      env: { ...process.env, PATH: process.env.HOME + '/.local/bin:' + process.env.PATH },
-    }, async (err, stdout, stderr) => {
-      if (err) {
-        console.error(`[chat] Error from ${target}:`, err.message);
-        broadcast({
-          type: 'agent:error',
-          data: { agent: target, message: err.message, source: 'direct-chat', chat: true },
-        });
-        return;
-      }
-
-      const response = stdout.trim();
-      console.log(`[chat] Response from ${target}: "${response.slice(0, 80)}..."`);
-      await appendChatHistory(target, {
-        role: 'agent',
-        kind: 'text',
-        text: response,
-        timestamp: Date.now(),
-        files: [],
-      });
-
-      broadcast({
-        type: 'agent:responding',
-        data: { agent: target, message: response, source: 'direct-chat', chat: true },
-      });
+    broadcast({
+      type: 'agent:responding',
+      data: { agent: session.agent, message: result.text, source: 'direct-chat', chat: true, sessionId: session.id },
     });
 
-    res.json({ ok: true, agent: target, text: userText, fileIds: attachedFiles.map((file) => file.id), message: userMessage });
+    res.json({
+      ok: true,
+      session: getApiSessionMeta(assistantAppend.session),
+      agent: session.agent,
+      text: userText,
+      fileIds: attachedFiles.map((file) => file.id),
+      message: userAppend.message,
+      response: assistantAppend.message,
+      agentMessage: {
+        id: assistantAppend.message.id,
+        role: 'agent',
+        kind: 'text',
+        text: assistantAppend.message.text,
+        timestamp: assistantAppend.message.timestamp,
+        files: [],
+      },
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1935,6 +2541,19 @@ bridge.on('disconnected', () => {
 
 bridge.on('event', (event) => {
   broadcast(event);
+});
+
+app.use((err, req, res, next) => {
+  if (!err) return next();
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ ok: false, error: err.message, code: err.code || 'UPLOAD_ERROR' });
+  }
+  const accept = String(req.headers.accept || '');
+  const wantsJson = req.path.startsWith(`${basePath}/api/`) || accept.includes('application/json');
+  if (wantsJson) {
+    return res.status(500).json({ ok: false, error: err.message || 'Internal Server Error', code: 'INTERNAL_ERROR' });
+  }
+  return next(err);
 });
 
 server.listen(config.port, '0.0.0.0', () => {

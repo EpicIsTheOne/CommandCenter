@@ -1,101 +1,188 @@
-# OpenClaw Command Center — Agent Setup Instructions
+# OpenClaw Command Center — Setup Instructions
 
-These are step-by-step instructions for an OpenClaw agent to self-configure the Command Center. Follow them in order.
+This is the practical install flow for getting CommandCenter running without mystery failures.
 
 ---
 
-## Step 1: Check Prerequisites
+## 1) Prerequisites
 
-Verify the following are installed:
-- **Node.js 18+** — run `node --version` (must be v18 or higher)
-- **npm** — run `npm --version`
-- **OpenClaw CLI** — run `openclaw --version` (only needed if `DEMO_MODE=false`)
+Verify:
+- **Node.js 18+** — `node --version`
+- **npm** — `npm --version`
+- **OpenClaw CLI** — `openclaw --version` (only needed for live mode)
+- **ffmpeg** — required for audio normalization/transcription
 
-If Node.js is missing, install it from https://nodejs.org or via your package manager.
+If Node.js or ffmpeg is missing, install them first.
 
-## Step 2: Install Dependencies
-
-```bash
-npm install
-```
-
-This installs Express, WebSocket, Multer, OpenAI SDK, and dotenv.
-
-## Step 3: Configure Environment
+## 2) Install
 
 ```bash
+npm ci
 cp .env.example .env
 ```
 
-Edit `.env` and set:
+(`npm install` is fine too, but `npm ci` is preferred for reproducible fresh-instance verification.)
 
-| Variable | Required? | Description |
-|----------|-----------|-------------|
-| `DEMO_MODE` | No | `true` (default) runs without a gateway. Set `false` for real agents. |
-| `GATEWAY_TOKEN` | If `DEMO_MODE=false` | Your OpenClaw gateway auth token |
-| `OPENAI_API_KEY` | For voice | Enables Whisper STT + TTS. Leave blank to disable voice. |
-| `WEATHER_LOCATION` | No | City,Region,Country for weather widget (default: Kingston,Ontario,Canada) |
-| `PORT` | No | Server port (default: 3000) |
-| `GATEWAY_URL` | No | Gateway WebSocket URL (default: ws://127.0.0.1:18789) |
-
-## Step 4: Set Up Agent Config (skip if DEMO_MODE=true)
-
-Copy the example agent config to the OpenClaw config directory:
+## 2.5) Copy/paste quick start (demo mode)
 
 ```bash
-mkdir -p ~/.openclaw
-cp config/openclaw.json.example ~/.openclaw/openclaw.json
+npm ci && cp .env.example .env
+sed -i 's/^DEMO_MODE=.*/DEMO_MODE=true/' .env
+npm start
 ```
 
-Edit `~/.openclaw/openclaw.json` to set your preferred models and providers.
+Open `http://localhost:3000`.
 
-## Step 5: Set Up Agent System Prompts (skip if DEMO_MODE=true)
-
-The main agent (Jansky) reads its prompt from `~/.openclaw/workspace/SYSTEM.md`:
+## 2.6) Copy/paste quick start (live mode, same host as OpenClaw)
 
 ```bash
-mkdir -p ~/.openclaw/workspace
-cp agents/main/SYSTEM.md ~/.openclaw/workspace/SYSTEM.md
+npm ci && cp .env.example .env
+sed -i 's/^DEMO_MODE=.*/DEMO_MODE=false/' .env
+sed -i 's|^GATEWAY_URL=.*|GATEWAY_URL=ws://127.0.0.1:18789|' .env
+sed -i 's/^GATEWAY_TOKEN=.*/GATEWAY_TOKEN=/' .env
+npm start
 ```
 
-Sub-agent prompts are read from their directories in this repo — verify they exist:
+Then verify status:
 
 ```bash
-ls agents/claw-1/SYSTEM.md
-ls agents/claw-2/SYSTEM.md
+curl -s http://localhost:3000/api/status
 ```
 
-## Step 6: Optional — Generate HTTPS Certs
+Expected output (minimum):
+- `setup.mode` is `demo` (demo run) or `live` (live run)
+- `setup.gatewayConnected` is `true` for live mode
+- `setup.issues` is empty or only informational
 
-Only needed if your browser requires HTTPS (e.g., Chromium kiosk on Pi):
+## 3) Choose your mode first
 
-```bash
-openssl req -x509 -newkey rsa:2048 -keyout server/key.pem -out server/cert.pem -days 365 -nodes -subj '/CN=localhost'
+This is the most important setup decision.
+
+### Demo mode
+Use this if you just want to preview the UI.
+
+```env
+DEMO_MODE=true
 ```
 
-The server auto-detects `server/cert.pem` + `server/key.pem` and uses HTTPS if found, otherwise falls back to HTTP.
+What demo mode means:
+- the interface works
+- agent activity may be simulated
+- OpenClaw does **not** need to be connected
 
-## Step 7: Start the Server
+### Live OpenClaw mode
+Use this if you want real agents.
+
+```env
+DEMO_MODE=false
+GATEWAY_URL=ws://127.0.0.1:18789
+```
+
+For live mode, CommandCenter needs a valid OpenClaw gateway token.
+
+Good news: if CommandCenter is running on the same machine as OpenClaw, it now tries to auto-detect the token from `~/.openclaw/openclaw.json` when `GATEWAY_TOKEN` is blank.
+
+If that auto-detect fails for any reason, the Setup Status block should now say so clearly instead of pretending live mode succeeded.
+
+If you want to set it manually, add:
+
+```env
+GATEWAY_TOKEN=your_openclaw_gateway_token_here
+```
+
+## 4) Voice setup
+
+Voice is no longer just “paste OpenAI key.” There are separate input and output systems.
+
+### Listening / STT
+Choose one:
+- **Local Whisper on this server**
+- **AIChat STT API**
+
+If using AIChat STT API, CommandCenter supports:
+- Fish Audio STT
+- OpenAI STT
+- ElevenLabs STT
+
+### Speaking / TTS
+Choose one:
+- **Fish Audio via AIChat tagged API**
+- **ElevenLabs**
+- fallback: **espeak-ng** if premium TTS is not configured
+
+### Recommended default for Epic’s setup
+- STT: **AIChat API → Fish Audio**
+- TTS: **Fish Audio via AIChat**
+
+Most voice configuration is done in the **Settings** UI after boot.
+
+## 5) Start the server
 
 ```bash
 npm start
 ```
 
-## Step 8: Verify
+## 6) Open the app
 
-Open http://localhost:3000 (or https://localhost:3000 if you generated certs).
+Visit:
+- `http://localhost:3000`
+- or `https://localhost:3000` if you generated certs
 
-You should see:
-- **Left zone**: Animated mascot
-- **Right zone**: Pixel art office with 3 agents at desks, furniture, wall widgets
-- **Bottom zone**: Terminal log
+## 7) Read the setup status before testing voice
 
-If `DEMO_MODE=true`, the bridge will run in demo mode and the office will animate with simulated agent activity.
+Open **Settings** and check the **Setup Status** block.
 
-## Step 9: Report to User
+It should tell you whether you are in:
+- **Demo Mode**
+- **Live Connected**
+- **Demo Fallback**
+- **Connecting**
+
+You can also verify quickly via API:
+
+```bash
+curl -s http://localhost:3000/api/status
+```
+
+Look at `setup.mode`, `setup.modeLabel`, `setup.gatewayConnected`, and `setup.issues`.
+
+If live connection fails, CommandCenter should now make that obvious instead of quietly pretending everything is fine.
+
+## 8) Common first-run problems
+
+### UI looks alive, but agents are fake
+You are probably in **demo mode** or **demo fallback**.
+
+### Gateway auth failed
+Your `GATEWAY_TOKEN` is wrong, stale, or missing.
+
+Quick checks:
+- If running on the same host as OpenClaw, leave `GATEWAY_TOKEN` blank and restart CommandCenter so auto-detect can run.
+- If setting manually, ensure it matches OpenClaw `gateway.auth.token` exactly.
+- Recheck status using `/api/status` and confirm whether mode is `live` or `demo-fallback`.
+
+### Voice records but no transcript comes back
+Usually one of these:
+- STT provider is not configured
+- AIChat STT base URL is wrong
+- audio format was rejected upstream
+
+### Agent replied in logs, but no audio played
+Usually TTS is unconfigured or browser playback/autoplay got blocked.
+
+## 9) Optional HTTPS certs
+
+Only needed if your browser/device requires HTTPS:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout server/key.pem -out server/cert.pem -days 365 -nodes -subj '/CN=localhost'
+```
+
+## 10) What to report after setup
 
 Tell the user:
-- The server is running on port 3000
-- Whether demo mode or live gateway mode is active
-- Whether voice is enabled (depends on OPENAI_API_KEY)
-- The weather widget location
+- which URL the app is running on
+- whether it is in **demo**, **live**, or **demo fallback** mode
+- whether gateway auth succeeded
+- which STT/TTS providers are selected
+- whether voice was actually tested successfully

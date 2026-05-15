@@ -1,16 +1,20 @@
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 import config from './config.js';
+import { loadAgentRoster } from './agents.js';
 
-// Demo events — idle only, no fake work or TTS-triggering responses
-const DEMO_EVENTS = [
-  { type: 'agent:idle', data: { agent: 'main', status: 'Standing by' } },
-  { type: 'agent:idle', data: { agent: 'claw-1', status: 'Ready' } },
-  { type: 'agent:idle', data: { agent: 'claw-2', status: 'Ready' } },
-  { type: 'agent:idle', data: { agent: 'main', status: 'All systems nominal' } },
-  { type: 'agent:idle', data: { agent: 'claw-1', status: 'Awaiting tasks' } },
-  { type: 'agent:idle', data: { agent: 'claw-2', status: 'Standby' } },
-];
+function buildDemoEvents() {
+  const { agents, primaryAgentId } = loadAgentRoster();
+  const boss = primaryAgentId || agents[0]?.id || 'main';
+  const events = [];
+  for (const agent of agents) {
+    events.push({ type: 'agent:idle', data: { agent: agent.id, status: agent.id === boss ? 'Standing by' : 'Ready' } });
+    events.push({ type: 'agent:idle', data: { agent: agent.id, status: agent.id === boss ? 'All systems nominal' : 'Awaiting tasks' } });
+  }
+  return events.length ? events : [{ type: 'agent:idle', data: { agent: 'main', status: 'Standing by' } }];
+}
+
+const DEMO_EVENTS = buildDemoEvents();
 
 let rpcId = 0;
 
@@ -25,6 +29,10 @@ export default class OpenClawBridge extends EventEmitter {
     this.connected = false;
     this.connectAttempts = 0;
     this.maxConnectAttempts = 3;
+    this.mode = config.demoMode ? 'demo' : 'connecting';
+    this.lastError = '';
+    this.lastAuthError = '';
+    this.lastFallbackReason = '';
   }
 
   start() {
@@ -45,7 +53,8 @@ export default class OpenClawBridge extends EventEmitter {
 
   startDemo() {
     this.connected = true;
-    this.emit('connected', { mode: 'demo' });
+    this.mode = 'demo';
+    this.emit('connected', { mode: 'demo', fallbackReason: this.lastFallbackReason || '', authError: this.lastAuthError || '' });
     this.scheduleDemoEvent();
   }
 
@@ -63,6 +72,7 @@ export default class OpenClawBridge extends EventEmitter {
 
   connectGateway() {
     this.connectAttempts++;
+    this.mode = 'connecting';
     console.log(`[bridge] Connecting to gateway at ${config.gatewayUrl} (attempt ${this.connectAttempts}/${this.maxConnectAttempts})`);
 
     if (this.connectAttempts > this.maxConnectAttempts) {
@@ -73,8 +83,9 @@ export default class OpenClawBridge extends EventEmitter {
     try {
       this.ws = new WebSocket(config.gatewayUrl);
     } catch (err) {
+      this.lastError = err.message || 'Failed to create gateway WebSocket';
       console.error('[bridge] Failed to create WebSocket:', err.message);
-      this.fallbackToDemo();
+      this.fallbackToDemo('gateway-websocket-create-failed');
       return;
     }
 
@@ -83,6 +94,7 @@ export default class OpenClawBridge extends EventEmitter {
     this.ws.on('open', () => {
       console.log('[bridge] Gateway WebSocket open');
       this.reconnectDelay = 1000;
+      this.lastError = '';
     });
 
     this.ws.on('message', (raw) => {
@@ -98,11 +110,12 @@ export default class OpenClawBridge extends EventEmitter {
       console.log('[bridge] Gateway connection closed');
       const wasConnected = this.connected;
       this.connected = false;
+      this.mode = 'disconnected';
       this.emit('disconnected');
 
       if (!authenticated && !wasConnected) {
         if (this.connectAttempts >= this.maxConnectAttempts) {
-          this.fallbackToDemo();
+          this.fallbackToDemo(this.lastAuthError ? 'gateway-auth-failed' : 'gateway-connect-failed');
           return;
         }
       }
@@ -110,6 +123,7 @@ export default class OpenClawBridge extends EventEmitter {
     });
 
     this.ws.on('error', (err) => {
+      this.lastError = err.message || 'Gateway socket error';
       console.error('[bridge] Gateway error:', err.message);
     });
   }
@@ -150,7 +164,10 @@ export default class OpenClawBridge extends EventEmitter {
     if (msg.type === 'res' && msg.ok && msg.payload?.type === 'hello-ok') {
       console.log('[bridge] Gateway authenticated! Protocol v' + msg.payload.protocol);
       this.connected = true;
+      this.mode = 'live';
       this.connectAttempts = 0;
+      this.lastAuthError = '';
+      this.lastFallbackReason = '';
       onAuth();
       this.emit('connected', { mode: 'live' });
       return;
@@ -158,7 +175,12 @@ export default class OpenClawBridge extends EventEmitter {
 
     // RPC v3: connect error
     if (msg.type === 'res' && !msg.ok) {
-      console.error('[bridge] Gateway RPC error:', msg.error?.message || JSON.stringify(msg.error));
+      const errorMessage = msg.error?.message || JSON.stringify(msg.error);
+      this.lastError = errorMessage;
+      if (/token|auth|unauthor/i.test(errorMessage)) {
+        this.lastAuthError = errorMessage;
+      }
+      console.error('[bridge] Gateway RPC error:', errorMessage);
       return;
     }
 
@@ -240,9 +262,11 @@ export default class OpenClawBridge extends EventEmitter {
     }, this.reconnectDelay);
   }
 
-  fallbackToDemo() {
+  fallbackToDemo(reason = '') {
     if (this.connected) return;
-    console.log('[bridge] Gateway unavailable, falling back to demo mode');
+    this.lastFallbackReason = String(reason || 'gateway-unavailable');
+    this.mode = 'demo';
+    console.log(`[bridge] Gateway unavailable, falling back to demo mode (${this.lastFallbackReason})`);
     if (this.ws) {
       this.ws.removeAllListeners();
       this.ws.close();
@@ -252,10 +276,20 @@ export default class OpenClawBridge extends EventEmitter {
   }
 
   getStatus() {
+    const configuredDemo = !!config.demoMode;
+    const requestedMode = configuredDemo ? 'demo' : 'live';
+    const actualMode = this.mode || (configuredDemo ? 'demo' : 'disconnected');
     return {
       connected: this.connected,
-      mode: config.demoMode ? 'demo' : (this.connected ? 'live' : 'disconnected'),
+      mode: actualMode,
+      requestedMode,
       gatewayUrl: config.gatewayUrl,
+      gatewayTokenConfigured: !!config.gatewayToken,
+      gatewayTokenSource: config.gatewayTokenSource || (config.gatewayToken ? 'env' : 'missing'),
+      lastError: this.lastError,
+      lastAuthError: this.lastAuthError,
+      lastFallbackReason: this.lastFallbackReason,
+      configuredDemo,
     };
   }
 }
