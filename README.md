@@ -17,6 +17,9 @@ npm start
 
 With zero config, the app runs in **demo mode** with simulated agent activity.
 
+> Need the full install/config flow, troubleshooting, and live-mode details?
+> See **[SETUP.md](./SETUP.md)** for the complete setup guide.
+
 For **live OpenClaw integration**:
 - set `DEMO_MODE=false`
 - point `GATEWAY_URL` at your OpenClaw gateway
