@@ -19,6 +19,13 @@ let particles = [];
 
 // Pixel scale factor - draws chunky pixels
 const PX = 4;
+const BASE = window.__BASE_PATH__ || '';
+const FAIRY_ASSETS = [
+  'part-1.png', 'part-2.png', 'part-3.png', 'part-4.png', 'part-5.png', 'part-6.png', 'part-7.png',
+].map((name) => `${BASE}/assets/fairy-status/${name}`);
+const FAIRY_LAYER_ORDER = [4, 5, 6, 0, 2, 1, 3];
+const FAIRY_ASSEMBLED_URL = `${BASE}/assets/fairy-status/fairy-assembled.png`;
+const fairyImageCache = new Map();
 
 export function init(canvasId) {
   canvas = document.getElementById(canvasId);
@@ -80,74 +87,246 @@ export function draw() {
 // --- Procedural Pixel Crab ---
 
 function drawProceduralCrab() {
-  const cx = Math.floor(canvas.width / 2);
-  const cy = Math.floor(canvas.height / 2);
-  const em = EMOTIONS[emotion];
+  drawBangbooStatusAnimation();
+}
+
+
+function getSceneFairyImage(url = '') {
+  if (!url) return null;
+  if (fairyImageCache.has(url)) return fairyImageCache.get(url);
+  const img = new Image();
+  img.src = url;
+  fairyImageCache.set(url, img);
+  return img;
+}
+
+function drawAssembledFairyStatus(img, cx, cy, w, h, em, t) {
+  const accent = em.color || '#72E7FF';
+  const bob = Math.sin(t * 1.45) * 7;
+  const breathe = 1 + Math.sin(t * 2.0) * 0.018;
+  const maxW = w * 0.78;
+  const maxH = h * 0.76;
+  const baseScale = Math.min(maxW / img.naturalWidth, maxH / img.naturalHeight);
+  const drawW = img.naturalWidth * baseScale * breathe;
+  const drawH = img.naturalHeight * baseScale * breathe;
+  const x = cx - drawW / 2;
+  const y = cy - drawH / 2 + bob;
+
+  drawBangbooBackdrop(cx, cy + bob, Math.max(0.75, Math.min(1.45, Math.min(w, h) / 260)), accent, t);
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = 0.16 + Math.sin(t * 2.4) * 0.025;
+  ctx.fillStyle = hexToRgba(accent, emotion === 'error' ? 0.55 : 0.38);
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + bob, drawW * 0.34, drawH * 0.30, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  ctx.imageSmoothingEnabled = true;
+  ctx.shadowColor = emotion === 'error' ? 'rgba(255, 76, 105, 0.48)' : hexToRgba(accent, 0.42);
+  ctx.shadowBlur = 18;
+  ctx.drawImage(img, x, y, drawW, drawH);
+  ctx.restore();
+  ctx.imageSmoothingEnabled = false;
+
+}
+
+function getFairyPart(index) {
+  const url = FAIRY_ASSETS[index];
+  if (!url) return null;
+  if (fairyImageCache.has(url)) return fairyImageCache.get(url);
+  const img = new Image();
+  img.src = url;
+  fairyImageCache.set(url, img);
+  return img;
+}
+
+function drawBangbooStatusAnimation() {
+  const w = canvas.width;
+  const h = canvas.height;
+  const cx = w / 2;
+  const cy = h / 2;
+  const em = EMOTIONS[emotion] || EMOTIONS.idle;
   const t = tick / 1000;
+  const loaded = FAIRY_ASSETS.map((_, i) => getFairyPart(i));
+  const ready = loaded.every((img) => img?.complete && img.naturalWidth);
+  if (!ready) return drawBangbooFallback();
 
-  // Body bob
-  const bob = Math.sin(t * 2) * PX;
+  const scale = Math.max(0.72, Math.min(1.55, Math.min(w, h) / 250));
+  const bob = Math.sin(t * 1.55) * 7 * scale;
+  const breathe = 1 + Math.sin(t * 2.1) * 0.018;
+  const x = cx;
+  const y = cy + bob;
+  const accent = em.color || '#72E7FF';
+  const activeBoost = ['listening', 'thinking', 'working'].includes(emotion) ? 1 : 0;
 
-  // Shell (main body) - rounded crab shape
-  const shellColor = em.color;
-  const shellDark = darken(shellColor, 0.4);
-  const shellMid = darken(shellColor, 0.2);
+  drawBangbooBackdrop(cx, cy, scale, accent, t);
 
-  // Body pixels (12x8 grid, centered)
-  const bodyW = 12;
-  const bodyH = 8;
-  const bx = cx - (bodyW * PX) / 2;
-  const by = cy - (bodyH * PX) / 2 + bob;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(scale * breathe, scale * breathe);
 
-  // Shell shape - pixel pattern
-  const shell = [
-    '  XXXXXXXX  ',
-    ' XXXXXXXXXX ',
-    'XXXXXXXXXXXX',
-    'XXXXXXXXXXXX',
-    'XXXXXXXXXXXX',
-    'XXXXXXXXXXXX',
-    ' XXXXXXXXXX ',
-    '  XXXXXXXX  ',
-  ];
+  // Assemble the actual uploaded Figma fragments. Parts 5/6/7 are the large
+  // background/head shell layers; parts 1-4 are the face/ear/accent details.
+  const headTilt = Math.sin(t * 0.9) * 0.015;
+  const rippleSpeed = 0.24;
+  const spikePulseRate = 1.05;
+  const spikePulse = (1 - Math.cos(t * spikePulseRate)) / 2;
+  // Circle with Spike.png — slow idle spin, then subtly grows + accelerates during the pulse.
+  const spikeSpin = t * 0.28 + 0.32 * (t / 2 - Math.sin(t * spikePulseRate) / (2 * spikePulseRate));
+  const spikeScale = 0.96 + spikePulse * 0.14;
 
-  // Draw shell shadow
-  ctx.fillStyle = 'rgba(0,0,0,0.3)';
-  drawPixelPattern(shell, bx + PX, by + PX * 2, PX);
-
-  // Draw shell body
-  ctx.fillStyle = shellDark;
-  drawPixelPattern(shell, bx, by, PX);
-
-  // Shell highlight (top rows brighter)
-  ctx.fillStyle = shellMid;
-  drawPixelPattern(shell.slice(0, 3), bx, by, PX);
-  ctx.fillStyle = shellColor;
-  drawPixelPattern(shell.slice(0, 1), bx, by, PX);
-
-  // Eyes
-  drawEyes(cx, by + PX * 2, em.eyeAnim, t, shellColor);
-
-  // Mouth
-  drawMouth(cx, by + PX * 5, em.mouthAnim, t);
-
-  // Claws
-  const clawBob = Math.sin(t * 3) * PX * 0.5;
-  drawClaw(bx - PX * 4, by + PX * 2 + clawBob, false, shellColor, shellDark);
-  drawClaw(bx + bodyW * PX + PX, by + PX * 2 - clawBob, true, shellColor, shellDark);
-
-  // Legs (3 per side)
-  ctx.fillStyle = shellDark;
-  for (let i = 0; i < 3; i++) {
-    const legY = by + PX * (3 + i * 1.5);
-    const legWiggle = Math.sin(t * 4 + i) * PX;
-    // Left legs
-    pixel(bx - PX, legY + legWiggle, PX);
-    pixel(bx - PX * 2, legY + PX + legWiggle, PX);
-    // Right legs
-    pixel(bx + bodyW * PX, legY - legWiggle, PX);
-    pixel(bx + bodyW * PX + PX, legY + PX - legWiggle, PX);
+  // Ripple Circle.png — slow expanding waves that grow out toward the Claw Status edges.
+  const rippleMaxScale = Math.max(2.2, Math.min(w, h) / (150 * scale) * 0.98);
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  for (let i = 0; i < 2; i++) {
+    const phase = (t * rippleSpeed + i / 2) % 1;
+    const eased = 1 - Math.pow(1 - phase, 2.35);
+    const rippleScale = 0.86 + eased * (rippleMaxScale - 0.86);
+    const rippleAlpha = 0.72 * Math.pow(1 - phase, 0.55);
+    drawFairyAsset(5, 0, -2, rippleScale, headTilt * 0.4, rippleAlpha);
   }
+  ctx.restore();
+
+  drawFairyRippleRings(0, -2, t, accent, rippleMaxScale);
+
+  drawFairyAsset(4, 0, -4, 1.06, 0, 0.92);                               // main circle/backplate
+  drawFairyAsset(6, 0, 0, spikeScale, spikeSpin, 1);                    // Circle with Spike.png
+  drawFairyAsset(0, 0, 0, 0.92, headTilt, 1);                           // centered face/detail
+  drawFairyAsset(1, 0, 0, 0.92, headTilt * 0.6, 1);
+  drawFairyAsset(2, 0, 0, 0.90, 0, 0.96);
+  drawFairyAsset(3, 0, 0, 0.90, 0, 1);
+
+  drawBangbooStatusGlow(accent, t, activeBoost);
+  ctx.restore();
+}
+
+function drawFairyRippleRings(x, y, t, accent, maxScale = 2.4) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineWidth = 3;
+  const startRadius = 56;
+  const edgeRadius = 75 * maxScale;
+  for (let i = 0; i < 2; i++) {
+    const phase = (t * 0.24 + i / 2) % 1;
+    const eased = 1 - Math.pow(1 - phase, 2.35);
+    const radius = startRadius + eased * (edgeRadius - startRadius);
+    const alpha = 0.48 * Math.pow(1 - phase, 0.7);
+    ctx.strokeStyle = hexToRgba(accent, alpha);
+    ctx.beginPath();
+    ctx.ellipse(x, y, radius * 1.08, radius * 0.92, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawFairyAsset(index, x, y, scale = 1, rotation = 0, alpha = 1) {
+  const img = getFairyPart(index);
+  if (!img?.complete || !img.naturalWidth) return;
+  const flip = scale < 0 ? -1 : 1;
+  const absScale = Math.abs(scale);
+  const fit = 150 / Math.max(img.naturalWidth, img.naturalHeight);
+  const dw = img.naturalWidth * absScale * fit;
+  const dh = img.naturalHeight * absScale * fit;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(rotation);
+  ctx.scale(flip, 1);
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(img, -dw / 2, -dh / 2, dw, dh);
+  ctx.restore();
+}
+
+function drawBangbooBackdrop(cx, cy, scale, accent, t) {
+  const r = 108 * scale;
+  const glow = ctx.createRadialGradient(cx, cy, 4, cx, cy, r * 1.35);
+  glow.addColorStop(0, hexToRgba(accent, 0.20));
+  glow.addColorStop(0.42, 'rgba(255, 209, 139, 0.10)');
+  glow.addColorStop(1, 'rgba(255, 209, 139, 0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * 1.35, 0, Math.PI * 2);
+  ctx.fill();
+
+}
+
+function drawBangbooStatusGlow(accent, t, activeBoost = 0) {
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = emotion === 'error' ? 0.22 : 0.12 + activeBoost * 0.08 + Math.sin(t * 2.4) * 0.025;
+  ctx.fillStyle = emotion === 'error' ? 'rgba(255, 80, 105, 0.55)' : hexToRgba(accent, 0.5);
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 58, 46, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawBangbooX(x, y, size) {
+  ctx.strokeStyle = '#FF6575';
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x - size, y - size);
+  ctx.lineTo(x + size, y + size);
+  ctx.moveTo(x + size, y - size);
+  ctx.lineTo(x - size, y + size);
+  ctx.stroke();
+}
+
+function drawBangbooStatusGlyph(accent, t) {
+  ctx.save();
+  ctx.globalAlpha = 0.74;
+  ctx.fillStyle = hexToRgba(accent, 0.82);
+  ctx.font = '700 12px Inter, sans-serif';
+  ctx.textAlign = 'center';
+  const text = emotion === 'working' ? 'SYNC' : emotion === 'thinking' ? 'SCAN' : emotion === 'listening' ? 'LIVE' : emotion === 'error' ? 'ERR' : emotion === 'happy' ? 'OK' : 'AI';
+  ctx.fillText(text, 0, 68 + Math.sin(t * 1.5) * 2);
+  ctx.restore();
+}
+
+function drawBangbooOrbitParticles(cx, cy, scale, accent, t) {
+  const count = emotion === 'working' ? 12 : 8;
+  for (let i = 0; i < count; i++) {
+    const a = i * Math.PI * 2 / count + t * (0.32 + i * 0.01);
+    const rx = 92 * scale + Math.sin(t * 1.5 + i) * 6 * scale;
+    const ry = 62 * scale;
+    const x = cx + Math.cos(a) * rx;
+    const y = cy + Math.sin(a) * ry;
+    const size = (2.2 + (i % 3)) * scale;
+    ctx.save();
+    ctx.globalAlpha = 0.40 + (i % 2) * 0.24;
+    ctx.fillStyle = i % 2 ? hexToRgba(accent, 0.88) : 'rgba(255, 218, 154, 0.88)';
+    ctx.beginPath();
+    ctx.arc(x, y, size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawBangbooFallback() {
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  const em = EMOTIONS[emotion] || EMOTIONS.idle;
+  ctx.fillStyle = 'rgba(255, 220, 160, 0.08)';
+  ctx.beginPath();
+  ctx.arc(cx, cy, 76, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = em.color;
+  ctx.font = '600 13px Inter, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('assembling fairy ai...', cx, cy);
+  ctx.textAlign = 'start';
+}
+
+function hexToRgba(hex = '#ffffff', alpha = 1) {
+  const clean = String(hex).replace('#', '').trim();
+  const r = parseInt(clean.slice(0, 2), 16) || 255;
+  const g = parseInt(clean.slice(2, 4), 16) || 255;
+  const b = parseInt(clean.slice(4, 6), 16) || 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
 function drawEyes(cx, baseY, anim, t, color) {

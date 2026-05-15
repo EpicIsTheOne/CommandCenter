@@ -7,7 +7,7 @@
   <script>window.__BASE_PATH__ = (location.pathname.replace(/\/$/, '').match(/^(.*\/commandcenter)(?:\/.*)?$/)?.[1] || '');</script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=VT323&family=Inter:wght@400;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/styles.css?v=20260509t">
+  <link rel="stylesheet" href="css/styles.css?v=20260510i">
 </head>
 <body>
   <div id="command-center">
@@ -15,6 +15,7 @@
       <div class="zone-header">
         <span class="zone-dot"></span>
         STATUS
+        <span id="app-brand-title" class="brand-title-inline">OpenClaw Command Center</span>
       </div>
       <canvas id="mascot-canvas"></canvas>
       <div id="mascot-label">IDLE</div>
@@ -36,10 +37,14 @@
       <div class="zone-header">
         <span class="zone-dot"></span>
         AGENT WORKSPACE
+        <span id="app-brand-subtitle" class="brand-subtitle-inline">Mission Control</span>
+        <img id="app-brand-logo" class="brand-logo hidden" alt="Logo">
       </div>
       <canvas id="office-canvas"></canvas>
     </div>
   </div>
+
+  <button id="global-settings-btn" class="global-settings-button" type="button" aria-label="Open settings">SETTINGS</button>
 
   <div id="settings-modal" class="modal hidden" aria-hidden="true">
     <div class="modal-backdrop" data-close-settings="true"></div>
@@ -49,87 +54,208 @@
         <button id="close-settings-btn" class="close-button" type="button" aria-label="Close settings">×</button>
       </div>
       <div class="modal-body">
-        <div class="setting-group">
-          <label for="voice-provider">TTS Provider</label>
-          <select id="voice-provider">
-            <option value="elevenlabs">ElevenLabs</option>
-            <option value="fish">Fish Audio via AIChat tagged API</option>
-          </select>
-          <div class="setting-hint">Fish Audio uses the AIChat <code>/api/tts/audio</code> endpoint so emotion tags are preserved.</div>
-        </div>
-
-        <div class="setting-group provider-elevenlabs">
-          <label for="elevenlabs-key">ElevenLabs API Key</label>
-          <input id="elevenlabs-key" type="password" autocomplete="off" placeholder="Paste your ElevenLabs API key">
-          <div id="saved-key-hint" class="setting-hint"></div>
-        </div>
-
-        <div class="setting-group provider-elevenlabs">
-          <label for="default-voice-id">ElevenLabs Default Voice ID (optional)</label>
-          <select id="default-voice-select">
-            <option value="">Default / blank</option>
-          </select>
-          <input id="default-voice-id" type="text" autocomplete="off" placeholder="Or paste an ElevenLabs voice ID manually">
-          <div class="setting-hint">Leave blank to use fallback voice behavior.</div>
-        </div>
-
-        <div class="setting-group provider-fish">
-          <label for="fish-audio-api-base">Fish Audio API Base</label>
-          <input id="fish-audio-api-base" type="text" autocomplete="off" placeholder="https://your-domain.example/aichat">
-          <div class="setting-hint">Base URL for the AIChat tagged Fish API.</div>
-        </div>
-
-        <div class="setting-group provider-fish">
-          <label for="fish-voice-id">Fish Audio Voice ID</label>
-          <input id="fish-voice-id" type="text" autocomplete="off" placeholder="Paste Fish Audio voice/reference ID">
-          <div class="setting-hint">This is the Fish voice/reference ID sent to <code>/api/tts/audio</code>.</div>
-          <div class="voice-search-toolbar">
-            <input id="fish-voice-search" type="text" autocomplete="off" placeholder="Search Fish voices by name">
-            <button id="fish-voice-search-btn" class="secondary-button" type="button">SEARCH FISH</button>
-          </div>
-          <div id="fish-voice-search-status" class="setting-hint"></div>
-          <div id="fish-voice-results" class="agent-voice-list"></div>
-        </div>
-
-        <div class="setting-group provider-fish">
-          <label for="fish-session-cookie">AIChat Session Cookie</label>
-          <input id="fish-session-cookie" type="password" autocomplete="off" placeholder="Paste aichat_session token or full cookie">
-          <div id="saved-fish-cookie-hint" class="setting-hint">Needed because the tagged Fish API uses normal AIChat login sessions.</div>
-        </div>
-
-        <div class="setting-group provider-fish">
-          <label for="fish-format">Fish Audio Format</label>
-          <select id="fish-format">
-            <option value="mp3">MP3</option>
-            <option value="wav">WAV</option>
-            <option value="opus">Opus</option>
-            <option value="pcm">PCM</option>
-          </select>
-          <div style="height:10px"></div>
-          <label for="fish-playback-mode">Fish playback mode</label>
-          <select id="fish-playback-mode">
-            <option value="auto">Auto</option>
-            <option value="stream">Streaming</option>
-            <option value="full">Full audio</option>
-          </select>
-          <div class="setting-hint">Auto waits for full audio on shorter replies and switches to streaming for longer ones.</div>
-          <div class="setting-row between" style="margin-top:10px;">
-            <label for="fish-auto-stream-min-chars">Auto stream threshold</label>
-            <span id="fish-auto-stream-min-chars-value" class="setting-hint">260 chars</span>
-          </div>
-          <input id="fish-auto-stream-min-chars" type="range" min="80" max="1200" step="10" value="260">
-          <label class="setting-inline-check"><input id="fish-include-narration" type="checkbox"> Include asterisk narration in spoken audio</label>
-        </div>
-
-        <div class="setting-group">
+        <div class="setting-group setup-health-group">
           <div class="setting-row between">
-            <label>Per-agent voices</label>
-            <button id="refresh-voices-btn" class="secondary-button provider-elevenlabs" type="button">LOAD ELEVENLABS VOICES</button>
+            <label>Setup Status</label>
+            <span id="setup-status-pill" class="setup-status-pill">Checking…</span>
           </div>
-          <div class="setting-hint provider-elevenlabs">Each agent can use its own ElevenLabs voice. Leave blank to use the default voice.</div>
-          <div class="setting-hint provider-fish">Each agent can use its own Fish reference ID. Leave blank to use the global Fish voice above.</div>
-          <div id="agent-voice-list" class="agent-voice-list"></div>
+          <div id="setup-status-summary" class="setting-hint">Checking CommandCenter setup state…</div>
+          <ul id="setup-issues-list" class="setup-issues-list"></ul>
         </div>
+
+        <details id="voice-settings-group" class="setting-group collapsible-setting" open>
+          <summary class="collapsible-setting-summary">
+            <span>Voice Setup</span>
+            <span class="setting-hint">Listening, speaking, routing, and testing</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <details class="setting-group collapsible-setting nested-collapsible" open>
+              <summary class="collapsible-setting-summary">
+                <span>1. Listening</span>
+                <span class="setting-hint">How your speech becomes text</span>
+              </summary>
+              <div class="collapsible-setting-body">
+                <div class="setting-group nested-setting-group">
+                  <label for="stt-mode">Speech to text</label>
+                  <select id="stt-mode">
+                    <option value="local">Local Whisper on this server</option>
+                    <option value="api">AIChat STT API</option>
+                  </select>
+                  <div id="stt-active-status" class="setting-hint">Active path: AIChat API → Fish Audio</div>
+                  <div id="stt-ready-status" class="setting-hint">Checking STT readiness...</div>
+                  <div class="setting-hint">Local uses the current server whisper path. API sends audio to AIChat for transcription.</div>
+                  <div class="setting-hint" style="margin-top:8px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+                    <span>Using NEXUS / AIChat unlocks extra voice features.</span>
+                    <button id="aichat-learn-more-btn" class="secondary-button" type="button">LEARN MORE</button>
+                  </div>
+                  <div id="aichat-learn-more-panel" class="setting-hint hidden" style="margin-top:10px; padding:12px 14px; border:1px solid rgba(255,255,255,0.12); border-radius:12px; background:rgba(255,255,255,0.04);">
+                    <div style="font-weight:600; margin-bottom:6px;">What enabling NEXUS / AIChat unlocks</div>
+                    <ul style="margin:0; padding-left:18px; display:grid; gap:6px;">
+                      <li><strong>Auto voice tagging</strong> so replies can preserve emotion and delivery better.</li>
+                      <li><strong>Fish Audio agent voices</strong> with per-agent voice assignment and previews.</li>
+                      <li><strong>API-based speech to text</strong> through Fish Audio, OpenAI, or ElevenLabs.</li>
+                      <li><strong>Tagged Fish Audio playback</strong> through the NEXUS endpoints instead of plain fallback speech.</li>
+                      <li><strong>Smoother premium voice workflows</strong> for agents that need more personality than local fallback audio.</li>
+                    </ul>
+                    <div style="margin-top:8px;">If you want to set it up, grab NEXUS here: <a href="https://github.com/EpicIsTheOne/NEXUS" target="_blank" rel="noopener noreferrer">github.com/EpicIsTheOne/NEXUS</a>.</div>
+                    <div style="margin-top:6px;">If you leave it off, CommandCenter still works — you just fall back to the local/basic voice paths.</div>
+                  </div>
+                </div>
+
+                <div class="setting-group nested-setting-group stt-api-only">
+                  <label for="stt-api-base">STT API Base</label>
+                  <input id="stt-api-base" type="text" autocomplete="off" placeholder="https://your-domain.example/aichat">
+                  <div class="setting-hint">Base URL for the AIChat STT endpoint.</div>
+                </div>
+
+                <div class="setting-group nested-setting-group stt-api-only">
+                  <label for="stt-api-provider">STT API Provider</label>
+                  <select id="stt-api-provider">
+                    <option value="fish">Fish Audio Speech to Text</option>
+                    <option value="openai">OpenAI Whisper</option>
+                    <option value="elevenlabs">ElevenLabs Speech to Text</option>
+                  </select>
+                  <div class="setting-hint">Choose which provider AIChat should use for transcription.</div>
+                </div>
+
+                <div class="setting-group nested-setting-group stt-provider-fish stt-api-only">
+                  <label for="stt-fish-key">Fish Audio STT API Key</label>
+                  <input id="stt-fish-key" type="password" autocomplete="off" placeholder="Paste your Fish Audio API key">
+                  <div id="saved-stt-fish-key-hint" class="setting-hint"></div>
+                </div>
+
+                <div class="setting-group nested-setting-group stt-provider-openai stt-api-only">
+                  <label for="stt-openai-key">OpenAI API Key</label>
+                  <input id="stt-openai-key" type="password" autocomplete="off" placeholder="Paste your OpenAI API key">
+                  <div id="saved-stt-openai-key-hint" class="setting-hint"></div>
+                </div>
+
+                <div class="setting-group nested-setting-group stt-provider-elevenlabs stt-api-only">
+                  <label for="stt-elevenlabs-key">ElevenLabs STT API Key</label>
+                  <input id="stt-elevenlabs-key" type="password" autocomplete="off" placeholder="Paste your ElevenLabs API key">
+                  <div id="saved-stt-elevenlabs-key-hint" class="setting-hint"></div>
+                </div>
+              </div>
+            </details>
+
+            <details class="setting-group collapsible-setting nested-collapsible" open>
+              <summary class="collapsible-setting-summary">
+                <span>2. Speaking</span>
+                <span class="setting-hint">How agent replies become audio</span>
+              </summary>
+              <div class="collapsible-setting-body">
+                <div class="setting-group nested-setting-group">
+                  <label for="voice-provider">TTS Provider</label>
+                  <select id="voice-provider">
+                    <option value="elevenlabs">ElevenLabs</option>
+                    <option value="fish">Fish Audio via AIChat tagged API</option>
+                  </select>
+                  <div class="setting-hint">Fish Audio uses the AIChat <code>/api/tts/audio</code> endpoint so emotion tags are preserved.</div>
+                </div>
+
+                <div class="setting-group nested-setting-group provider-elevenlabs">
+                  <label for="elevenlabs-key">ElevenLabs API Key</label>
+                  <input id="elevenlabs-key" type="password" autocomplete="off" placeholder="Paste your ElevenLabs API key">
+                  <div id="saved-key-hint" class="setting-hint"></div>
+                </div>
+
+                <div class="setting-group nested-setting-group provider-elevenlabs">
+                  <label for="default-voice-id">ElevenLabs Default Voice ID (optional)</label>
+                  <select id="default-voice-select">
+                    <option value="">Default / blank</option>
+                  </select>
+                  <input id="default-voice-id" type="text" autocomplete="off" placeholder="Or paste an ElevenLabs voice ID manually">
+                  <div class="setting-hint">Leave blank to use fallback voice behavior.</div>
+                </div>
+
+                <div class="setting-group nested-setting-group provider-fish">
+                  <label for="fish-audio-api-base">Fish Audio API Base</label>
+                  <input id="fish-audio-api-base" type="text" autocomplete="off" placeholder="https://your-domain.example/aichat">
+                  <div class="setting-hint">Put the main NEXUS / AIChat app URL here too, like <code>https://your-domain.example/aichat</code>.</div>
+                  <div class="setting-hint">CommandCenter adds the Fish endpoints automatically, so do <strong>not</strong> paste <code>/api/nexus</code>, <code>/api/fish/models</code>, or <code>/api/tts/audio</code>.</div>
+                </div>
+
+                <div class="setting-group nested-setting-group provider-fish">
+                  <label for="fish-voice-id">Fish Audio Voice ID</label>
+                  <input id="fish-voice-id" type="text" autocomplete="off" placeholder="Paste Fish Audio voice/reference ID">
+                  <div class="setting-hint">This is the Fish voice/reference ID sent to <code>/api/tts/audio</code>.</div>
+                  <div class="voice-search-toolbar">
+                    <input id="fish-voice-search" type="text" autocomplete="off" placeholder="Search Fish voices by name">
+                    <button id="fish-voice-search-btn" class="secondary-button" type="button">SEARCH FISH</button>
+                  </div>
+                  <div id="fish-voice-search-status" class="setting-hint"></div>
+                  <div id="fish-voice-results" class="agent-voice-list"></div>
+                </div>
+
+                <div class="setting-group nested-setting-group provider-fish">
+                  <label for="fish-session-cookie">AIChat Session Cookie</label>
+                  <input id="fish-session-cookie" type="password" autocomplete="off" placeholder="Paste aichat_session token or full cookie">
+                  <div id="saved-fish-cookie-hint" class="setting-hint">Needed because the tagged Fish API uses normal AIChat login sessions.</div>
+                </div>
+
+                <div class="setting-group nested-setting-group provider-fish">
+                  <label for="fish-format">Fish Audio Format</label>
+                  <select id="fish-format">
+                    <option value="mp3">MP3</option>
+                    <option value="wav">WAV</option>
+                    <option value="opus">Opus</option>
+                    <option value="pcm">PCM</option>
+                  </select>
+                  <div style="height:10px"></div>
+                  <label for="fish-playback-mode">Fish playback mode</label>
+                  <select id="fish-playback-mode">
+                    <option value="auto">Auto</option>
+                    <option value="stream">Streaming</option>
+                    <option value="full">Full audio</option>
+                  </select>
+                  <div class="setting-hint">Auto waits for full audio on shorter replies and switches to streaming for longer ones.</div>
+                  <div class="setting-row between" style="margin-top:10px;">
+                    <label for="fish-auto-stream-min-chars">Auto stream threshold</label>
+                    <span id="fish-auto-stream-min-chars-value" class="setting-hint">260 chars</span>
+                  </div>
+                  <input id="fish-auto-stream-min-chars" type="range" min="80" max="1200" step="10" value="260">
+                  <label class="setting-inline-check"><input id="fish-include-narration" type="checkbox"> Include asterisk narration in spoken audio</label>
+                </div>
+              </div>
+            </details>
+
+            <details class="setting-group collapsible-setting nested-collapsible" open>
+              <summary class="collapsible-setting-summary">
+                <span>3. Agent Routing & Voices</span>
+                <span class="setting-hint">Choose who speaks and with which voice</span>
+              </summary>
+              <div class="collapsible-setting-body">
+                <div class="setting-group nested-setting-group">
+                  <div class="setting-row between">
+                    <label>Per-agent voices</label>
+                    <button id="refresh-voices-btn" class="secondary-button provider-elevenlabs" type="button">LOAD ELEVENLABS VOICES</button>
+                  </div>
+                  <div class="setting-hint provider-elevenlabs">Each agent can use its own ElevenLabs voice. Leave blank to use the default voice.</div>
+                  <div class="setting-hint provider-fish">Each agent can use its own Fish reference ID. Leave blank to use the global Fish voice above.</div>
+                  <div id="agent-voice-list" class="agent-voice-list"></div>
+                </div>
+              </div>
+            </details>
+
+            <details class="setting-group collapsible-setting nested-collapsible" open>
+              <summary class="collapsible-setting-summary">
+                <span>4. Test</span>
+                <span class="setting-hint">Run a fast setup check before blaming the universe</span>
+              </summary>
+              <div class="collapsible-setting-body">
+                <div class="setting-group nested-setting-group">
+                  <div class="setting-row between">
+                    <label>Setup test</label>
+                    <button id="run-setup-test-btn" class="secondary-button" type="button">RUN SETUP TEST</button>
+                  </div>
+                  <div class="setting-hint">Checks gateway mode/auth plus your current STT/TTS configuration without making you trial-and-error your soul away.</div>
+                  <div id="setup-test-status" class="setting-hint">No setup test run yet.</div>
+                  <ul id="setup-test-results" class="setup-issues-list"></ul>
+                </div>
+              </div>
+            </details>
+          </div>
+        </details>
 
         <div class="setting-group">
           <div class="setting-row between">
@@ -137,17 +263,24 @@
           </div>
           <div class="setting-hint">Set each agent to keep the current CommandCenter look or use a companion-style animated character instead.</div>
           <div class="setting-row companion-import-row">
-            <input id="companion-import-source" type="text" autocomplete="off" placeholder="Paste extracted Codex pet folder path containing pet.json + spritesheet.webp">
+            <input id="companion-import-source" type="text" autocomplete="off" placeholder="Paste extracted Codex pet folder path containing pet.json + spritesheet asset">
             <button id="import-companion-btn" class="secondary-button" type="button">IMPORT CODEX PET</button>
+          </div>
+          <div class="setting-row companion-import-row">
+            <label class="companion-upload-field">
+              <input id="companion-import-folder" type="file" webkitdirectory directory multiple>
+              <span>Choose Codex pet folder</span>
+            </label>
+            <select id="companion-import-agent">
+              <option value="">Do not auto-assign</option>
+            </select>
+            <button id="import-companion-folder-btn" class="secondary-button" type="button">UPLOAD FOLDER</button>
           </div>
           <div class="setting-row companion-import-row">
             <label class="companion-upload-field">
               <input id="companion-import-zip" type="file" accept=".zip,application/zip">
               <span>Choose Codex pet zip</span>
             </label>
-            <select id="companion-import-agent">
-              <option value="">Do not auto-assign</option>
-            </select>
             <button id="import-companion-zip-btn" class="secondary-button" type="button">UPLOAD ZIP</button>
           </div>
           <div id="companion-import-status" class="setting-hint"></div>
@@ -165,6 +298,245 @@
           <div id="wakeword-list" class="agent-voice-list"></div>
           <div class="setting-hint">Use a built-in Porcupine wake word for quick testing, or upload a custom Web (.ppn) file for exact agent names like Astra and Mina.</div>
         </div>
+
+        <details class="setting-group collapsible-setting" id="workspace-settings-group">
+          <summary class="collapsible-setting-summary">
+            <span>Workspace Background</span>
+            <span class="setting-hint">Change the office scene background</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <div class="setting-group nested-setting-group">
+              <label for="workspace-background-select">Workspace background</label>
+              <select id="workspace-background-select">
+                <option value="default-office">Default office</option>
+              </select>
+            </div>
+            <div class="setting-group nested-setting-group">
+              <label class="companion-upload-field music-upload-field">
+                <input id="workspace-background-upload-input" type="file" accept="image/*,.png,.jpg,.jpeg,.webp">
+                <span>Choose workspace background</span>
+              </label>
+              <button id="workspace-background-upload-btn" class="secondary-button" type="button">UPLOAD BACKGROUND</button>
+              <div id="workspace-background-upload-status" class="setting-hint">Pick or upload a workspace background.</div>
+            </div>
+          </div>
+        </details>
+
+        <details class="setting-group collapsible-setting" id="theme-settings-group">
+          <summary class="collapsible-setting-summary">
+            <span>Color Themes</span>
+            <span class="setting-hint">Switch themes or build your own</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <div class="setting-group nested-setting-group">
+              <label for="appearance-theme-select">Theme</label>
+              <select id="appearance-theme-select"></select>
+            </div>
+            <div class="setting-group nested-setting-group">
+              <div class="setting-row between">
+                <label for="appearance-panel-opacity">Panel opacity</label>
+                <span id="appearance-panel-opacity-value" class="setting-hint">85%</span>
+              </div>
+              <input id="appearance-panel-opacity" type="range" min="30" max="100" step="1" value="85">
+            </div>
+            <div class="setting-group nested-setting-group">
+              <div class="setting-row between">
+                <label for="appearance-blur-strength">Blur strength</label>
+                <span id="appearance-blur-strength-value" class="setting-hint">12px</span>
+              </div>
+              <input id="appearance-blur-strength" type="range" min="0" max="24" step="1" value="12">
+            </div>
+            <div class="setting-group nested-setting-group">
+              <div class="setting-row between">
+                <label for="appearance-glow-intensity">Glow intensity</label>
+                <span id="appearance-glow-intensity-value" class="setting-hint">100%</span>
+              </div>
+              <input id="appearance-glow-intensity" type="range" min="0" max="200" step="1" value="100">
+            </div>
+            <div class="setting-group nested-setting-group">
+              <label for="appearance-ui-density">UI density</label>
+              <select id="appearance-ui-density">
+                <option value="compact">Compact</option>
+                <option value="normal">Normal</option>
+                <option value="spacious">Spacious</option>
+              </select>
+            </div>
+            <div class="setting-group nested-setting-group">
+              <label for="appearance-border-style">Border style</label>
+              <select id="appearance-border-style">
+                <option value="sharp">Sharp</option>
+                <option value="rounded">Rounded</option>
+              </select>
+            </div>
+            <div class="setting-group nested-setting-group">
+              <label for="appearance-font-preset">Font preset</label>
+              <select id="appearance-font-preset">
+                <option value="modern">Modern</option>
+                <option value="terminal">Terminal</option>
+                <option value="pixel">Pixel</option>
+                <option value="clean">Clean</option>
+              </select>
+            </div>
+            <details class="setting-group collapsible-setting nested-collapsible" id="custom-theme-settings-group">
+              <summary class="collapsible-setting-summary">
+                <span>Custom Theme Builder</span>
+                <span class="setting-hint">Make a modular color theme</span>
+              </summary>
+              <div class="collapsible-setting-body">
+                <div class="setting-group nested-setting-group">
+                  <label for="custom-theme-name">Theme name</label>
+                  <input id="custom-theme-name" type="text" placeholder="My cool theme">
+                </div>
+                <div id="custom-theme-colors" class="theme-color-grid"></div>
+                <button id="save-custom-theme-btn" class="secondary-button" type="button">SAVE CUSTOM THEME</button>
+              </div>
+            </details>
+          </div>
+        </details>
+
+        <details class="setting-group collapsible-setting" id="branding-settings-group">
+          <summary class="collapsible-setting-summary">
+            <span>Branding</span>
+            <span class="setting-hint">Title, subtitle, logo, favicon</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <div class="setting-group nested-setting-group">
+              <label for="branding-title">App title</label>
+              <input id="branding-title" type="text" maxlength="80" placeholder="OpenClaw Command Center">
+            </div>
+            <div class="setting-group nested-setting-group">
+              <label for="branding-subtitle">Subtitle</label>
+              <input id="branding-subtitle" type="text" maxlength="140" placeholder="Mission Control">
+            </div>
+            <div class="setting-group nested-setting-group">
+              <label class="companion-upload-field music-upload-field"><input id="branding-logo-upload" type="file" accept="image/*,.png,.jpg,.jpeg,.webp,.svg"><span>Choose logo</span></label>
+              <button id="branding-logo-upload-btn" class="secondary-button" type="button">UPLOAD LOGO</button>
+            </div>
+            <div class="setting-group nested-setting-group">
+              <label class="companion-upload-field music-upload-field"><input id="branding-favicon-upload" type="file" accept=".ico,.png,.svg,image/x-icon,image/png,image/svg+xml"><span>Choose favicon</span></label>
+              <button id="branding-favicon-upload-btn" class="secondary-button" type="button">UPLOAD FAVICON</button>
+            </div>
+            <div id="branding-status" class="setting-hint">Branding changes apply live after save/upload.</div>
+          </div>
+        </details>
+
+        <details class="setting-group collapsible-setting" id="layout-settings-group">
+          <summary class="collapsible-setting-summary">
+            <span>Layout</span>
+            <span class="setting-hint">Show/hide and collapse widgets</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <div class="setting-group nested-setting-group">
+              <label class="setting-inline-check"><input id="layout-show-zone-mascot" type="checkbox" checked> Show STATUS</label>
+              <label class="setting-inline-check"><input id="layout-show-zone-terminal" type="checkbox" checked> Show ACTIVITY LOG</label>
+              <label class="setting-inline-check"><input id="layout-show-zone-office" type="checkbox" checked> Show AGENT WORKSPACE</label>
+            </div>
+            <div class="setting-group nested-setting-group">
+              <label class="setting-inline-check"><input id="layout-collapse-zone-mascot" type="checkbox"> Collapse STATUS</label>
+              <label class="setting-inline-check"><input id="layout-collapse-zone-terminal" type="checkbox"> Collapse ACTIVITY LOG</label>
+              <label class="setting-inline-check"><input id="layout-collapse-zone-office" type="checkbox"> Collapse AGENT WORKSPACE</label>
+            </div>
+            <div class="setting-group nested-setting-group">
+              <label>Widget order</label>
+              <div id="layout-order-list" class="layout-order-list"></div>
+            </div>
+            <div class="setting-group nested-setting-group">
+              <label for="layout-default-panel">Default panel</label>
+              <select id="layout-default-panel">
+                <option value="zone-mascot">STATUS</option>
+                <option value="zone-terminal">ACTIVITY LOG</option>
+                <option value="zone-office">AGENT WORKSPACE</option>
+              </select>
+            </div>
+            <div id="layout-status" class="setting-hint">Layout changes preview live and save with the main Save Settings button.</div>
+          </div>
+        </details>
+
+        <details class="setting-group collapsible-setting" id="intro-settings-group">
+          <summary class="collapsible-setting-summary">
+            <span>Startup Intro</span>
+            <span class="setting-hint">Play an intro video when the site opens</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <label class="setting-inline-check"><input id="intro-enabled" type="checkbox"> Enable startup intro video</label>
+
+            <div class="setting-group nested-setting-group">
+              <label for="intro-video-select">Selected intro video</label>
+              <select id="intro-video-select">
+                <option value="">No uploaded intro videos yet</option>
+              </select>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <div class="setting-row between">
+                <label for="intro-volume">Intro volume</label>
+                <span id="intro-volume-value" class="setting-hint">70%</span>
+              </div>
+              <input id="intro-volume" type="range" min="0" max="100" step="1" value="70">
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <label class="companion-upload-field music-upload-field">
+                <input id="intro-upload-input" type="file" accept="video/*,.mp4,.webm,.mov,.m4v">
+                <span>Choose intro video</span>
+              </label>
+              <button id="intro-upload-btn" class="secondary-button" type="button">UPLOAD INTRO</button>
+              <div id="intro-upload-status" class="setting-hint">No intro video uploaded yet. Use the upload button below.</div>
+            </div>
+          </div>
+        </details>
+
+        <details class="setting-group collapsible-setting" id="music-settings-group">
+          <summary class="collapsible-setting-summary">
+            <span>Music</span>
+            <span class="setting-hint">Looped background audio controls</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <label class="setting-inline-check"><input id="music-enabled" type="checkbox"> Enable background music</label>
+
+            <div class="setting-group nested-setting-group">
+              <label for="music-track-select">Selected track</label>
+              <select id="music-track-select">
+                <option value="">No uploaded tracks yet</option>
+              </select>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <label for="music-playback-scope">Playback behavior</label>
+              <select id="music-playback-scope">
+                <option value="tab">Only play when this tab/site is active</option>
+                <option value="always">Always play even if I switch tabs</option>
+              </select>
+              <div class="setting-hint">Default is site-only, because yes, random hidden-tab music is demon behavior.</div>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <div class="setting-row between">
+                <label for="music-volume">Music volume</label>
+                <span id="music-volume-value" class="setting-hint">45%</span>
+              </div>
+              <input id="music-volume" type="range" min="0" max="100" step="1" value="45">
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <div class="setting-row between">
+                <label for="music-speech-duck-level">Music while agent speaks</label>
+                <span id="music-speech-duck-level-value" class="setting-hint">35% of normal</span>
+              </div>
+              <input id="music-speech-duck-level" type="range" min="0" max="100" step="1" value="35">
+              <div class="setting-hint">Lower means the background music ducks more while an agent is speaking.</div>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <label class="companion-upload-field music-upload-field">
+                <input id="music-upload-input" type="file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac,.webm">
+                <span>Choose audio file</span>
+              </label>
+              <button id="music-upload-btn" class="secondary-button" type="button">UPLOAD MUSIC</button>
+              <div id="music-upload-status" class="setting-hint">No music uploaded yet. Use the upload button below.</div>
+            </div>
+          </div>
+        </details>
 
         <div class="setting-group">
           <div class="setting-row between">
@@ -203,6 +575,6 @@
 
   <script src="vendor/picovoice/web-voice-processor.js"></script>
   <script src="vendor/picovoice/porcupine-web.js"></script>
-  <script type="module" src="js/app.js?v=20260509af"></script>
+  <script type="module" src="js/app.js?v=20260515-clarity1"></script>
 </body>
 </html>

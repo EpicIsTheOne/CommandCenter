@@ -22,7 +22,7 @@ export function log(text, type = 'info', animate = false) {
   const entry = document.createElement('div');
   entry.className = `log-entry ${TYPE_COLORS[type] || 'type-info'}`;
 
-  const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+  const ts = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true });
   const timestamp = document.createElement('span');
   timestamp.className = 'timestamp';
   timestamp.textContent = ts;

@@ -1,10 +1,18 @@
 import * as terminal from './terminal.js?v=20260320j';
 import * as mascot from './mascot.js?v=20260509y';
-import * as office from './office.js?v=20260509w';
-import * as voice from './voice.js?v=20260321a';
+import * as office from './office.js?v=20260511a';
+import * as voice from './voice.js?v=20260514a';
 import * as wake from './wake.js?v=20260320l';
-import * as directChat from './direct-chat.js?v=20260321e';
-import * as companions from './companions.js?v=20260321w';
+import * as directChat from './direct-chat.js?v=20260510i';
+import * as companions from './companions.js?v=20260511a';
+import * as music from './music.js?v=20260514c';
+import * as intro from './intro.js?v=20260514b';
+import * as appearance from './appearance.js?v=20260514b';
+import * as branding from './branding.js?v=20260514b';
+import * as layoutSettings from './layout-settings.js?v=20260514b';
+
+const APP_BUILD = '20260513-folder-upload-debug-1';
+console.log('[CommandCenter] app build:', APP_BUILD);
 
 let roster = { agents: [], primaryAgentId: 'main' };
 let activeOfficeAgent = null;
@@ -50,6 +58,40 @@ function setSettingsStatus(text, isError = false) {
   if (!el) return;
   el.textContent = text || '';
   el.style.color = isError ? 'var(--red)' : 'var(--text-dim)';
+}
+
+function setSetupStatus(summary = '', issues = [], tone = 'ok', pillText = '') {
+  const pill = document.getElementById('setup-status-pill');
+  const summaryEl = document.getElementById('setup-status-summary');
+  const list = document.getElementById('setup-issues-list');
+  if (pill) {
+    pill.className = `setup-status-pill ${tone}`.trim();
+    pill.textContent = pillText || (tone === 'error' ? 'Needs Fixes' : tone === 'warn' ? 'Attention' : 'Ready');
+  }
+  if (summaryEl) summaryEl.textContent = summary || '';
+  if (list) {
+    list.innerHTML = '';
+    (issues || []).forEach((issue) => {
+      const item = document.createElement('li');
+      item.textContent = issue.message || String(issue || '');
+      list.appendChild(item);
+    });
+  }
+}
+
+function setSetupTestResult(summary = '', checks = [], tone = 'ok') {
+  const status = document.getElementById('setup-test-status');
+  const list = document.getElementById('setup-test-results');
+  if (status) status.textContent = summary || '';
+  if (list) {
+    list.innerHTML = '';
+    (checks || []).forEach((check) => {
+      const item = document.createElement('li');
+      item.textContent = check.message || String(check || '');
+      list.appendChild(item);
+    });
+  }
+  if (status) status.style.color = tone === 'error' ? 'var(--red)' : tone === 'warn' ? '#ffd479' : 'var(--text-dim)';
 }
 
 function clampVignetteStrength(value) {
@@ -233,9 +275,43 @@ function normalizeSpeechText(text = '') {
 
 async function fetchJson(url, options = {}) {
   const res = await fetch(url, options);
-  const data = await res.json().catch(() => ({}));
+  const text = await res.text();
+  let data = {};
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch (_) {
+      const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 180);
+      throw new Error(snippet || `Request failed (${res.status})`);
+    }
+  }
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
+}
+
+async function loadSetupStatus() {
+  try {
+    const data = await fetchJson(`${BASE}/api/status`);
+    const setup = data.setup || {};
+    const bridge = data.bridge || {};
+    const issues = Array.isArray(setup.issues) ? setup.issues : [];
+    const hasError = issues.some((issue) => issue.level === 'error');
+    const hasWarn = issues.some((issue) => issue.level === 'warn');
+    const tone = hasError ? 'error' : hasWarn ? 'warn' : 'ok';
+    const pillText = setup.demoMode
+      ? 'Demo Mode'
+      : bridge.mode === 'live'
+        ? 'Live Connected'
+        : bridge.mode === 'demo'
+          ? 'Demo Fallback'
+          : 'Connecting';
+    const summary = `${setup.modeLabel || 'Unknown mode'} • STT: ${String(setup.sttMode || 'api').toUpperCase()}${setup.sttMode === 'api' ? ` → ${setup.sttProvider || 'fish'}` : ''} • TTS: ${setup.ttsProvider || 'elevenlabs'}${bridge.gatewayTokenSource ? ` • Gateway token: ${bridge.gatewayTokenSource}` : ''}`;
+    setSetupStatus(summary, issues, tone, pillText);
+    return data;
+  } catch (err) {
+    setSetupStatus('Could not load setup status from the server.', [{ message: err.message || 'Status request failed.' }], 'error', 'Status Error');
+    return null;
+  }
 }
 
 async function loadRoster() {
@@ -346,9 +422,17 @@ async function handleEvent(msg) {
   }
 
   if (type === 'status' || type === 'bridge:connected') {
-    setConnectionState('connected', 'CONNECTED');
+    const mode = String(data?.mode || 'unknown');
+    setConnectionState(mode === 'demo' ? 'disconnected' : 'connected', mode === 'demo' ? 'DEMO MODE' : 'CONNECTED');
     if (data?.agents?.length) roster = { agents: data.agents, primaryAgentId: data.primaryAgentId || data.agents[0]?.id };
-    terminal.log(`[bridge] Mode: ${data?.mode || 'unknown'}`, 'system', true);
+    terminal.log(`[bridge] Mode: ${mode}`, mode === 'demo' ? 'error' : 'system', true);
+    if (mode === 'demo' && data?.fallbackReason) {
+      terminal.log(`[bridge] Demo fallback reason: ${data.fallbackReason}`, 'error', true);
+    }
+    if (data?.authError) {
+      terminal.log(`[bridge] Gateway auth error: ${data.authError}`, 'error', true);
+    }
+    loadSetupStatus().catch(() => {});
     return;
   }
 
@@ -725,7 +809,11 @@ async function searchAgentFishVoices(agentId) {
     renderAgentFishVoiceResults(agentId, items);
     if (status) status.textContent = items.length ? `Found ${items.length} voice${items.length === 1 ? '' : 's'}.` : 'No Fish voices found.';
   } catch (err) {
-    if (status) status.textContent = err.message || 'Fish search failed.';
+    const raw = err.message || 'Fish search failed.';
+    const friendly = /Expected JSON, but got an HTML page/i.test(raw)
+      ? 'Fish voice search hit a normal webpage instead of the API. Check Fish Audio API Base and use the main NEXUS / AIChat URL, like https://your-domain.example/aichat — not /api/nexus or /api/fish/models.'
+      : raw;
+    if (status) status.textContent = friendly;
     renderAgentFishVoiceResults(agentId, []);
   }
 }
@@ -755,6 +843,67 @@ function updateVoiceProviderVisibility(provider = '') {
   document.querySelectorAll('.provider-fish').forEach((el) => {
     el.style.display = selected === 'fish' ? '' : 'none';
   });
+}
+
+function updateSttReadinessStatus(mode = '', provider = '') {
+  const selectedMode = String(mode || document.getElementById('stt-mode')?.value || 'api').trim().toLowerCase() === 'local' ? 'local' : 'api';
+  const rawProvider = String(provider || document.getElementById('stt-api-provider')?.value || 'fish').trim().toLowerCase();
+  const selectedProvider = rawProvider === 'openai' || rawProvider === 'elevenlabs' ? rawProvider : 'fish';
+  const status = document.getElementById('stt-ready-status');
+  if (!status) return;
+
+  if (selectedMode === 'local') {
+    status.textContent = 'Ready: Local Whisper on this server.';
+    return;
+  }
+
+  const fishHint = document.getElementById('saved-stt-fish-key-hint')?.textContent || '';
+  const openAiHint = document.getElementById('saved-stt-openai-key-hint')?.textContent || '';
+  const elevenHint = document.getElementById('saved-stt-elevenlabs-key-hint')?.textContent || '';
+  const hasFish = !/No saved/i.test(fishHint) || /Using AIChat server Fish API key/i.test(fishHint);
+  const hasOpenAi = !/No saved/i.test(openAiHint);
+  const hasEleven = !/No saved/i.test(elevenHint);
+
+  if (selectedProvider === 'fish') {
+    status.textContent = hasFish
+      ? 'Ready: AIChat API → Fish Audio is configured.'
+      : 'Not ready: Fish Audio STT key is missing.';
+    return;
+  }
+  if (selectedProvider === 'openai') {
+    status.textContent = hasOpenAi
+      ? 'Ready: AIChat API → OpenAI is configured.'
+      : 'Not ready: OpenAI STT key is missing.';
+    return;
+  }
+  status.textContent = hasEleven
+    ? 'Ready: AIChat API → ElevenLabs is configured.'
+    : 'Not ready: ElevenLabs STT key is missing.';
+}
+
+function updateSttVisibility(mode = '', provider = '') {
+  const selectedMode = String(mode || document.getElementById('stt-mode')?.value || 'api').trim().toLowerCase() === 'local' ? 'local' : 'api';
+  const rawProvider = String(provider || document.getElementById('stt-api-provider')?.value || 'fish').trim().toLowerCase();
+  const selectedProvider = rawProvider === 'openai' || rawProvider === 'elevenlabs' ? rawProvider : 'fish';
+  document.querySelectorAll('.stt-api-only').forEach((el) => {
+    el.style.display = selectedMode === 'api' ? '' : 'none';
+  });
+  document.querySelectorAll('.stt-provider-fish').forEach((el) => {
+    el.style.display = selectedMode === 'api' && selectedProvider === 'fish' ? '' : 'none';
+  });
+  document.querySelectorAll('.stt-provider-openai').forEach((el) => {
+    el.style.display = selectedMode === 'api' && selectedProvider === 'openai' ? '' : 'none';
+  });
+  document.querySelectorAll('.stt-provider-elevenlabs').forEach((el) => {
+    el.style.display = selectedMode === 'api' && selectedProvider === 'elevenlabs' ? '' : 'none';
+  });
+  const status = document.getElementById('stt-active-status');
+  if (status) {
+    status.textContent = selectedMode === 'local'
+      ? 'Active path: Local Whisper'
+      : `Active path: AIChat API → ${selectedProvider === 'fish' ? 'Fish Audio' : selectedProvider === 'openai' ? 'OpenAI' : 'ElevenLabs'}`;
+  }
+  updateSttReadinessStatus(selectedMode, selectedProvider);
 }
 
 
@@ -928,7 +1077,7 @@ async function importCompanionPackage() {
   const input = document.getElementById('companion-import-source');
   const sourceDir = String(input?.value || '').trim();
   if (!sourceDir) {
-    setCompanionImportStatus('Paste a folder path that contains pet.json and spritesheet.webp.');
+    setCompanionImportStatus('Paste a folder path that contains pet.json and the pet spritesheet asset.');
     return;
   }
   setCompanionImportStatus('Importing Codex pet package...');
@@ -941,6 +1090,37 @@ async function importCompanionPackage() {
     availableCompanions = data.items || [];
     await reloadCompanionStateFromServer();
     renderImportResult(data.item);
+  } catch (err) {
+    setCompanionImportStatus(err.message);
+  }
+}
+
+async function importCompanionFolder() {
+  const input = document.getElementById('companion-import-folder');
+  const agentSelect = document.getElementById('companion-import-agent');
+  const files = Array.from(input?.files || []);
+  if (!files.length) {
+    setCompanionImportStatus('Choose a Codex pet folder first. Browser reported 0 files.');
+    return;
+  }
+  const form = new FormData();
+  for (const file of files) {
+    const relativePath = file.webkitRelativePath || file.name;
+    form.append('files', file, relativePath);
+  }
+  if (agentSelect?.value) form.append('agentId', agentSelect.value);
+  const folderLabel = files[0]?.webkitRelativePath?.split('/')?.[0] || `${files.length} files`;
+  console.log('[CommandCenter] folder upload selection', {
+    build: APP_BUILD,
+    count: files.length,
+    first: files[0]?.webkitRelativePath || files[0]?.name || '',
+  });
+  setCompanionImportStatus(`Uploading folder ${folderLabel} (${files.length} files)...`);
+  try {
+    const data = await fetchJson(`${BASE}/api/companions/import-folder`, { method: 'POST', body: form });
+    if (input) input.value = '';
+    await reloadCompanionStateFromServer();
+    renderImportResult(data.item, data.assigned?.agentId || '');
   } catch (err) {
     setCompanionImportStatus(err.message);
   }
@@ -959,9 +1139,7 @@ async function importCompanionZip() {
   if (agentSelect?.value) form.append('agentId', agentSelect.value);
   setCompanionImportStatus(`Uploading ${file.name}...`);
   try {
-    const res = await fetch(`${BASE}/api/companions/import-zip`, { method: 'POST', body: form });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `Upload failed (${res.status})`);
+    const data = await fetchJson(`${BASE}/api/companions/import-zip`, { method: 'POST', body: form });
     if (input) input.value = '';
     await reloadCompanionStateFromServer();
     renderImportResult(data.item, data.assigned?.agentId || '');
@@ -984,6 +1162,17 @@ function populateSettingsForm(voiceSettings = {}, wakeSettings = {}) {
   const fishSessionCookie = document.getElementById('fish-session-cookie');
   const fishCookieHint = document.getElementById('saved-fish-cookie-hint');
   const fishFormat = document.getElementById('fish-format');
+  const sttMode = document.getElementById('stt-mode');
+  const sttApiBase = document.getElementById('stt-api-base');
+  const sttApiProvider = document.getElementById('stt-api-provider');
+  const sttFishKey = document.getElementById('stt-fish-key');
+  const sttFishHint = document.getElementById('saved-stt-fish-key-hint');
+  const aiChatLearnMoreBtn = document.getElementById('aichat-learn-more-btn');
+  const aiChatLearnMorePanel = document.getElementById('aichat-learn-more-panel');
+  const sttOpenAiKey = document.getElementById('stt-openai-key');
+  const sttOpenAiHint = document.getElementById('saved-stt-openai-key-hint');
+  const sttElevenlabsKey = document.getElementById('stt-elevenlabs-key');
+  const sttElevenlabsHint = document.getElementById('saved-stt-elevenlabs-key-hint');
   const fishPlaybackMode = document.getElementById('fish-playback-mode');
   const fishIncludeNarration = document.getElementById('fish-include-narration');
   const fishAutoStreamMinChars = document.getElementById('fish-auto-stream-min-chars');
@@ -1006,6 +1195,27 @@ function populateSettingsForm(voiceSettings = {}, wakeSettings = {}) {
       voiceList.appendChild(buildAgentVoiceRow(agent, getProviderAgentVoices(window.__lastVoiceSettings || {}, providerSelect.value)?.[agent.id] || '', providerSelect.value));
     });
   };
+  if (sttMode) sttMode.value = voiceSettings.sttMode || 'api';
+  if (sttApiBase) sttApiBase.value = voiceSettings.sttApiBase || 'https://your-domain.example/aichat';
+  if (sttApiProvider) sttApiProvider.value = voiceSettings.sttApiProvider || 'fish';
+  if (sttFishKey) sttFishKey.value = '';
+  if (sttOpenAiKey) sttOpenAiKey.value = '';
+  if (sttElevenlabsKey) sttElevenlabsKey.value = '';
+  if (sttFishHint) sttFishHint.textContent = voiceSettings.hasSttFishApiKey
+    ? `Saved key: ${voiceSettings.sttFishApiKeyMasked}`
+    : (voiceSettings.sttFishUsesServerKey ? 'Using AIChat server Fish API key.' : 'No saved Fish STT key yet.');
+  if (sttOpenAiHint) sttOpenAiHint.textContent = voiceSettings.hasSttOpenAiApiKey ? `Saved key: ${voiceSettings.sttOpenAiApiKeyMasked}` : 'No saved OpenAI STT key yet.';
+  if (sttElevenlabsHint) sttElevenlabsHint.textContent = voiceSettings.hasSttElevenlabsApiKey ? `Saved key: ${voiceSettings.sttElevenlabsApiKeyMasked}` : 'No saved ElevenLabs STT key yet.';
+  if (sttMode) sttMode.onchange = () => updateSttVisibility(sttMode.value, sttApiProvider?.value || 'openai');
+  if (sttApiProvider) sttApiProvider.onchange = () => updateSttVisibility(sttMode?.value || 'local', sttApiProvider.value);
+  if (aiChatLearnMoreBtn && aiChatLearnMorePanel) {
+    aiChatLearnMorePanel.classList.add('hidden');
+    aiChatLearnMoreBtn.textContent = 'LEARN MORE';
+    aiChatLearnMoreBtn.onclick = () => {
+      const isHidden = aiChatLearnMorePanel.classList.toggle('hidden');
+      aiChatLearnMoreBtn.textContent = isHidden ? 'LEARN MORE' : 'HIDE DETAILS';
+    };
+  }
   fishApiBase.value = voiceSettings.fishAudioApiBase || 'https://your-domain.example/aichat';
   fishVoiceId.value = voiceSettings.fishVoiceId || '';
   fishSessionCookie.value = '';
@@ -1103,6 +1313,8 @@ function populateSettingsForm(voiceSettings = {}, wakeSettings = {}) {
 
   const companionImportBtn = document.getElementById('import-companion-btn');
   if (companionImportBtn) companionImportBtn.onclick = importCompanionPackage;
+  const companionImportFolderBtn = document.getElementById('import-companion-folder-btn');
+  if (companionImportFolderBtn) companionImportFolderBtn.onclick = importCompanionFolder;
   const companionImportZipBtn = document.getElementById('import-companion-zip-btn');
   if (companionImportZipBtn) companionImportZipBtn.onclick = importCompanionZip;
 
@@ -1136,6 +1348,19 @@ function populateSettingsForm(voiceSettings = {}, wakeSettings = {}) {
   };
 
   updateVoiceProviderVisibility(providerSelect.value);
+  updateSttVisibility(sttMode?.value || 'local', sttApiProvider?.value || 'openai');
+}
+
+async function runSetupTest() {
+  setSetupTestResult('Running setup test...', [], 'ok');
+  try {
+    const data = await fetchJson(`${BASE}/api/setup/test`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    setSetupTestResult(data.summary || 'Setup test finished.', data.checks || [], data.tone || 'ok');
+    setSettingsStatus('Setup test finished.');
+  } catch (err) {
+    setSetupTestResult(err.message || 'Setup test failed.', [{ message: err.message || 'Setup test failed.' }], 'error');
+    setSettingsStatus(err.message || 'Setup test failed.', true);
+  }
 }
 
 async function openSettings() {
@@ -1148,11 +1373,17 @@ async function openSettings() {
       fetchJson(`${BASE}/api/settings/voice`),
       fetchJson(`${BASE}/api/settings/wake`),
       fetchJson(`${BASE}/api/settings/companions`),
+      appearance.refresh(),
+      branding.refresh(),
+      layoutSettings.refresh(),
+      intro.refresh(),
+      music.refresh(),
     ]);
     currentCompanionSettings = companionData.settings || { agentVisuals: {} };
     availableCompanions = companionData.items || [];
     companions.setCompanionData({ visuals: companionData.resolved || {}, items: availableCompanions });
     populateSettingsForm(voiceData.settings || {}, wakeData.settings || {});
+    setSetupTestResult('No setup test run yet.', [], 'ok');
     setSettingsStatus('Settings loaded.');
   } catch (err) {
     setSettingsStatus(err.message, true);
@@ -1194,6 +1425,12 @@ async function saveSettings() {
   const fishVoiceId = document.getElementById('fish-voice-id').value.trim();
   const fishSessionCookie = document.getElementById('fish-session-cookie').value.trim();
   const fishFormat = document.getElementById('fish-format').value.trim() || 'mp3';
+  const sttMode = document.getElementById('stt-mode')?.value?.trim() || 'local';
+  const sttApiBase = document.getElementById('stt-api-base')?.value?.trim() || 'https://your-domain.example/aichat';
+  const sttApiProvider = document.getElementById('stt-api-provider')?.value?.trim() || 'fish';
+  const sttFishApiKey = document.getElementById('stt-fish-key')?.value?.trim() || '';
+  const sttOpenAiApiKey = document.getElementById('stt-openai-key')?.value?.trim() || '';
+  const sttElevenlabsApiKey = document.getElementById('stt-elevenlabs-key')?.value?.trim() || '';
   const fishPlaybackMode = document.getElementById('fish-playback-mode')?.value?.trim() || 'auto';
   const fishAutoStreamMinChars = Number(document.getElementById('fish-auto-stream-min-chars')?.value || 260);
   const fishIncludeAsteriskNarration = document.getElementById('fish-include-narration').checked;
@@ -1244,7 +1481,7 @@ async function saveSettings() {
     await fetchJson(`${BASE}/api/settings/voice`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider, elevenlabsApiKey: apiKey, defaultVoiceId, fishAudioApiBase, fishVoiceId, fishSessionCookie, fishFormat, fishPlaybackMode, fishAutoStreamMinChars, fishIncludeAsteriskNarration, agentVoices, elevenlabsAgentVoices, fishAgentVoices }),
+      body: JSON.stringify({ provider, elevenlabsApiKey: apiKey, defaultVoiceId, fishAudioApiBase, fishVoiceId, fishSessionCookie, fishFormat, fishPlaybackMode, fishAutoStreamMinChars, fishIncludeAsteriskNarration, sttMode, sttApiBase, sttApiProvider, sttFishApiKey, sttOpenAiApiKey, sttElevenlabsApiKey, agentVoices, elevenlabsAgentVoices, fishAgentVoices }),
     });
 
     await fetchJson(`${BASE}/api/settings/companions`, {
@@ -1258,6 +1495,12 @@ async function saveSettings() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ porcupineAccessKey, wakeWords }),
     });
+
+    await appearance.saveSettings();
+    await branding.saveSettings();
+    await layoutSettings.saveSettings();
+    await intro.saveSettings();
+    await music.saveSettings();
 
     const uploads = [];
     document.querySelectorAll('.wake-file-input').forEach((input) => {
@@ -1330,6 +1573,13 @@ async function main() {
   await loadRoster();
   await loadCompanionSettings();
   office.init('office-canvas', roster);
+  await appearance.init({ office });
+  branding.init();
+  layoutSettings.init();
+  await branding.refresh();
+  await layoutSettings.refresh();
+  await music.init();
+  await intro.init();
   office.setAgentVisuals(currentCompanionSettings.agentVisuals ? Object.fromEntries(roster.agents.map((agent) => [agent.id, companions.getAgentVisual(agent.id)])) : {}, availableCompanions);
   directChat.init();
   directChat.setRoster(roster);
@@ -1377,7 +1627,14 @@ async function main() {
       }
 
       terminal.log(`[wake] hands-free listening for ${getAgentLabel(agentId)}...`, 'system', true);
-      await voice.startRecording({ maxRecordSeconds: 30, silenceTimeoutMs: 2000, silenceThreshold: 0.016 });
+      try {
+        await voice.startRecording({ maxRecordSeconds: 30, silenceTimeoutMs: 2000, silenceThreshold: 0.016 });
+      } catch (err) {
+        mascot.setEmotion('error');
+        office.setAgentHighlight(agentId, false);
+        activeOfficeAgent = null;
+        terminal.log(`[voice] ${err.message || 'Microphone start failed.'}`, 'error', true);
+      }
     },
   });
 
@@ -1401,9 +1658,11 @@ async function main() {
   });
 
   document.getElementById('settings-btn')?.addEventListener('click', (e) => { e.stopPropagation(); openSettings(); });
+  document.getElementById('global-settings-btn')?.addEventListener('click', (e) => { e.stopPropagation(); openSettings(); });
   document.getElementById('close-settings-btn')?.addEventListener('click', closeSettings);
   document.querySelector('[data-close-settings="true"]')?.addEventListener('click', closeSettings);
   document.getElementById('save-settings-btn')?.addEventListener('click', saveSettings);
+  document.getElementById('run-setup-test-btn')?.addEventListener('click', runSetupTest);
   document.getElementById('refresh-voices-btn')?.addEventListener('click', refreshVoices);
 
   document.addEventListener('keydown', (e) => {
@@ -1452,8 +1711,10 @@ async function main() {
   const officeCanvas = document.getElementById('office-canvas');
   officeCanvas.addEventListener('click', async (e) => {
     const rect = officeCanvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
+    const scaleX = officeCanvas.width / Math.max(1, rect.width);
+    const scaleY = officeCanvas.height / Math.max(1, rect.height);
+    const x = (e.clientX - rect.left) * scaleX;
+    const y = (e.clientY - rect.top) * scaleY;
     const agentId = office.getAgentAtPoint(x, y);
     if (!agentId) return;
 
@@ -1481,17 +1742,26 @@ async function main() {
     voice.setTargetAgent(agentId);
     office.setAgentHighlight(agentId, true);
     office.onVoiceStart(agentId);
-    await voice.startRecording();
-    mascot.setEmotion('listening');
-    terminal.log(`[mic] Listening for ${getAgentLabel(agentId)}... tap again to send`, 'system', true);
+    try {
+      await voice.startRecording();
+      mascot.setEmotion('listening');
+      terminal.log(`[mic] Listening for ${getAgentLabel(agentId)}... tap again to send`, 'system', true);
+    } catch (err) {
+      office.setAgentHighlight(agentId, false);
+      activeOfficeAgent = null;
+      mascot.setEmotion('error');
+      terminal.log(`[voice] ${err.message || 'Microphone start failed.'}`, 'error', true);
+    }
   });
 
-  terminal.log('[voice] STT: server-local faster-whisper (free)', 'info', true);
-  terminal.log('[voice] TTS: ElevenLabs when configured, otherwise espeak-ng fallback', 'info', true);
+  terminal.log('[voice] STT: server-local faster-whisper or AIChat API, depending on settings', 'info', true);
+  terminal.log('[voice] TTS: Fish Audio or ElevenLabs when configured, otherwise espeak-ng fallback', 'info', true);
   terminal.log('[wake] Wake mode: local whisper name detection', 'info', true);
   setConnectionState('connecting', 'CONNECTING');
   setWakeButtonState('off');
   bootSequence();
+  loadSetupStatus().catch(() => {});
+  setSetupTestResult('No setup test run yet.', [], 'ok');
   connect();
 
   let lastTime = performance.now();

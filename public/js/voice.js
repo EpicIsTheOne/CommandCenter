@@ -1,5 +1,19 @@
 let mediaRecorder = null;
 let audioChunks = [];
+
+function humanizeVoiceError(err) {
+  const message = String(err?.message || err || '').trim();
+  const lower = message.toLowerCase();
+  if (!message) return 'Voice failed for an unknown reason.';
+  if (lower.includes('permission') || lower.includes('denied')) return 'Microphone permission was denied.';
+  if (lower.includes('no audio file provided')) return 'No microphone audio was captured.';
+  if (lower.includes('empty-transcription')) return 'I heard audio, but the transcript came back empty.';
+  if (lower.includes('unsupported') && lower.includes('codec')) return 'Your audio was recorded, but the speech service rejected the audio format.';
+  if (lower.includes('stt api failed')) return 'Speech-to-text API request failed.';
+  if (lower.includes('tts failed')) return 'Text-to-speech failed.';
+  if (lower.includes('autoplay')) return 'Audio was generated, but the browser blocked playback.';
+  return message;
+}
 let isRecording = false;
 let onTranscription = null;
 let onRecordingStopped = null;
@@ -44,6 +58,10 @@ export function getTargetAgent() {
 export function supportsBrowserSTT() { return true; }
 export function supportsBrowserTTS() { return true; }
 
+function emitPlaybackEvent(name, detail = {}) {
+  document.dispatchEvent(new CustomEvent(name, { detail }));
+}
+
 export function stopPlayback() {
   currentPlaybackToken += 1;
   if (currentSpeakController) {
@@ -63,6 +81,8 @@ export function stopPlayback() {
     URL.revokeObjectURL(currentAudioUrl);
     currentAudioUrl = null;
   }
+  releaseSpeakerLock();
+  emitPlaybackEvent('commandcenter:voice-playback-stop');
 }
 
 function cleanupMonitoring() {
@@ -178,6 +198,7 @@ export async function startRecording(options = {}) {
     isRecording = false;
     cleanupMonitoring();
     cleanupStream();
+    throw new Error(humanizeVoiceError(err));
   }
 }
 
@@ -200,14 +221,19 @@ async function sendToServer(blob) {
   targetAgent = 'main';
   try {
     const res = await fetch(`${BASE}/api/voice/transcribe`, { method: 'POST', body: form });
+    const payload = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Transcription failed');
+      throw new Error(payload.error || 'Transcription failed');
     }
-    const { text } = await res.json();
+    if (payload.ignored === 'empty-transcription') {
+      throw new Error('empty-transcription');
+    }
+    const { text } = payload;
     if (text && onTranscription) onTranscription(text, sentTo);
+    return { ok: true, text };
   } catch (err) {
     console.error('[voice] Send error:', err);
+    throw new Error(humanizeVoiceError(err));
   }
 }
 
@@ -264,12 +290,15 @@ export async function playSpokenResponse(text, agentId = 'main') {
         if (currentAudioUrl === audioUrl) currentAudioUrl = null;
         if (currentSpeakController === controller) currentSpeakController = null;
         releaseSpeakerLock();
+        emitPlaybackEvent('commandcenter:voice-playback-stop', { agentId, completed });
         resolve(completed);
       };
 
       audio.onended = () => cleanup(playbackToken === currentPlaybackToken);
       audio.onerror = () => cleanup(false);
-      audio.play().catch(() => cleanup(false));
+      audio.play().then(() => {
+        emitPlaybackEvent('commandcenter:voice-playback-start', { agentId });
+      }).catch(() => cleanup(false));
     });
   } catch (err) {
     if (err.name !== 'AbortError') console.error('[voice] Playback error:', err);
@@ -279,6 +308,6 @@ export async function playSpokenResponse(text, agentId = 'main') {
       lastPlaybackSignature = '';
       lastPlaybackStartedAt = 0;
     }
-    return false;
+    throw new Error(humanizeVoiceError(err));
   }
 }

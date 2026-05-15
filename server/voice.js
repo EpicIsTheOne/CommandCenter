@@ -10,6 +10,7 @@ const PYTHONPATH = join(ROOT, '.pydeps');
 const WHISPER_CACHE_DIR = join(ROOT, '.cache', 'whisper');
 const ELEVENLABS_BASE_URL = 'https://api.elevenlabs.io';
 const DEFAULT_FISH_AUDIO_BASE_URL = 'https://your-domain.example/aichat';
+const DEFAULT_STT_API_BASE_URL = 'https://your-domain.example/aichat';
 
 async function ensureDirs() {
   await mkdir(WHISPER_CACHE_DIR, { recursive: true });
@@ -24,7 +25,7 @@ function run(cmd, args, opts = {}) {
   });
 }
 
-export async function transcribe(audioBuffer, filename = 'audio.webm') {
+async function transcribeLocal(audioBuffer, filename = 'audio.webm') {
   await ensureDirs();
   const id = crypto.randomBytes(8).toString('hex');
   const inFile = join(tmpdir(), `cc-${id}-${filename.replace(/[^a-zA-Z0-9_.-]/g, '_')}`);
@@ -47,6 +48,62 @@ export async function transcribe(audioBuffer, filename = 'audio.webm') {
     await unlink(inFile).catch(() => {});
     await unlink(wavFile).catch(() => {});
   }
+}
+
+async function transcribeViaApi(audioBuffer, filename = 'audio.webm', settings = {}) {
+  const base = String(settings.sttApiBase || process.env.STT_API_BASE || DEFAULT_STT_API_BASE_URL).trim().replace(/\/+$/, '');
+  const rawProvider = String(settings.sttApiProvider || 'fish').trim().toLowerCase();
+  const provider = rawProvider === 'openai' || rawProvider === 'elevenlabs' ? rawProvider : 'fish';
+  const safeName = String(filename || 'audio.webm').replace(/[^a-zA-Z0-9_.-]/g, '_');
+  const id = crypto.randomBytes(8).toString('hex');
+  const inFile = join(tmpdir(), `cc-api-${id}-${safeName}`);
+  const wavName = safeName.replace(/\.[^.]+$/, '') + '.wav';
+  const wavFile = join(tmpdir(), `cc-api-${id}.wav`);
+  let outboundBuffer = audioBuffer;
+  let outboundName = safeName;
+
+  try {
+    await writeFile(inFile, audioBuffer);
+    await run('ffmpeg', ['-y', '-i', inFile, '-ac', '1', '-ar', '16000', wavFile], { maxBuffer: 20 * 1024 * 1024 });
+    outboundBuffer = await import('node:fs/promises').then(({ readFile }) => readFile(wavFile));
+    outboundName = wavName;
+  } catch (err) {
+    console.warn(`[voice] API STT audio normalization failed, sending original upload: ${err.message}`);
+  } finally {
+    await unlink(inFile).catch(() => {});
+    await unlink(wavFile).catch(() => {});
+  }
+
+  const headers = {
+    'Content-Type': 'application/octet-stream',
+    'X-STT-Provider': provider,
+    'X-STT-Filename': outboundName,
+  };
+  const fishKey = String(settings.sttFishApiKey || '').trim();
+  const openAiKey = String(settings.sttOpenAiApiKey || '').trim();
+  const elevenlabsKey = String(settings.sttElevenlabsApiKey || '').trim();
+  if (fishKey) headers['X-Fish-API-Key'] = fishKey;
+  if (openAiKey) headers['X-OpenAI-API-Key'] = openAiKey;
+  if (elevenlabsKey) headers['X-ElevenLabs-API-Key'] = elevenlabsKey;
+
+  const res = await fetch(`${base}/api/stt/transcribe`, {
+    method: 'POST',
+    headers,
+    body: outboundBuffer,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data.detail || data.error || `STT API failed (${res.status})`);
+  }
+  return String(data.text || '').trim();
+}
+
+export async function transcribe(audioBuffer, filename = 'audio.webm') {
+  const settings = await loadVoiceSettings();
+  if (String(settings.sttMode || 'local').trim().toLowerCase() === 'api') {
+    return await transcribeViaApi(audioBuffer, filename, settings);
+  }
+  return await transcribeLocal(audioBuffer, filename);
 }
 
 function speakWithEspeak(text) {
@@ -148,7 +205,7 @@ export async function searchFishAudioVoices(query, settings = {}, options = {}) 
   const res = await fetch(`${base}/api/fish/models?${params.toString()}`, { headers });
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
-    throw new Error(`Fish voice search failed (${res.status}): ${errText || 'request failed'}`);
+    throw new Error(explainAiChatBaseError(base, errText, res.status));
   }
   return await res.json();
 }
@@ -264,6 +321,27 @@ export async function speak(text, agentId = 'main') {
       }
     } catch (err) {
       console.error('[voice] Fish Audio error:', err.message);
+    }
+  } else {
+    try {
+      const eleven = await speakWithElevenLabs(text, settings, agentId);
+      if (eleven) {
+        return {
+          buffer: eleven,
+          contentType: 'audio/mpeg',
+          provider: 'elevenlabs',
+          voiceId: resolved.voiceId,
+        };
+      }
+    } catch (err) {
+      console.error('[voice] ElevenLabs error:', err.message);
+    }
+  }
+
+  const fallback = await speakWithEspeak(text);
+  return { buffer: fallback, contentType: 'audio/wav', provider: 'espeak', voiceId: '' };
+}
+] Fish Audio error:', err.message);
     }
   } else {
     try {

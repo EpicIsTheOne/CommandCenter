@@ -9,6 +9,9 @@
     "dev": "node --watch server/index.js"
   },
   "dependencies": {
+    "@picovoice/porcupine-web": "^4.0.0",
+    "@picovoice/porcupine-web-en-worker": "^2.1.7",
+    "@picovoice/web-voice-processor": "^4.0.9",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "multer": "^1.4.5-lts.1",

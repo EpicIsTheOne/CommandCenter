@@ -15,7 +15,17 @@ npm start
 # Open http://localhost:3000
 ```
 
-With zero config, the app can run in **demo mode** with simulated agent activity. For live OpenClaw integration, configure `.env` and the OpenClaw gateway settings below.
+With zero config, the app runs in **demo mode** with simulated agent activity.
+
+For **live OpenClaw integration**:
+- set `DEMO_MODE=false`
+- point `GATEWAY_URL` at your OpenClaw gateway
+- either set `GATEWAY_TOKEN` manually **or** let CommandCenter auto-detect it from `~/.openclaw/openclaw.json` when running on the same machine
+
+Open **Settings** after boot and check the **Setup Status** section. It should clearly tell you whether you are:
+- in demo mode on purpose
+- live and connected
+- or stuck in demo fallback because gateway auth/connection failed
 
 ## What You'll See
 
@@ -93,6 +103,7 @@ Additional panels and modals provide:
 - Companion settings UI.
 - Import Codex pets from:
   - extracted folder path containing `pet.json` and spritesheet assets
+  - uploaded folder from your device
   - uploaded `.zip` package
 - Codex `pet.json` animation map inference.
 - Codex spritesheet rendering using stable row selection.
@@ -298,7 +309,7 @@ If your OpenClaw agent can read files, point it at `SETUP.md`. It contains step-
 
 ## Companion / Codex Pet Notes
 
-Codex imports expect a package containing a `pet.json` and spritesheet asset, usually `spritesheet.webp`.
+Codex imports expect a package containing a `pet.json` and a spritesheet asset. `spritesheet.webp` is the default, but the importer now also respects the path declared in `spritesheetPath`.
 
 The renderer looks for common animation keys such as:
 

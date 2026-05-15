@@ -17,6 +17,12 @@ const DEFAULT_SETTINGS = {
   fishIncludeAsteriskNarration: false,
   fishPlaybackMode: 'auto',
   fishAutoStreamMinChars: 260,
+  sttMode: 'api',
+  sttApiBase: 'https://your-domain.example/aichat',
+  sttApiProvider: 'fish',
+  sttFishApiKey: '',
+  sttOpenAiApiKey: '',
+  sttElevenlabsApiKey: '',
   agentVoices: {},
   elevenlabsAgentVoices: {},
   fishAgentVoices: {},
@@ -38,6 +44,16 @@ function normalizeVoiceMap(value = {}) {
 
 function looksLikeElevenLabsVoiceId(value = '') {
   return /^[A-Za-z0-9]{20}$/.test(String(value || '').trim());
+}
+
+function normalizeSttMode(value = '') {
+  return String(value || '').trim().toLowerCase() === 'api' ? 'api' : 'local';
+}
+
+function normalizeSttProvider(value = '') {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'openai' || normalized === 'elevenlabs') return normalized;
+  return 'fish';
 }
 
 function normalize(input = {}) {
@@ -69,6 +85,12 @@ function normalize(input = {}) {
     fishIncludeAsteriskNarration: input.fishIncludeAsteriskNarration === true,
     fishPlaybackMode: ['auto', 'stream', 'full'].includes(String(input.fishPlaybackMode || '').trim()) ? String(input.fishPlaybackMode || '').trim() : 'auto',
     fishAutoStreamMinChars: Math.min(4000, Math.max(80, Number(input.fishAutoStreamMinChars || DEFAULT_SETTINGS.fishAutoStreamMinChars) || DEFAULT_SETTINGS.fishAutoStreamMinChars)),
+    sttMode: normalizeSttMode(input.sttMode || DEFAULT_SETTINGS.sttMode),
+    sttApiBase: String(input.sttApiBase || DEFAULT_SETTINGS.sttApiBase).trim().replace(/\/+$/, ''),
+    sttApiProvider: normalizeSttProvider(input.sttApiProvider || DEFAULT_SETTINGS.sttApiProvider),
+    sttFishApiKey: String(input.sttFishApiKey || '').trim(),
+    sttOpenAiApiKey: String(input.sttOpenAiApiKey || '').trim(),
+    sttElevenlabsApiKey: String(input.sttElevenlabsApiKey || '').trim(),
     agentVoices: provider === 'fish' ? fishAgentVoices : elevenlabsAgentVoices,
     elevenlabsAgentVoices,
     fishAgentVoices,

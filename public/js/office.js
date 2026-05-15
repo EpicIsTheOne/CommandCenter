@@ -27,6 +27,7 @@ let companionRegistry = {};
 const codexImageCache = new Map();
 const sceneImageCache = new Map();
 const OFFICE_ART = {
+  defaultBackgroundUrl: `${BASE}/assets/office-art/room-background.png`,
   backgroundUrl: `${BASE}/assets/office-art/room-background.png`,
   deskSheetUrl: `${BASE}/assets/office-art/desk-sheet.png`,
   deskColumns: 1,
@@ -270,6 +271,7 @@ function getSceneImage(url = '') {
   if (!url) return null;
   if (sceneImageCache.has(url)) return sceneImageCache.get(url);
   const img = new Image();
+  img.decoding = 'async';
   img.src = url;
   sceneImageCache.set(url, img);
   return img;
@@ -338,15 +340,39 @@ export function setAgentState(agentId, state, data = {}) {
 }
 
 export function getAgentAtPoint(canvasX, canvasY) {
-  for (const agent of agents) {
-    const ax = agent.xPct * canvas.width, ay = agent.yPct * canvas.height;
-    const dx = canvasX - ax, dy = canvasY - ay;
-    if (dx * dx + dy * dy < 60 * 60) return agent.id;
+  for (let i = agents.length - 1; i >= 0; i -= 1) {
+    const agent = agents[i];
+    const ax = agent.xPct * canvas.width;
+    const ay = agent.yPct * canvas.height;
+
+    // Match what users can actually tap: sprite body + label area + desk footprint.
+    const spriteHalfWidth = PX * 10;
+    const spriteTop = ay - PX * 18;
+    const spriteBottom = ay + PX * 9;
+    const deskHalfWidth = PX * 16;
+    const deskTop = ay - PX * 2;
+    const deskBottom = ay + PX * 12;
+
+    const inSprite = canvasX >= (ax - spriteHalfWidth)
+      && canvasX <= (ax + spriteHalfWidth)
+      && canvasY >= spriteTop
+      && canvasY <= spriteBottom;
+
+    const inDesk = canvasX >= (ax - deskHalfWidth)
+      && canvasX <= (ax + deskHalfWidth)
+      && canvasY >= deskTop
+      && canvasY <= deskBottom;
+
+    if (inSprite || inDesk) return agent.id;
   }
   return null;
 }
 
 export function setAgentHighlight(agentId, on) { highlightedAgent = on ? agentId : null; }
+
+export function setWorkspaceBackground(url = '') {
+  OFFICE_ART.backgroundUrl = String(url || '').trim() || OFFICE_ART.defaultBackgroundUrl;
+}
 
 // All agents look up when voice recording starts
 export function onVoiceStart(targetAgentId) {
@@ -832,14 +858,19 @@ function drawDigitalClock() {
   ctx.fillRect(x, y, boxW, boxH);
 
   const now = new Date();
-  const h = String(now.getHours()).padStart(2, '0'), m = String(now.getMinutes()).padStart(2, '0'), s = String(now.getSeconds()).padStart(2, '0');
+  const hours = now.getHours();
+  const h = ((hours + 11) % 12) + 1;
+  const hStr = String(h).padStart(2, '0');
+  const m = String(now.getMinutes()).padStart(2, '0');
+  const s = String(now.getSeconds()).padStart(2, '0');
+  const amPm = hours >= 12 ? 'PM' : 'AM';
   const blink = Math.floor(tick / 500) % 2 === 0;
 
   ctx.fillStyle = isChiming ? '#44FF88' : '#00FF66';
   ctx.font = `bold ${PX * 4.5}px VT323`; ctx.textAlign = 'center';
-  ctx.fillText(`${h}${blink ? ':' : ' '}${m}`, x + boxW / 2, y + PX * 4.5);
+  ctx.fillText(`${hStr}${blink ? ':' : ' '}${m}`, x + boxW / 2, y + PX * 4.5);
   ctx.fillStyle = '#00CC52'; ctx.font = `${PX * 2}px VT323`;
-  ctx.fillText(s, x + boxW / 2, y + PX * 6.2);
+  ctx.fillText(`${s} ${amPm}`, x + boxW / 2, y + PX * 6.2);
 
   const days = ['SUN','MON','TUE','WED','THU','FRI','SAT'];
   const months = ['JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC'];
@@ -1163,6 +1194,8 @@ function getCodexImage(url = '') {
   if (!url) return null;
   if (codexImageCache.has(url)) return codexImageCache.get(url);
   const img = new Image();
+  img.decoding = 'async';
+  img.onerror = () => { img._failed = true; };
   img.src = url;
   codexImageCache.set(url, img);
   return img;
@@ -1179,8 +1212,8 @@ function getCodexRowsForState(pet = {}, state = 'idle', { isWalking = false, dir
   const stateMap = pet.animationMap || {};
   if (isWalking) {
     if (directionKey === 'runningLeft') return stateMap.runningLeft || stateMap['running-left'] || stateMap.walkLeft || stateMap.running || stateMap.run || [2];
-    if (directionKey === 'walkUp') return stateMap.walkUp || stateMap.running || stateMap.run || stateMap.runningRight || stateMap['running-right'] || [7];
-    if (directionKey === 'walkDown') return stateMap.walkDown || stateMap.running || stateMap.run || stateMap.runningRight || stateMap['running-right'] || [7];
+    if (directionKey === 'walkUp') return stateMap.walkUp || stateMap.runningRight || stateMap['running-right'] || stateMap.walkRight || stateMap.walking || stateMap.running || stateMap.run || [1];
+    if (directionKey === 'walkDown') return stateMap.walkDown || stateMap.runningRight || stateMap['running-right'] || stateMap.walkRight || stateMap.walking || stateMap.running || stateMap.run || [1];
     return stateMap.runningRight || stateMap['running-right'] || stateMap.walkRight || stateMap.walking || stateMap.running || stateMap.run || [1];
   }
   if (state === 'waiting') return stateMap.waiting || stateMap.thinking || [6];
@@ -1221,8 +1254,8 @@ const CODEX_FRAME_FALLBACKS = {
   walkLeft: 8,
   'running-right': 8,
   'running-left': 8,
-  walkUp: 8,
-  walkDown: 8,
+  walkUp: 6,
+  walkDown: 6,
 };
 
 function getCodexFrameCountForState(pet = {}, state = 'idle', columns = 8, { isWalking = false, directionKey = '' } = {}) {
@@ -1271,8 +1304,9 @@ function drawCodexImportedAgent(agent, companion, { isWalking = false, scale: vi
   if (!img?.complete || !img.naturalWidth) return drawAgent(agent);
 
   if (agent.codexAmbientTimer > 0) agent.codexAmbientTimer = Math.max(0, agent.codexAmbientTimer - 16);
-  const renderState = getCodexAmbientState(agent, pet, isWalking);
   const directionKey = isWalking ? getCodexDirectionKey(agent) : '';
+  const baseState = isWalking ? (directionKey || 'runningRight') : getCodexAmbientState(agent, pet, isWalking);
+  const renderState = isWalking ? (directionKey || 'runningRight') : baseState;
   const row = getStableCodexRowForState(pet, renderState, { isWalking, directionKey });
   const columns = Number(pet.columns || 8) || 8;
   const frameWidth = Number(pet.frameWidth || 192) || 192;
