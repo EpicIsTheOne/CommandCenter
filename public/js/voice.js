@@ -268,13 +268,24 @@ async function playStreamedAudioResponse(res, { playbackToken, controller } = {}
     let sourceBuffer = null;
     let startedPlayback = false;
 
+    const detachAudio = () => {
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load?.();
+      if (currentAudio === audio) currentAudio = null;
+      if (currentAudioUrl === audioUrl) currentAudioUrl = null;
+      if (currentSpeakController === controller) currentSpeakController = null;
+      try { if (mediaSource.readyState === 'open') mediaSource.endOfStream(); } catch (_) {}
+      URL.revokeObjectURL(audioUrl);
+    };
+
     const cleanup = (completed) => {
       if (finished) return;
       finished = true;
       reader?.cancel?.().catch(() => {});
-      if (currentAudio === audio) currentAudio = null;
-      if (currentAudioUrl === audioUrl) currentAudioUrl = null;
-      URL.revokeObjectURL(audioUrl);
+      detachAudio();
       releaseSpeakerLock();
       emitPlaybackEvent('commandcenter:voice-playback-stop');
       resolve(completed);
@@ -284,7 +295,7 @@ async function playStreamedAudioResponse(res, { playbackToken, controller } = {}
       if (finished) return;
       finished = true;
       reader?.cancel?.().catch(() => {});
-      URL.revokeObjectURL(audioUrl);
+      detachAudio();
       releaseSpeakerLock();
       reject(err);
     };
@@ -370,11 +381,11 @@ async function sendToServer(blob) {
   }
 }
 
-export async function playSpokenResponse(text, agentId = 'main') {
+export async function playSpokenResponse(text, agentId = 'main', options = {}) {
   const normalizedText = String(text || '').replace(/\s+/g, ' ').trim();
   const signature = `${agentId}::${normalizedText}`;
   const now = Date.now();
-  if (normalizedText && signature === lastPlaybackSignature && (now - lastPlaybackStartedAt) < DUPLICATE_PLAYBACK_WINDOW_MS) {
+  if (!options.force && normalizedText && signature === lastPlaybackSignature && (now - lastPlaybackStartedAt) < DUPLICATE_PLAYBACK_WINDOW_MS) {
     console.log('[voice] Suppressing duplicate playback start');
     return false;
   }

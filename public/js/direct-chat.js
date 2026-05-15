@@ -1,5 +1,6 @@
 // Direct Chat Module - text-based chat with agents + reusable file library + session switching
 import * as terminal from './terminal.js?v=20260320j';
+import * as voice from './voice.js?v=20260515-voicefix1';
 import * as companions from './companions.js?v=20260515-noflicker2';
 
 const BASE = window.__BASE_PATH__ || '';
@@ -153,6 +154,13 @@ function createPanel() {
   sessionMenuToggleEl?.addEventListener('click', toggleSessionMenu);
   newSessionBtnEl?.addEventListener('click', createNewSession);
   sessionSearchEl?.addEventListener('input', () => renderSessionList(sessionSearchEl.value));
+  panelEl.addEventListener('click', async (event) => {
+    const speakButton = event.target?.closest?.('.dc-message-speak');
+    if (!speakButton) return;
+    event.preventDefault();
+    event.stopPropagation();
+    await speakDirectMessage(speakButton.dataset.messageId || '');
+  });
 
   syncFileLibraryVisibility();
   syncSessionMenuVisibility();
@@ -395,9 +403,13 @@ function renderMessage(msg, index = 0, messages = []) {
       ? 'Error'
       : (isUser ? 'You' : (getAgent(activeChatAgent || 'main').label || 'Assistant'));
 
+  const canSpeak = !isUser && msg.kind !== 'typing' && msg.kind !== 'tool' && msg.kind !== 'file' && String(msg.text || '').trim();
+  const speakButton = canSpeak
+    ? `<button class="dc-message-speak" type="button" data-message-id="${escapeAttr(msg.id || '')}" title="Speak again" aria-label="Speak this message again">▶</button>`
+    : '';
   const body = msg.kind === 'typing'
     ? '<div class="dc-message-text"><div class="dc-typing"><span></span><span></span><span></span></div></div>'
-    : `<div class="dc-message-text">${renderImmersionText(msg.text || '')}</div>`;
+    : `<div class="dc-message-body-row"><div class="dc-message-text">${renderImmersionText(msg.text || '')}</div>${speakButton}</div>`;
 
   const attachments = Array.isArray(msg.files) && msg.files.length
     ? `<div class="dc-message-files">${msg.files.map(renderAttachedBadge).join('')}</div>`
@@ -414,6 +426,29 @@ function renderMessage(msg, index = 0, messages = []) {
       ${isGroupedWithPrev ? `<div class="dc-message-time dc-message-time-inline">${formatTime(msg.timestamp)}</div>` : ''}
     </div>
   `;
+}
+
+async function speakDirectMessage(messageId = '') {
+  const history = chatHistory[getActiveHistoryKey()] || [];
+  const msg = history.find((entry) => String(entry.id || '') === String(messageId || ''));
+  const text = String(msg?.text || '').trim();
+  if (!text) return;
+  const agentId = activeChatAgent || 'main';
+  const button = panelEl?.querySelector(`.dc-message-speak[data-message-id="${CSS.escape(String(messageId || ''))}"]`);
+  try {
+    if (button) {
+      button.disabled = true;
+      button.textContent = '■';
+    }
+    await voice.playSpokenResponse(text, agentId, { force: true });
+  } catch (err) {
+    terminal.log(`[voice] ${err.message || 'Replay failed.'}`, 'error', true);
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = '▶';
+    }
+  }
 }
 
 function renderAttachedBadge(file) {
