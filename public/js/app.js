@@ -11,7 +11,7 @@ import * as appearance from './appearance.js?v=20260514b';
 import * as branding from './branding.js?v=20260514b';
 import * as layoutSettings from './layout-settings.js?v=20260514b';
 
-const APP_BUILD = '20260516-authmodal1';
+const APP_BUILD = '20260516-authmodal2';
 console.log('[CommandCenter] app build:', APP_BUILD);
 
 let roster = { agents: [], primaryAgentId: 'main' };
@@ -1994,7 +1994,24 @@ async function disarmWakeMode() {
   terminal.log('[wake] Wake mode off', 'info', true);
 }
 
+function bindEarlyAuthUi() {
+  document.getElementById('auth-submit-btn')?.addEventListener('click', submitAuthModal);
+  document.getElementById('auth-password')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submitAuthModal();
+    }
+  });
+  document.getElementById('auth-password-confirm')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submitAuthModal();
+    }
+  });
+}
+
 async function main() {
+  bindEarlyAuthUi();
   await ensureUiAuth();
   applyVignetteStrength(loadVignetteStrength());
   loadDirectionalVignette();
@@ -2099,19 +2116,6 @@ async function main() {
   document.getElementById('close-password-modal-btn')?.addEventListener('click', closePasswordModal);
   document.querySelector('[data-close-password-modal="true"]')?.addEventListener('click', closePasswordModal);
   document.getElementById('password-save-btn')?.addEventListener('click', changePasswordFromSettings);
-  document.getElementById('auth-submit-btn')?.addEventListener('click', submitAuthModal);
-  document.getElementById('auth-password')?.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      submitAuthModal();
-    }
-  });
-  document.getElementById('auth-password-confirm')?.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      submitAuthModal();
-    }
-  });
   document.getElementById('password-current')?.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       event.preventDefault();
