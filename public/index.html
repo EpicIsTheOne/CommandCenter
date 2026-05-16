@@ -5,9 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>OpenClaw Command Center</title>
   <script>window.__BASE_PATH__ = (location.pathname.replace(/\/$/, '').match(/^(.*\/commandcenter)(?:\/.*)?$/)?.[1] || '');</script>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=VT323&family=Inter:wght@400;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/styles.css?v=20260516-rooms7">
+  <link rel="stylesheet" href="css/styles.css?v=20260516-authmodal1">
 </head>
 <body>
   <div id="command-center">
@@ -50,6 +51,65 @@
   </div>
 
   <button id="global-settings-btn" class="global-settings-button" type="button" aria-label="Open settings">SETTINGS</button>
+
+  <div id="auth-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop"></div>
+    <div class="modal-content auth-modal-content" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+      <div class="modal-header">
+        <h3 id="auth-title">CommandCenter Access</h3>
+      </div>
+      <div class="modal-body auth-modal-body">
+        <div class="auth-copy">
+          <div id="auth-mode-label" class="auth-kicker">Secure access</div>
+          <div id="auth-message" class="setting-hint">Enter your password to continue.</div>
+        </div>
+        <div class="setting-group">
+          <label for="auth-password">Password</label>
+          <input id="auth-password" type="password" autocomplete="current-password" placeholder="Enter password">
+        </div>
+        <div id="auth-confirm-group" class="setting-group hidden">
+          <label for="auth-password-confirm">Confirm password</label>
+          <input id="auth-password-confirm" type="password" autocomplete="new-password" placeholder="Confirm password">
+        </div>
+        <div id="auth-status" class="settings-status"></div>
+      </div>
+      <div class="modal-footer auth-modal-footer">
+        <button id="auth-submit-btn" class="primary-button" type="button">UNLOCK</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="password-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop" data-close-password-modal="true"></div>
+    <div class="modal-content auth-modal-content" role="dialog" aria-modal="true" aria-labelledby="password-modal-title">
+      <div class="modal-header">
+        <h3 id="password-modal-title">Change Password</h3>
+        <button id="close-password-modal-btn" class="close-button" type="button" aria-label="Close password dialog">×</button>
+      </div>
+      <div class="modal-body auth-modal-body">
+        <div class="auth-copy">
+          <div class="auth-kicker">Security</div>
+          <div class="setting-hint">Update the CommandCenter password without ugly browser prompts like a civilized life form.</div>
+        </div>
+        <div class="setting-group">
+          <label for="password-current">Current password</label>
+          <input id="password-current" type="password" autocomplete="current-password" placeholder="Current password">
+        </div>
+        <div class="setting-group">
+          <label for="password-new">New password</label>
+          <input id="password-new" type="password" autocomplete="new-password" placeholder="New password">
+        </div>
+        <div class="setting-group">
+          <label for="password-confirm">Confirm new password</label>
+          <input id="password-confirm" type="password" autocomplete="new-password" placeholder="Confirm new password">
+        </div>
+        <div id="password-status" class="settings-status"></div>
+      </div>
+      <div class="modal-footer auth-modal-footer">
+        <button id="password-save-btn" class="primary-button" type="button">UPDATE PASSWORD</button>
+      </div>
+    </div>
+  </div>
 
   <div id="settings-modal" class="modal hidden" aria-hidden="true">
     <div class="modal-backdrop" data-close-settings="true"></div>
@@ -622,6 +682,6 @@
 
   <script src="vendor/picovoice/web-voice-processor.js"></script>
   <script src="vendor/picovoice/porcupine-web.js"></script>
-  <script type="module" src="js/app.js?v=20260516-rooms7"></script>
+  <script type="module" src="js/app.js?v=20260516-authmodal1"></script>
 </body>
 </html>

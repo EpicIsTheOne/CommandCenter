@@ -11,7 +11,7 @@ import * as appearance from './appearance.js?v=20260514b';
 import * as branding from './branding.js?v=20260514b';
 import * as layoutSettings from './layout-settings.js?v=20260514b';
 
-const APP_BUILD = '20260516-rooms7';
+const APP_BUILD = '20260516-authmodal1';
 console.log('[CommandCenter] app build:', APP_BUILD);
 
 let roster = { agents: [], primaryAgentId: 'main' };
@@ -531,40 +531,131 @@ async function fetchJson(url, options = {}) {
   return data;
 }
 
-async function ensureUiAuth() {
-  const status = await fetchJson(`${BASE}/api/auth/status`);
-  if (status?.authenticated) return;
+function setAuthStatus(text = '', isError = false) {
+  const el = document.getElementById('auth-status');
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.color = isError ? 'var(--red)' : 'var(--text-dim)';
+}
 
-  if (!status?.passwordSet) {
-    while (true) {
-      const password = window.prompt('Create a CommandCenter password (min 6 chars):') || '';
-      if (!password) continue;
-      try {
-        await fetchJson(`${BASE}/api/auth/setup`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password }),
-        });
-        break;
-      } catch (err) {
-        alert(err.message || 'Could not set password');
-      }
+function setPasswordModalStatus(text = '', isError = false) {
+  const el = document.getElementById('password-status');
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.color = isError ? 'var(--red)' : 'var(--text-dim)';
+}
+
+function openAuthModal({ mode = 'login' } = {}) {
+  const modal = document.getElementById('auth-modal');
+  const title = document.getElementById('auth-title');
+  const kicker = document.getElementById('auth-mode-label');
+  const message = document.getElementById('auth-message');
+  const password = document.getElementById('auth-password');
+  const confirmGroup = document.getElementById('auth-confirm-group');
+  const confirm = document.getElementById('auth-password-confirm');
+  const submit = document.getElementById('auth-submit-btn');
+  if (!modal || !title || !kicker || !message || !password || !confirmGroup || !confirm || !submit) return;
+
+  modal.dataset.mode = mode;
+  title.textContent = mode === 'setup' ? 'Set CommandCenter Password' : 'CommandCenter Access';
+  kicker.textContent = mode === 'setup' ? 'First run setup' : 'Secure access';
+  message.textContent = mode === 'setup'
+    ? 'Create a password for this CommandCenter instance.'
+    : 'Enter your password to continue.';
+  submit.textContent = mode === 'setup' ? 'SET PASSWORD' : 'UNLOCK';
+  password.value = '';
+  confirm.value = '';
+  password.placeholder = mode === 'setup' ? 'Create password' : 'Enter password';
+  confirmGroup.classList.toggle('hidden', mode !== 'setup');
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  setAuthStatus('');
+  requestAnimationFrame(() => password.focus());
+}
+
+function closeAuthModal() {
+  const modal = document.getElementById('auth-modal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+let authResolve = null;
+
+function resolveAuthWaiter(value) {
+  if (typeof authResolve === 'function') {
+    const resolve = authResolve;
+    authResolve = null;
+    resolve(value);
+  }
+}
+
+async function submitAuthModal() {
+  const modal = document.getElementById('auth-modal');
+  const passwordInput = document.getElementById('auth-password');
+  const confirmInput = document.getElementById('auth-password-confirm');
+  const submit = document.getElementById('auth-submit-btn');
+  const mode = modal?.dataset?.mode || 'login';
+  const password = String(passwordInput?.value || '');
+  const confirm = String(confirmInput?.value || '');
+
+  if (!password) {
+    setAuthStatus('Password required.', true);
+    passwordInput?.focus();
+    return false;
+  }
+  if (mode === 'setup') {
+    if (password.length < 6) {
+      setAuthStatus('Password must be at least 6 characters.', true);
+      passwordInput?.focus();
+      return false;
     }
-  } else {
-    while (true) {
-      const password = window.prompt('Enter CommandCenter password:') || '';
-      if (!password) continue;
-      try {
-        await fetchJson(`${BASE}/api/auth/login`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ password }),
-        });
-        break;
-      } catch (err) {
-        alert('Wrong password. Try again.');
-      }
+    if (password !== confirm) {
+      setAuthStatus('Passwords do not match.', true);
+      confirmInput?.focus();
+      return false;
     }
+  }
+
+  const originalLabel = submit?.textContent || '';
+  if (submit) submit.disabled = true;
+  setAuthStatus(mode === 'setup' ? 'Setting password...' : 'Unlocking...');
+  try {
+    await fetchJson(`${BASE}/api/auth/${mode === 'setup' ? 'setup' : 'login'}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+    closeAuthModal();
+    resolveAuthWaiter(true);
+    return true;
+  } catch (err) {
+    setAuthStatus(err.message === 'AUTH_REQUIRED' ? 'Authentication required.' : (err.message || 'Authentication failed.'), true);
+    return false;
+  } finally {
+    if (submit) {
+      submit.disabled = false;
+      submit.textContent = originalLabel;
+    }
+  }
+}
+
+function waitForAuthSubmit() {
+  return new Promise((resolve) => {
+    authResolve = resolve;
+  });
+}
+
+async function ensureUiAuth() {
+  while (true) {
+    const status = await fetchJson(`${BASE}/api/auth/status`);
+    if (status?.authenticated) {
+      closeAuthModal();
+      return;
+    }
+    openAuthModal({ mode: status?.passwordSet ? 'login' : 'setup' });
+    // eslint-disable-next-line no-await-in-loop
+    await waitForAuthSubmit();
   }
 }
 
@@ -1699,20 +1790,58 @@ async function refreshVoices() {
   }
 }
 
+function openPasswordModal() {
+  const modal = document.getElementById('password-modal');
+  if (!modal) return;
+  document.getElementById('password-current').value = '';
+  document.getElementById('password-new').value = '';
+  document.getElementById('password-confirm').value = '';
+  setPasswordModalStatus('');
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  requestAnimationFrame(() => document.getElementById('password-current')?.focus());
+}
+
+function closePasswordModal() {
+  const modal = document.getElementById('password-modal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
 async function changePasswordFromSettings() {
-  const currentPassword = window.prompt('Current password:') || '';
-  if (!currentPassword) return;
-  const newPassword = window.prompt('New password (min 6 chars):') || '';
-  if (!newPassword) return;
+  const currentPassword = document.getElementById('password-current')?.value || '';
+  const newPassword = document.getElementById('password-new')?.value || '';
+  const confirmPassword = document.getElementById('password-confirm')?.value || '';
+
+  if (!currentPassword) {
+    setPasswordModalStatus('Current password required.', true);
+    return;
+  }
+  if (!newPassword) {
+    setPasswordModalStatus('New password required.', true);
+    return;
+  }
+  if (newPassword.length < 6) {
+    setPasswordModalStatus('New password must be at least 6 characters.', true);
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    setPasswordModalStatus('New passwords do not match.', true);
+    return;
+  }
+
+  setPasswordModalStatus('Updating password...');
   try {
     await fetchJson(`${BASE}/api/auth/change-password`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ currentPassword, newPassword }),
     });
-    setSettingsStatus('Password updated.', 'ok');
+    closePasswordModal();
+    setSettingsStatus('Password updated.','ok');
   } catch (err) {
-    setSettingsStatus(err.message || 'Could not update password.', 'error');
+    setPasswordModalStatus(err.message || 'Could not update password.', true);
   }
 }
 
@@ -1966,7 +2095,41 @@ async function main() {
   document.getElementById('close-settings-btn')?.addEventListener('click', closeSettings);
   document.querySelector('[data-close-settings="true"]')?.addEventListener('click', closeSettings);
   document.getElementById('save-settings-btn')?.addEventListener('click', saveSettings);
-  document.getElementById('change-password-btn')?.addEventListener('click', changePasswordFromSettings);
+  document.getElementById('change-password-btn')?.addEventListener('click', openPasswordModal);
+  document.getElementById('close-password-modal-btn')?.addEventListener('click', closePasswordModal);
+  document.querySelector('[data-close-password-modal="true"]')?.addEventListener('click', closePasswordModal);
+  document.getElementById('password-save-btn')?.addEventListener('click', changePasswordFromSettings);
+  document.getElementById('auth-submit-btn')?.addEventListener('click', submitAuthModal);
+  document.getElementById('auth-password')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submitAuthModal();
+    }
+  });
+  document.getElementById('auth-password-confirm')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submitAuthModal();
+    }
+  });
+  document.getElementById('password-current')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      changePasswordFromSettings();
+    }
+  });
+  document.getElementById('password-new')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      changePasswordFromSettings();
+    }
+  });
+  document.getElementById('password-confirm')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      changePasswordFromSettings();
+    }
+  });
   document.getElementById('run-setup-test-btn')?.addEventListener('click', runSetupTest);
   document.getElementById('refresh-voices-btn')?.addEventListener('click', refreshVoices);
 

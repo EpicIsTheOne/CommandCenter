@@ -243,6 +243,51 @@ body::after {
   50% { opacity: 0.4; }
 }
 
+.workspace-room-nav {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 1px solid rgba(209, 165, 80, 0.28);
+  border-radius: 999px;
+  background: rgba(5, 7, 13, 0.72);
+}
+.workspace-room-nav.hidden { display: none; }
+.workspace-room-arrow, .workspace-room-label {
+  border: 1px solid rgba(36, 47, 66, 0.78);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--amber);
+  border-radius: 999px;
+}
+.workspace-room-arrow { width: 30px; height: 28px; cursor: pointer; font-size: 20px; line-height: 1; }
+.workspace-room-label { padding: 6px 12px; max-width: min(320px, 52vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.workspace-room-arrow:disabled { opacity: .35; cursor: default; }
+
+#zone-office #office-canvas {
+  transition: opacity 180ms ease, filter 180ms ease;
+}
+#zone-office.workspace-room-transitioning #office-canvas {
+  opacity: 0.74;
+  filter: saturate(0.88);
+}
+
+.workspace-room-editor { display: grid; gap: 12px; margin-top: 10px; }
+.workspace-room-card { border: 1px solid rgba(255,255,255,.12); border-radius: 10px; padding: 10px; background: rgba(255,255,255,.03); }
+.workspace-room-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.workspace-room-name-input { flex: 1; min-width: 180px; }
+.workspace-room-occupancy { color: var(--text-dim); font-size: 12px; }
+.workspace-room-order-controls { display: inline-flex; gap: 6px; }
+.workspace-room-order-btn { min-width: 34px; padding-inline: 0; }
+.workspace-agent-room-row { display: grid; grid-template-columns: 1fr minmax(130px, 200px); gap: 8px; align-items: center; margin-top: 6px; }
+.workspace-agent-room-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#zone-office.workspace-room-transitioning #office-canvas { opacity: 0.72; filter: saturate(0.85); }
+#zone-office #office-canvas { transition: opacity 180ms ease, filter 180ms ease; }
+
 #zone-mascot {
   grid-column: 1;
   grid-row: 1;
@@ -459,6 +504,30 @@ body::after {
   padding: 16px;
   display: grid;
   gap: 16px;
+}
+
+.auth-modal-content {
+  width: min(92vw, 480px);
+}
+
+.auth-modal-body {
+  gap: 14px;
+}
+
+.auth-modal-footer {
+  justify-content: flex-end;
+}
+
+.auth-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.auth-kicker {
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--amber);
 }
 
 .close-button {
