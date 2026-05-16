@@ -7,7 +7,7 @@
   <script>window.__BASE_PATH__ = (location.pathname.replace(/\/$/, '').match(/^(.*\/commandcenter)(?:\/.*)?$/)?.[1] || '');</script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=VT323&family=Inter:wght@400;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/styles.css?v=20260510i">
+  <link rel="stylesheet" href="css/styles.css?v=20260516-rooms7">
 </head>
 <body>
   <div id="command-center">
@@ -41,6 +41,11 @@
         <img id="app-brand-logo" class="brand-logo hidden" alt="Logo">
       </div>
       <canvas id="office-canvas"></canvas>
+      <div id="workspace-room-nav" class="workspace-room-nav hidden">
+        <button id="workspace-room-prev" class="workspace-room-arrow" type="button" aria-label="Previous room">‹</button>
+        <button id="workspace-room-label" class="workspace-room-label" type="button">Main Office • 1 / 1</button>
+        <button id="workspace-room-next" class="workspace-room-arrow" type="button" aria-label="Next room">›</button>
+      </div>
     </div>
   </div>
 
@@ -477,6 +482,22 @@
           </div>
         </details>
 
+        <details class="setting-group collapsible-setting" id="workspace-rooms-settings-group">
+          <summary class="collapsible-setting-summary">
+            <span>Workspace Rooms</span>
+            <span class="setting-hint">Name rooms and move agents between rooms</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <div class="setting-row between">
+              <label>Agent rooms</label>
+              <button id="workspace-room-add-btn" class="secondary-button" type="button">ADD ROOM</button>
+            </div>
+            <div class="setting-hint">Applies only to the office workspace view. Each room supports up to 5 agents.</div>
+            <div id="workspace-room-editor" class="workspace-room-editor"></div>
+            <div id="workspace-room-status" class="setting-hint"></div>
+          </div>
+        </details>
+
         <details class="setting-group collapsible-setting" id="intro-settings-group">
           <summary class="collapsible-setting-summary">
             <span>Startup Intro</span>
@@ -593,6 +614,7 @@
         <div id="settings-status" class="settings-status"></div>
       </div>
       <div class="modal-footer">
+        <button id="change-password-btn" class="secondary-button" type="button">CHANGE PASSWORD</button>
         <button id="save-settings-btn" class="primary-button" type="button">SAVE SETTINGS</button>
       </div>
     </div>
@@ -600,6 +622,6 @@
 
   <script src="vendor/picovoice/web-voice-processor.js"></script>
   <script src="vendor/picovoice/porcupine-web.js"></script>
-  <script type="module" src="js/app.js?v=20260515-voicefix2"></script>
+  <script type="module" src="js/app.js?v=20260516-rooms7"></script>
 </body>
 </html>

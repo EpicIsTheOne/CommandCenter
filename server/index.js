@@ -21,6 +21,7 @@ import { ensureIntroStorage, getIntroDir, loadIntroSettings, saveIntroSettings }
 import { BUILT_IN_THEMES, DEFAULT_THEME_ID, DEFAULT_WORKSPACE_ID, ensureAppearanceStorage, getAppearanceBackgroundDir, loadAppearanceSettings, saveAppearanceSettings } from './appearance-settings.js';
 import { ensureBrandingStorage, getBrandingDir, loadBrandingSettings, saveBrandingSettings } from './branding-settings.js';
 import { ALLOWED_WIDGET_IDS, loadLayoutSettings, saveLayoutSettings } from './layout-settings.js';
+import { loadWorkspaceRooms, saveWorkspaceRooms } from './workspace-rooms.js';
 import { loadWakeSettings, saveWakeSettings, maskAccessKey } from './wake-settings.js';
 import { transcribeWakeAudio, warmWakeTranscriber } from './wake-transcriber.js';
 import { detectWakeKeyword, warmWakeKeywordDetector } from './wake-keyword-detector.js';
@@ -32,6 +33,7 @@ import { GeminiLiveSession } from './gemini-live.js';
 import { requireApiAuth } from './api-auth.js';
 import { runApiChatTurn } from './api-chat-runner.js';
 import { appendApiSessionMessage, createApiSession, getApiSession, getApiSessionMeta, listApiSessions, searchApiSessions } from './api-session-store.js';
+import { loadUiAuthConfig, setUiPassword, checkPassword, createSessionToken, createSession, isValidSession, revokeSession } from './ui-auth.js';
 
 function apiAttachmentPayload(files = []) {
   return files.map((file) => ({
@@ -289,6 +291,90 @@ function buildAttachmentContext(files = []) {
 }
 
 app.use(express.json());
+
+function parseCookies(req) {
+  const header = String(req.headers.cookie || '');
+  const out = {};
+  for (const part of header.split(';')) {
+    const [k, ...rest] = part.trim().split('=');
+    if (!k) continue;
+    out[k] = decodeURIComponent(rest.join('=') || '');
+  }
+  return out;
+}
+
+function setAuthCookie(res, token) {
+  const secure = process.env.NODE_ENV === 'production' || useHttps;
+  const attrs = [`cc_auth=${encodeURIComponent(token)}`, 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Max-Age=604800'];
+  if (secure) attrs.push('Secure');
+  res.setHeader('Set-Cookie', attrs.join('; '));
+}
+
+function clearAuthCookie(res) {
+  const secure = process.env.NODE_ENV === 'production' || useHttps;
+  const attrs = ['cc_auth=', 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Max-Age=0'];
+  if (secure) attrs.push('Secure');
+  res.setHeader('Set-Cookie', attrs.join('; '));
+}
+
+app.get(`${basePath}/api/auth/status`, async (req, res) => {
+  const auth = await loadUiAuthConfig();
+  const token = parseCookies(req).cc_auth;
+  const authenticated = auth.enabled ? isValidSession(token) : true;
+  res.json({ ok: true, passwordSet: auth.enabled, authenticated });
+});
+
+app.post(`${basePath}/api/auth/setup`, async (req, res) => {
+  const auth = await loadUiAuthConfig();
+  if (auth.enabled) return res.status(400).json({ ok: false, error: 'Password already set' });
+  const password = String(req.body?.password || '');
+  if (password.length < 6) return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters' });
+  await setUiPassword(password);
+  const token = createSessionToken();
+  createSession(token);
+  setAuthCookie(res, token);
+  res.json({ ok: true });
+});
+
+app.post(`${basePath}/api/auth/login`, async (req, res) => {
+  const auth = await loadUiAuthConfig();
+  if (!auth.enabled) return res.json({ ok: true, passwordSet: false });
+  const password = String(req.body?.password || '');
+  if (!checkPassword(password, auth.passwordHash)) return res.status(401).json({ ok: false, error: 'Invalid password' });
+  const token = createSessionToken();
+  createSession(token);
+  setAuthCookie(res, token);
+  res.json({ ok: true, passwordSet: true });
+});
+
+app.post(`${basePath}/api/auth/change-password`, async (req, res) => {
+  const auth = await loadUiAuthConfig();
+  const token = parseCookies(req).cc_auth;
+  if (auth.enabled && !isValidSession(token)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  const currentPassword = String(req.body?.currentPassword || '');
+  const newPassword = String(req.body?.newPassword || '');
+  if (auth.enabled && !checkPassword(currentPassword, auth.passwordHash)) return res.status(401).json({ ok: false, error: 'Current password is incorrect' });
+  if (newPassword.length < 6) return res.status(400).json({ ok: false, error: 'New password must be at least 6 characters' });
+  await setUiPassword(newPassword);
+  res.json({ ok: true });
+});
+
+app.post(`${basePath}/api/auth/logout`, async (req, res) => {
+  const token = parseCookies(req).cc_auth;
+  revokeSession(token);
+  clearAuthCookie(res);
+  res.json({ ok: true });
+});
+
+app.use(async (req, res, next) => {
+  if (!req.path.startsWith(`${basePath}/api/`)) return next();
+  if (req.path.startsWith(`${basePath}/api/auth/`)) return next();
+  const auth = await loadUiAuthConfig();
+  if (!auth.enabled) return next();
+  const token = parseCookies(req).cc_auth;
+  if (!isValidSession(token)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  return next();
+});
 app.use(`${basePath}/media/music`, express.static(getMusicDir()));
 app.use(`${basePath}/media/intros`, express.static(getIntroDir()));
 app.use(`${basePath}/media/appearance/backgrounds`, express.static(getAppearanceBackgroundDir()));
@@ -886,6 +972,24 @@ app.post(`${basePath}/api/settings/layout`, async (req, res) => {
     res.json({ ok: true, settings: saved });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get(`${basePath}/api/workspace/rooms`, async (req, res) => {
+  try {
+    const settings = await loadWorkspaceRooms(getRoster());
+    res.json({ ok: true, settings });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/workspace/rooms`, async (req, res) => {
+  try {
+    const settings = await saveWorkspaceRooms(req.body || {}, getRoster());
+    res.json({ ok: true, settings });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message, code: 'BAD_REQUEST' });
   }
 });
 

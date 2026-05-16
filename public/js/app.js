@@ -1,6 +1,6 @@
 import * as terminal from './terminal.js?v=20260320j';
 import * as mascot from './mascot.js?v=20260509y';
-import * as office from './office.js?v=20260515-voicefix2';
+import * as office from './office.js?v=20260516-rooms7';
 import * as voice from './voice.js?v=20260515-voicefix2';
 import * as wake from './wake.js?v=20260320l';
 import * as directChat from './direct-chat.js?v=20260515-voicefix2';
@@ -11,11 +11,14 @@ import * as appearance from './appearance.js?v=20260514b';
 import * as branding from './branding.js?v=20260514b';
 import * as layoutSettings from './layout-settings.js?v=20260514b';
 
-const APP_BUILD = '20260513-folder-upload-debug-1';
+const APP_BUILD = '20260516-rooms7';
 console.log('[CommandCenter] app build:', APP_BUILD);
 
 let roster = { agents: [], primaryAgentId: 'main' };
 let activeOfficeAgent = null;
+let workspaceRooms = { version: 1, roomSize: 5, rooms: [] };
+let currentWorkspaceRoomId = '';
+const WORKSPACE_ROOM_STORAGE_KEY = 'commandcenter.currentWorkspaceRoomId';
 let ws = null;
 let reconnectTimer = null;
 let isFullscreen = false;
@@ -258,6 +261,242 @@ const EVENT_TO_LOG_TYPE = {
   'agent:error': 'error',
 };
 
+function roomIndexById(roomId) { return workspaceRooms.rooms.findIndex((r) => r.id === roomId); }
+function roomById(roomId) { return workspaceRooms.rooms.find((r) => r.id === roomId) || null; }
+function roomForAgent(agentId) { return workspaceRooms.rooms.find((r) => (r.agentIds || []).includes(agentId)) || null; }
+function loadStoredRoomId() { try { return localStorage.getItem(WORKSPACE_ROOM_STORAGE_KEY) || ''; } catch { return ''; } }
+function storeRoomId(roomId) { try { localStorage.setItem(WORKSPACE_ROOM_STORAGE_KEY, roomId || ''); } catch {} }
+
+function ensureCurrentRoom() {
+  const valid = roomById(currentWorkspaceRoomId);
+  if (valid) return currentWorkspaceRoomId;
+  currentWorkspaceRoomId = roomForAgent(activeOfficeAgent)?.id || loadStoredRoomId() || workspaceRooms.rooms[0]?.id || '';
+  if (!roomById(currentWorkspaceRoomId)) currentWorkspaceRoomId = workspaceRooms.rooms[0]?.id || '';
+  storeRoomId(currentWorkspaceRoomId);
+  return currentWorkspaceRoomId;
+}
+
+function pulseWorkspaceRoomTransition() {
+  const zone = document.getElementById('zone-office');
+  if (!zone) return;
+  zone.classList.remove('workspace-room-transitioning');
+  void zone.offsetWidth;
+  zone.classList.add('workspace-room-transitioning');
+  window.clearTimeout(pulseWorkspaceRoomTransition._timer);
+  pulseWorkspaceRoomTransition._timer = window.setTimeout(() => {
+    zone.classList.remove('workspace-room-transitioning');
+  }, 180);
+}
+
+function applyWorkspaceView() {
+  ensureCurrentRoom();
+  office.setWorkspaceView?.({ roster, roomSettings: workspaceRooms, currentRoomId: currentWorkspaceRoomId });
+  const nav = document.getElementById('workspace-room-nav');
+  const prev = document.getElementById('workspace-room-prev');
+  const next = document.getElementById('workspace-room-next');
+  const label = document.getElementById('workspace-room-label');
+  const count = workspaceRooms.rooms.length;
+  const idx = Math.max(0, roomIndexById(currentWorkspaceRoomId));
+  if (nav) nav.classList.toggle('hidden', count <= 1);
+  if (prev) prev.disabled = idx <= 0;
+  if (next) next.disabled = idx >= count - 1;
+  const room = workspaceRooms.rooms[idx];
+  if (label) {
+    label.textContent = `${room?.name || 'Room'} • ${idx + 1} / ${Math.max(1, count)}`;
+    label.title = 'Open Workspace Rooms settings';
+  }
+}
+
+async function loadWorkspaceRooms() {
+  const data = await fetchJson(`${BASE}/api/workspace/rooms`);
+  workspaceRooms = data.settings || workspaceRooms;
+  ensureCurrentRoom();
+  applyWorkspaceView();
+}
+
+async function saveWorkspaceRooms(next) {
+  const data = await fetchJson(`${BASE}/api/workspace/rooms`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next || workspaceRooms),
+  });
+  workspaceRooms = data.settings || workspaceRooms;
+  ensureCurrentRoom();
+  applyWorkspaceView();
+}
+
+function goRoom(offset) {
+  const idx = roomIndexById(ensureCurrentRoom());
+  const next = workspaceRooms.rooms[idx + offset];
+  if (!next) return;
+  currentWorkspaceRoomId = next.id;
+  storeRoomId(currentWorkspaceRoomId);
+  pulseWorkspaceRoomTransition();
+  applyWorkspaceView();
+}
+
+function focusRoomForAgent(agentId) {
+  const room = roomForAgent(agentId);
+  if (!room || room.id === currentWorkspaceRoomId) return;
+  currentWorkspaceRoomId = room.id;
+  storeRoomId(currentWorkspaceRoomId);
+  pulseWorkspaceRoomTransition();
+  applyWorkspaceView();
+}
+
+function roomEditorStatus(text = '', isError = false) {
+  const el = document.getElementById('workspace-room-status');
+  if (!el) return;
+  el.textContent = text;
+  el.style.color = isError ? 'var(--red)' : 'var(--text-dim)';
+}
+
+function defaultRoomName(index = 0) { return index === 0 ? 'Main Office' : `Room ${index + 1}`; }
+
+function redistributeAgents(rooms = [], orphans = [], roomSize = 5) {
+  const targetRooms = Array.isArray(rooms) ? rooms : [];
+  for (const aid of orphans) {
+    let target = targetRooms.find((r) => (r.agentIds || []).length < roomSize);
+    if (!target) {
+      const idx = targetRooms.length;
+      target = { id: `room-${idx + 1}-${Date.now().toString(36).slice(-4)}`, name: defaultRoomName(idx), agentIds: [] };
+      targetRooms.push(target);
+    }
+    target.agentIds = [...(target.agentIds || []), aid];
+  }
+  return targetRooms;
+}
+
+async function reorderWorkspaceRoom(roomId, direction) {
+  if (workspaceRooms.rooms.length < 2) return roomEditorStatus('Need at least two rooms to reorder.', true);
+  const from = roomIndexById(roomId);
+  const to = from + direction;
+  if (from < 0 || to < 0 || to >= workspaceRooms.rooms.length) return;
+  const rooms = [...workspaceRooms.rooms];
+  const moving = rooms[from];
+  const neighbor = rooms[to];
+  [rooms[from], rooms[to]] = [rooms[to], rooms[from]];
+  workspaceRooms.rooms = rooms;
+  await saveWorkspaceRooms(workspaceRooms);
+  ensureCurrentRoom();
+  applyWorkspaceView();
+  renderWorkspaceRoomEditor();
+  roomEditorStatus(`Moved ${moving?.name || 'room'} ${direction < 0 ? 'before' : 'after'} ${neighbor?.name || 'room'}.`);
+}
+
+function renderWorkspaceRoomEditor() {
+  const mount = document.getElementById('workspace-room-editor');
+  if (!mount) return;
+  const roomOpts = workspaceRooms.rooms.map((r) => `<option value="${escapeHtml(r.id)}">${escapeHtml(r.name)}</option>`).join('');
+  const onlyOneRoom = workspaceRooms.rooms.length <= 1;
+  mount.innerHTML = workspaceRooms.rooms.map((room, roomIndex) => {
+    const agentsInRoom = (room.agentIds || []).map((id) => roster.agents.find((a) => a.id === id)).filter(Boolean);
+    const rows = agentsInRoom.map((agent) => `
+      <div class="workspace-agent-room-row">
+        <div class="workspace-agent-room-label">${escapeHtml(agent.label || agent.id)}</div>
+        <select data-room-agent="${escapeHtml(agent.id)}">${roomOpts}</select>
+      </div>
+    `).join('');
+    return `
+      <div class="workspace-room-card" data-room-id="${escapeHtml(room.id)}">
+        <div class="workspace-room-card-header">
+          <input class="workspace-room-name-input" data-room-name="${escapeHtml(room.id)}" type="text" maxlength="60" value="${escapeHtml(room.name || '')}" />
+          <span class="workspace-room-occupancy">${(room.agentIds || []).length} / ${workspaceRooms.roomSize || 5}</span>
+          <div class="workspace-room-order-controls">
+            <button class="secondary-button workspace-room-order-btn" type="button" data-room-move="${escapeHtml(room.id)}" data-room-dir="-1" ${roomIndex <= 0 ? 'disabled title="Already first room"' : ''}>←</button>
+            <button class="secondary-button workspace-room-order-btn" type="button" data-room-move="${escapeHtml(room.id)}" data-room-dir="1" ${roomIndex >= workspaceRooms.rooms.length - 1 ? 'disabled title="Already last room"' : ''}>→</button>
+          </div>
+          <button class="secondary-button" type="button" data-room-move="left" data-room-move-id="${escapeHtml(room.id)}" ${roomIndex <= 0 || onlyOneRoom ? 'disabled' : ''}>←</button>
+          <button class="secondary-button" type="button" data-room-move="right" data-room-move-id="${escapeHtml(room.id)}" ${roomIndex >= workspaceRooms.rooms.length - 1 || onlyOneRoom ? 'disabled' : ''}>→</button>
+          <button class="secondary-button" type="button" data-room-del="${escapeHtml(room.id)}" ${onlyOneRoom ? 'disabled title="Cannot delete the only room"' : ''}>DELETE</button>
+        </div>
+        ${rows || `<div class="setting-hint">No agents in ${escapeHtml(room.name || defaultRoomName(roomIndex))} yet.</div>`}
+      </div>
+    `;
+  }).join('');
+
+  mount.querySelectorAll('[data-room-agent]').forEach((sel) => {
+    const aid = sel.getAttribute('data-room-agent');
+    const r = roomForAgent(aid);
+    const originalRoomId = r?.id || '';
+    sel.value = originalRoomId;
+    sel.addEventListener('change', async () => {
+      const target = String(sel.value || '').trim();
+      if (!target) {
+        sel.value = originalRoomId;
+        return;
+      }
+      const tr = roomById(target);
+      if (!tr) {
+        sel.value = originalRoomId;
+        return;
+      }
+      if ((tr.agentIds || []).length >= (workspaceRooms.roomSize || 5) && originalRoomId !== target) {
+        sel.value = originalRoomId;
+        roomEditorStatus(`${tr.name} is full (${workspaceRooms.roomSize || 5} max).`, true);
+        return;
+      }
+      for (const room of workspaceRooms.rooms) room.agentIds = (room.agentIds || []).filter((id) => id !== aid);
+      tr.agentIds = [...(tr.agentIds || []), aid];
+      await saveWorkspaceRooms(workspaceRooms);
+      if (activeOfficeAgent === aid) focusRoomForAgent(aid);
+      renderWorkspaceRoomEditor();
+      roomEditorStatus(`Moved ${getAgentLabel(aid)} to ${tr.name}.`);
+    });
+  });
+
+  mount.querySelectorAll('[data-room-name]').forEach((input) => {
+    input.addEventListener('change', async () => {
+      const id = input.getAttribute('data-room-name');
+      const room = roomById(id);
+      if (!room) return;
+      const idx = roomIndexById(id);
+      const nextName = String(input.value || '').trim() || room.name || defaultRoomName(idx);
+      room.name = nextName;
+      await saveWorkspaceRooms(workspaceRooms);
+      renderWorkspaceRoomEditor();
+      roomEditorStatus('Room name updated.');
+    });
+  });
+
+  mount.querySelectorAll('[data-room-move]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.getAttribute('data-room-move');
+      const direction = Number(btn.getAttribute('data-room-dir') || 0);
+      if (!id || !direction) return;
+      await reorderWorkspaceRoom(id, direction);
+    });
+  });
+
+  mount.querySelectorAll('[data-room-move-id]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.getAttribute('data-room-move-id');
+      const dir = btn.getAttribute('data-room-move') === 'left' ? -1 : 1;
+      await reorderWorkspaceRoom(id, dir);
+    });
+  });
+
+  mount.querySelectorAll('[data-room-del]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.getAttribute('data-room-del');
+      if (workspaceRooms.rooms.length <= 1) return roomEditorStatus('Cannot delete the only room.', true);
+      const room = roomById(id);
+      if (!room) return;
+      if (!window.confirm(`Delete "${room.name}" and redistribute its agents?`)) return;
+      const keep = workspaceRooms.rooms.filter((r) => r.id !== id);
+      const orphans = [...(room.agentIds || [])];
+      workspaceRooms.rooms = redistributeAgents(keep, orphans, workspaceRooms.roomSize || 5);
+      await saveWorkspaceRooms(workspaceRooms);
+      if (currentWorkspaceRoomId === id) {
+        currentWorkspaceRoomId = workspaceRooms.rooms[0]?.id || '';
+        storeRoomId(currentWorkspaceRoomId);
+        pulseWorkspaceRoomTransition();
+      }
+      applyWorkspaceView();
+      renderWorkspaceRoomEditor();
+      roomEditorStatus(`Deleted ${room.name}.`);
+    });
+  });
+}
+
 function getPrimaryAgent() {
   return roster.primaryAgentId || roster.agents[0]?.id || 'main';
 }
@@ -285,8 +524,48 @@ async function fetchJson(url, options = {}) {
       throw new Error(snippet || `Request failed (${res.status})`);
     }
   }
+  if (res.status === 401) {
+    throw new Error('AUTH_REQUIRED');
+  }
   if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
   return data;
+}
+
+async function ensureUiAuth() {
+  const status = await fetchJson(`${BASE}/api/auth/status`);
+  if (status?.authenticated) return;
+
+  if (!status?.passwordSet) {
+    while (true) {
+      const password = window.prompt('Create a CommandCenter password (min 6 chars):') || '';
+      if (!password) continue;
+      try {
+        await fetchJson(`${BASE}/api/auth/setup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password }),
+        });
+        break;
+      } catch (err) {
+        alert(err.message || 'Could not set password');
+      }
+    }
+  } else {
+    while (true) {
+      const password = window.prompt('Enter CommandCenter password:') || '';
+      if (!password) continue;
+      try {
+        await fetchJson(`${BASE}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password }),
+        });
+        break;
+      } catch (err) {
+        alert('Wrong password. Try again.');
+      }
+    }
+  }
 }
 
 async function loadSetupStatus() {
@@ -1385,6 +1664,7 @@ async function openSettings() {
     availableCompanions = companionData.items || [];
     companions.setCompanionData({ visuals: companionData.resolved || {}, items: availableCompanions });
     populateSettingsForm(voiceData.settings || {}, wakeData.settings || {});
+    renderWorkspaceRoomEditor();
     setSetupTestResult('No setup test run yet.', [], 'ok');
     setSettingsStatus('Settings loaded.');
   } catch (err) {
@@ -1416,6 +1696,23 @@ async function refreshVoices() {
     setSettingsStatus(`Loaded ${availableVoices.length} voices.`);
   } catch (err) {
     setSettingsStatus(err.message, true);
+  }
+}
+
+async function changePasswordFromSettings() {
+  const currentPassword = window.prompt('Current password:') || '';
+  if (!currentPassword) return;
+  const newPassword = window.prompt('New password (min 6 chars):') || '';
+  if (!newPassword) return;
+  try {
+    await fetchJson(`${BASE}/api/auth/change-password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+    setSettingsStatus('Password updated.', 'ok');
+  } catch (err) {
+    setSettingsStatus(err.message || 'Could not update password.', 'error');
   }
 }
 
@@ -1569,13 +1866,16 @@ async function disarmWakeMode() {
 }
 
 async function main() {
+  await ensureUiAuth();
   applyVignetteStrength(loadVignetteStrength());
   loadDirectionalVignette();
   terminal.init('terminal-output');
   mascot.init('mascot-canvas');
   await loadRoster();
+  await loadWorkspaceRooms();
   await loadCompanionSettings();
   office.init('office-canvas', roster);
+  applyWorkspaceView();
   await appearance.init({ office });
   branding.init();
   layoutSettings.init();
@@ -1613,6 +1913,7 @@ async function main() {
       }
       voice.setTargetAgent(agentId);
       activeOfficeAgent = agentId;
+      focusRoomForAgent(agentId);
       office.setAgentHighlight(agentId, true);
       office.onVoiceStart(agentId);
       mascot.setEmotion('listening');
@@ -1665,8 +1966,32 @@ async function main() {
   document.getElementById('close-settings-btn')?.addEventListener('click', closeSettings);
   document.querySelector('[data-close-settings="true"]')?.addEventListener('click', closeSettings);
   document.getElementById('save-settings-btn')?.addEventListener('click', saveSettings);
+  document.getElementById('change-password-btn')?.addEventListener('click', changePasswordFromSettings);
   document.getElementById('run-setup-test-btn')?.addEventListener('click', runSetupTest);
   document.getElementById('refresh-voices-btn')?.addEventListener('click', refreshVoices);
+
+  document.getElementById('workspace-room-prev')?.addEventListener('click', (e) => { e.stopPropagation(); goRoom(-1); });
+  document.getElementById('workspace-room-next')?.addEventListener('click', (e) => { e.stopPropagation(); goRoom(1); });
+  document.getElementById('workspace-room-label')?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    openSettings();
+  });
+
+  document.getElementById('workspace-room-add-btn')?.addEventListener('click', async () => {
+    const idx = workspaceRooms.rooms.length;
+    const id = `room-${idx + 1}-${Date.now().toString(36).slice(-4)}`;
+    const name = `Room ${idx + 1}`;
+    workspaceRooms.rooms.push({ id, name, agentIds: [] });
+    await saveWorkspaceRooms(workspaceRooms);
+    const created = workspaceRooms.rooms.find((r) => r.id === id) || workspaceRooms.rooms[workspaceRooms.rooms.length - 1];
+    const changed = created?.id && created.id !== currentWorkspaceRoomId;
+    currentWorkspaceRoomId = created?.id || currentWorkspaceRoomId;
+    storeRoomId(currentWorkspaceRoomId);
+    if (changed) pulseWorkspaceRoomTransition();
+    applyWorkspaceView();
+    renderWorkspaceRoomEditor();
+    roomEditorStatus('Room added and opened.');
+  });
 
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeSettings();
@@ -1698,6 +2023,7 @@ async function main() {
     }
 
     voice.setTargetAgent(primary);
+    focusRoomForAgent(primary);
     const recording = await voice.toggleRecording();
     if (recording) {
       activeOfficeAgent = primary;
@@ -1721,6 +2047,20 @@ async function main() {
     const agentId = office.getAgentAtPoint(x, y);
     if (!agentId) return;
 
+    if (e.shiftKey) {
+      const opts = workspaceRooms.rooms.map((r, i) => `${i + 1}: ${r.name}`).join('\n');
+      const pick = window.prompt(`Move ${getAgentLabel(agentId)} to which room?\n${opts}`);
+      const idx = Math.max(1, Number(pick || 0)) - 1;
+      const target = workspaceRooms.rooms[idx];
+      if (target) {
+        for (const r of workspaceRooms.rooms) r.agentIds = (r.agentIds || []).filter((id) => id !== agentId);
+        target.agentIds = [...(target.agentIds || []), agentId].slice(0, workspaceRooms.roomSize || 5);
+        await saveWorkspaceRooms(workspaceRooms);
+        focusRoomForAgent(agentId);
+      }
+      return;
+    }
+
     if (!isFullscreen) {
       await requestFullscreen();
       await new Promise(r => setTimeout(r, 300));
@@ -1743,6 +2083,7 @@ async function main() {
 
     activeOfficeAgent = agentId;
     voice.setTargetAgent(agentId);
+    focusRoomForAgent(agentId);
     office.setAgentHighlight(agentId, true);
     office.onVoiceStart(agentId);
     try {
