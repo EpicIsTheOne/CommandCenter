@@ -6,7 +6,7 @@ _A living, self-hosted AI ops dashboard with a pixel-art office, voice I/O, real
 
 A self-hosted AI command center that turns your agent stack into a living pixel-art office you can actually operate. It’s built for people running OpenClaw at home, on a server, or on a Raspberry Pi kiosk who want one place to watch, talk to, and steer their agents in real time. Unlike a plain chat UI, Command Center makes AI ops feel alive—with voice, motion, and ambient system awareness—without giving up practical control.
 
-OpenClaw is the agent runtime this project plugs into: it handles sessions, tools, routing, and gateway events while Command Center gives that activity a live visual/voice interface you can run and monitor. In short, OpenClaw is the engine, Command Center is the cockpit—grab OpenClaw here: [OPENCLAW_REPO_OR_DOCS_LINK].
+OpenClaw is the agent runtime this project plugs into: it handles sessions, tools, routing, and gateway events while Command Center gives that activity a live visual/voice interface you can run and monitor. In short, OpenClaw is the engine, Command Center is the cockpit—grab OpenClaw here: [https://openclaw.ai/](https://openclaw.ai/).
 
 ## Screenshots / Demo
 
