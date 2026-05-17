@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -119,6 +119,10 @@ export async function loadVoiceSettings() {
 export async function saveVoiceSettings(input) {
   const settings = normalize(input);
   await mkdir(DATA_DIR, { recursive: true });
+  if (existsSync(SETTINGS_FILE)) {
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
+    await copyFile(SETTINGS_FILE, join(DATA_DIR, `voice-settings.backup-${stamp}.json`)).catch(() => {});
+  }
   await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
   return settings;
 }

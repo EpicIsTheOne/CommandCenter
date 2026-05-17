@@ -196,9 +196,55 @@ Additional panels and modals provide:
   - agent search
   - file upload/link library
   - voice settings
+  - Fairy live config/sessions/memory
   - sessions
   - chat messages
   - streaming chat messages
+
+### Fairy live UI highlights
+
+- Fairy Live supports realtime call sessions with:
+  - mic capture
+  - screen sharing
+  - camera sharing
+  - front/back camera switching on mobile when supported by the browser/device
+  - a tiny in-panel live camera preview so you can see what Fairy is being shown
+- Fairy suppresses the normal Command Center agent TTS while a Fairy live call is active, so you do not get overlapping voices from two different layers.
+- The top activity header now wraps more cleanly on smaller/mobile screens, including the connection badge and quick action buttons.
+- Command Center can now be installed as a PWA/app from supported browsers, with an install entry in Settings and iOS fallback guidance via Add to Home Screen.
+
+### Fairy API (`/api/v1/fairy`)
+
+These endpoints are auth-protected by the same API auth used for all `/api/v1/*` routes.
+
+- `GET /api/v1/fairy/config`
+  - Returns current Fairy/Gemini live runtime config (model, voice, persona, memory flags, etc).
+- `GET /api/v1/fairy/sessions`
+  - Lists active/recent call sessions where `persona === "fairy"`.
+- `GET /api/v1/fairy/sessions/:id`
+  - Returns one Fairy call session by id.
+- `GET /api/v1/fairy/memory?q=<query>&scope=<scope>`
+  - Reads local Fairy memory entries (`data/fairy-memory.json`) with optional query/scope filtering.
+
+Example requests:
+
+```bash
+# 1) Read Fairy runtime config
+curl -H "Authorization: Bearer $COMMANDCENTER_API_KEY" \
+  http://localhost:3000/api/v1/fairy/config
+
+# 2) List Fairy sessions
+curl -H "Authorization: Bearer $COMMANDCENTER_API_KEY" \
+  http://localhost:3000/api/v1/fairy/sessions
+
+# 3) Get one Fairy session
+curl -H "Authorization: Bearer $COMMANDCENTER_API_KEY" \
+  http://localhost:3000/api/v1/fairy/sessions/<session-id>
+
+# 4) Search Fairy memory by query/scope
+curl -H "Authorization: Bearer $COMMANDCENTER_API_KEY" \
+  "http://localhost:3000/api/v1/fairy/memory?q=voice&scope=general"
+```
 
 ## The Team
 

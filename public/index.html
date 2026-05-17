@@ -5,10 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>OpenClaw Command Center</title>
   <script>window.__BASE_PATH__ = (location.pathname.replace(/\/$/, '').match(/^(.*\/commandcenter)(?:\/.*)?$/)?.[1] || '');</script>
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#0b1018">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Command Center">
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=VT323&family=Inter:wght@400;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/styles.css?v=20260516-authmodal2">
+  <link rel="stylesheet" href="css/styles.css?v=20260517-fairy-pwa1">
 </head>
 <body>
   <div id="command-center">
@@ -23,14 +28,23 @@
     </div>
 
     <div id="zone-terminal" class="zone">
-      <div class="zone-header">
-        <span class="zone-dot"></span>
-        ACTIVITY LOG
-        <span id="connection-indicator" class="connection-state state-connecting">CONNECTING</span>
-        <button id="wake-mode-btn" class="header-button" type="button">WAKE MODE: OFF</button>
-        <button id="stop-audio-btn" class="header-button" type="button">STOP VOICE</button>
-        <button id="settings-btn" class="header-button" type="button">SETTINGS</button>
+      <div class="zone-header zone-header-terminal">
+        <div class="zone-header-title-row">
+          <span class="zone-dot"></span>
+          <span>ACTIVITY LOG</span>
+        </div>
+        <div class="zone-header-actions">
+          <span id="connection-indicator" class="connection-state state-connecting">CONNECTED</span>
+          <button id="wake-mode-btn" class="header-button" type="button">WAKE MODE: OFF</button>
+          <button id="stop-audio-btn" class="header-button" type="button">STOP VOICE</button>
+          <button id="fairy-live-launch-btn" class="header-button" type="button">FAIRY CALL</button>
+          <button id="fairy-live-mic-header-btn" class="header-button fairy-live-header-btn hidden" type="button" disabled>MIC OFF</button>
+          <button id="fairy-live-screen-header-btn" class="header-button fairy-live-header-btn hidden" type="button" disabled>SCREEN OFF</button>
+          <button id="fairy-live-camera-header-btn" class="header-button fairy-live-header-btn hidden" type="button" disabled>CAM OFF</button>
+          <button id="settings-btn" class="header-button" type="button">SETTINGS</button>
+        </div>
       </div>
+      <div id="fairy-live-overlay" class="fairy-live-overlay hidden" aria-live="polite"></div>
       <div id="terminal-output"></div>
     </div>
 
@@ -49,6 +63,51 @@
       </div>
     </div>
   </div>
+
+  <section id="fairy-live-panel" class="fairy-live-panel fairy-live-panel-hidden hidden" aria-label="Fairy Live">
+    <div class="fairy-live-header">
+      <div>
+        <div id="fairy-live-kicker" class="fairy-live-kicker">FAIRY LIVE</div>
+        <div id="fairy-live-model" class="fairy-live-model">Checking Gemini…</div>
+      </div>
+      <div class="fairy-live-header-actions">
+        <span id="fairy-live-state" class="fairy-live-state state-idle">IDLE</span>
+        <button id="fairy-live-toggle" class="fairy-live-toggle" type="button" aria-expanded="false" title="Expand Fairy Live">▴</button>
+      </div>
+    </div>
+    <div class="fairy-live-body">
+      <div id="fairy-live-status" class="fairy-live-status">Realtime interface offline. Start a call when you want Fairy at the desk.</div>
+      <div id="fairy-live-transcript" class="fairy-live-transcript" aria-live="polite"></div>
+      <div id="fairy-live-handoff" class="fairy-live-handoff hidden"></div>
+      <div class="fairy-live-audio-row">
+        <button id="fairy-live-mic" class="secondary-button fairy-live-mic" type="button" disabled>START MIC</button>
+        <span id="fairy-live-audio-status" class="fairy-live-audio-status">Mic off. Text test mode still works.</span>
+      </div>
+      <div class="fairy-live-audio-row">
+        <button id="fairy-live-screen" class="secondary-button fairy-live-screen" type="button" disabled>SHARE SCREEN</button>
+        <span id="fairy-live-screen-status" class="fairy-live-audio-status">Screen sharing off.</span>
+      </div>
+      <div class="fairy-live-audio-row fairy-live-camera-row">
+        <button id="fairy-live-camera" class="secondary-button fairy-live-camera" type="button" disabled>START CAMERA</button>
+        <button id="fairy-live-camera-facing" class="secondary-button fairy-live-camera-facing" type="button" disabled>BACK CAM</button>
+        <span id="fairy-live-camera-status" class="fairy-live-audio-status">Camera off.</span>
+      </div>
+      <div id="fairy-live-camera-preview-wrap" class="fairy-live-camera-preview-wrap hidden" aria-label="Camera preview">
+        <video id="fairy-live-camera-preview" class="fairy-live-camera-preview" muted playsinline></video>
+        <span id="fairy-live-camera-preview-label" class="fairy-live-camera-preview-label">BACK CAMERA PREVIEW</span>
+      </div>
+      <div id="fairy-live-diagnostics" class="fairy-live-diagnostics"></div>
+      <div class="fairy-live-text-row">
+        <input id="fairy-live-text" type="text" autocomplete="off" placeholder="Test a Fairy turn…">
+        <button id="fairy-live-send" class="secondary-button" type="button">SEND</button>
+      </div>
+    </div>
+    <div class="fairy-live-controls">
+      <button id="fairy-live-start" class="primary-button" type="button">START CALL</button>
+      <button id="fairy-live-stop-audio" class="secondary-button" type="button">STOP AUDIO</button>
+      <button id="fairy-live-end" class="secondary-button" type="button" disabled>END</button>
+    </div>
+  </section>
 
   <button id="global-settings-btn" class="global-settings-button" type="button" aria-label="Open settings">SETTINGS</button>
 
@@ -115,26 +174,44 @@
     <div class="modal-backdrop" data-close-settings="true"></div>
     <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <div class="modal-header">
-        <h3 id="settings-title">Voice Settings</h3>
+        <h3 id="settings-title">CommandCenter Settings</h3>
         <button id="close-settings-btn" class="close-button" type="button" aria-label="Close settings">×</button>
       </div>
       <div class="modal-body">
-        <div class="setting-group setup-health-group">
-          <div class="setting-row between">
-            <label>Setup Status</label>
+        <details id="setup-status-group" class="setting-group setup-health-group collapsible-setting">
+          <summary class="collapsible-setting-summary">
+            <span>Setup Status</span>
             <span id="setup-status-pill" class="setup-status-pill">Checking…</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <div id="setup-status-summary" class="setting-hint">Checking CommandCenter setup state…</div>
+            <ul id="setup-issues-list" class="setup-issues-list"></ul>
           </div>
-          <div id="setup-status-summary" class="setting-hint">Checking CommandCenter setup state…</div>
-          <ul id="setup-issues-list" class="setup-issues-list"></ul>
-        </div>
+        </details>
 
-        <details id="voice-settings-group" class="setting-group collapsible-setting" open>
+        <details id="app-install-settings-group" class="setting-group collapsible-setting">
+          <summary class="collapsible-setting-summary">
+            <span>Install App</span>
+            <span class="setting-hint">Add Command Center to your device</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <div class="setting-group nested-setting-group">
+              <div id="pwa-install-status" class="setting-hint">Checking install support…</div>
+              <div class="settings-inline-actions">
+                <button id="pwa-install-btn" class="secondary-button" type="button" disabled>INSTALL COMMAND CENTER</button>
+              </div>
+              <div class="setting-hint">On iPhone/iPad, use Safari’s Share button → <strong>Add to Home Screen</strong>. Because naturally Apple made it a ritual.</div>
+            </div>
+          </div>
+        </details>
+
+        <details id="voice-settings-group" class="setting-group collapsible-setting">
           <summary class="collapsible-setting-summary">
             <span>Voice Setup</span>
             <span class="setting-hint">Listening, speaking, routing, and testing</span>
           </summary>
           <div class="collapsible-setting-body">
-            <details class="setting-group collapsible-setting nested-collapsible" open>
+            <details class="setting-group collapsible-setting nested-collapsible">
               <summary class="collapsible-setting-summary">
                 <span>1. Listening</span>
                 <span class="setting-hint">How your speech becomes text</span>
@@ -228,7 +305,7 @@
               </div>
             </details>
 
-            <details class="setting-group collapsible-setting nested-collapsible" open>
+            <details class="setting-group collapsible-setting nested-collapsible">
               <summary class="collapsible-setting-summary">
                 <span>2. Speaking</span>
                 <span class="setting-hint">How agent replies become audio</span>
@@ -309,7 +386,7 @@
               </div>
             </details>
 
-            <details class="setting-group collapsible-setting nested-collapsible" open>
+            <details class="setting-group collapsible-setting nested-collapsible">
               <summary class="collapsible-setting-summary">
                 <span>3. Agent Routing & Voices</span>
                 <span class="setting-hint">Choose who speaks and with which voice</span>
@@ -327,7 +404,7 @@
               </div>
             </details>
 
-            <details class="setting-group collapsible-setting nested-collapsible" open>
+            <details class="setting-group collapsible-setting nested-collapsible">
               <summary class="collapsible-setting-summary">
                 <span>4. Test</span>
                 <span class="setting-hint">Run a fast setup check before blaming the universe</span>
@@ -347,47 +424,210 @@
           </div>
         </details>
 
-        <div class="setting-group">
-          <div class="setting-row between">
-            <label>Per-agent companion visuals</label>
-          </div>
-          <div class="setting-hint">Set each agent to keep the current CommandCenter look or use a companion-style animated character instead.</div>
-          <div class="setting-row companion-import-row">
-            <input id="companion-import-source" type="text" autocomplete="off" placeholder="Paste extracted Codex pet folder path containing pet.json + spritesheet asset">
-            <button id="import-companion-btn" class="secondary-button" type="button">IMPORT CODEX PET</button>
-          </div>
-          <div class="setting-row companion-import-row">
-            <label class="companion-upload-field">
-              <input id="companion-import-folder" type="file" webkitdirectory directory multiple>
-              <span>Choose Codex pet folder</span>
-            </label>
-            <select id="companion-import-agent">
-              <option value="">Do not auto-assign</option>
-            </select>
-            <button id="import-companion-folder-btn" class="secondary-button" type="button">UPLOAD FOLDER</button>
-          </div>
-          <div class="setting-row companion-import-row">
-            <label class="companion-upload-field">
-              <input id="companion-import-zip" type="file" accept=".zip,application/zip">
-              <span>Choose Codex pet zip</span>
-            </label>
-            <button id="import-companion-zip-btn" class="secondary-button" type="button">UPLOAD ZIP</button>
-          </div>
-          <div id="companion-import-status" class="setting-hint"></div>
-          <div id="agent-companion-list" class="agent-voice-list"></div>
-        </div>
+        <details id="gemini-settings-group" class="setting-group collapsible-setting">
+          <summary class="collapsible-setting-summary">
+            <span>Fairy / Gemini Live</span>
+            <span class="setting-hint">Local API key for this Command Center server</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <div class="setting-group nested-setting-group">
+              <label for="gemini-api-key">Gemini API Key</label>
+              <input id="gemini-api-key" type="password" autocomplete="off" placeholder="Paste your Gemini API key">
+              <div id="saved-gemini-key-hint" class="setting-hint">No saved Gemini key yet.</div>
+              <div class="setting-hint">Stored locally on this Command Center server in <code>data/gemini-settings.json</code>. Mission Control is not required.</div>
+            </div>
 
-        <div class="setting-group">
-          <label for="porcupine-access-key">Porcupine Access Key</label>
-          <input id="porcupine-access-key" type="password" autocomplete="off" placeholder="Paste your Picovoice / Porcupine access key">
-          <div id="saved-porcupine-key-hint" class="setting-hint"></div>
-        </div>
+            <div class="setting-group nested-setting-group">
+              <label for="gemini-persona-name">Persona name</label>
+              <input id="gemini-persona-name" type="text" autocomplete="off" placeholder="Fairy" maxlength="80">
+              <div class="setting-hint">What the live assistant calls herself during calls.</div>
+            </div>
 
-        <div class="setting-group">
-          <label>Wake-word keyword files (.ppn)</label>
-          <div id="wakeword-list" class="agent-voice-list"></div>
-          <div class="setting-hint">Use a built-in Porcupine wake word for quick testing, or upload a custom Web (.ppn) file for exact agent names like Astra and Mina.</div>
-        </div>
+            <div class="setting-group nested-setting-group">
+              <label for="gemini-personality-prompt">Personality instructions</label>
+              <textarea id="gemini-personality-prompt" rows="8" placeholder="Playful-sassy, observant, confident, concise, slightly smug, useful first..."></textarea>
+              <div class="setting-hint">Extra live-call personality guidance layered on top of the base Fairy behavior for this Command Center instance.</div>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <label for="gemini-mood-preset">Mood preset</label>
+              <select id="gemini-mood-preset">
+                <option value="">Custom / leave unchanged</option>
+                <option value="operator">Operator</option>
+                <option value="sly">Sly</option>
+                <option value="seductive">Seductive</option>
+                <option value="clinical">Clinical</option>
+                <option value="bratty">Bratty</option>
+                <option value="support">Soft support</option>
+                <option value="mission-control">Mission control</option>
+              </select>
+              <div class="setting-hint">Fast-start a personality style, then tweak the text box if you want sharper control.</div>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <label class="setting-inline-check" for="gemini-memory-enabled">
+                <input id="gemini-memory-enabled" type="checkbox" checked>
+                <span>Enable local live memory</span>
+              </label>
+              <div class="setting-hint">Stores local, instance-specific live-call memories in <code>data/fairy-memory.json</code>. Fresh installs start empty; no OpenClaw agents are hardcoded.</div>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <label for="gemini-memory-notes">Pinned memory / operator context</label>
+              <textarea id="gemini-memory-notes" rows="6" placeholder="Durable preferences or context this live persona should remember on this Command Center instance..."></textarea>
+              <div class="setting-hint">Injected into new live calls as local context. Keep secrets out of here, obviously.</div>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <div class="setting-row" style="gap:8px; flex-wrap:wrap; align-items:center;">
+                <label for="fairy-memory-search" style="margin:0;">Stored memory</label>
+                <input id="fairy-memory-search" type="text" autocomplete="off" placeholder="Search saved memory..." style="min-width:220px; flex:1 1 220px;">
+                <select id="fairy-memory-scope-filter">
+                  <option value="all">All scopes</option>
+                  <option value="general">General</option>
+                  <option value="ui">UI</option>
+                  <option value="backend">Backend</option>
+                  <option value="research">Research</option>
+                </select>
+                <button id="refresh-fairy-memory-btn" class="secondary-button" type="button">REFRESH MEMORY</button>
+              </div>
+              <div class="setting-hint">Review, search, and forget saved local memory. This stays local to this Command Center instance.</div>
+              <div id="fairy-memory-list" class="fairy-diagnostics-settings setting-hint">No saved memory loaded yet.</div>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <label for="gemini-live-model">Live model</label>
+              <input id="gemini-live-model" type="text" autocomplete="off" placeholder="gemini-3.1-flash-live-preview">
+              <div class="setting-hint">Model used by Fairy Live sessions.</div>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <label for="gemini-response-modalities">Response modalities</label>
+              <select id="gemini-response-modalities">
+                <option value="AUDIO">Audio</option>
+                <option value="TEXT">Text</option>
+                <option value="AUDIO,TEXT">Audio + Text</option>
+              </select>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <label for="gemini-thinking-level">Thinking level</label>
+              <select id="gemini-thinking-level">
+                <option value="none">None</option>
+                <option value="minimal">Minimal</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <label for="gemini-live-voice">Live voice</label>
+              <select id="gemini-live-voice">
+                <option value="Zephyr">Zephyr</option>
+                <option value="Kore">Kore</option>
+                <option value="Orus">Orus</option>
+                <option value="Autonoe">Autonoe</option>
+                <option value="Umbriel">Umbriel</option>
+                <option value="Erinome">Erinome</option>
+                <option value="Laomedeia">Laomedeia</option>
+                <option value="Schedar">Schedar</option>
+                <option value="Achird">Achird</option>
+                <option value="Sadachbia">Sadachbia</option>
+                <option value="Puck">Puck</option>
+                <option value="Fenrir">Fenrir</option>
+                <option value="Aoede">Aoede</option>
+                <option value="Enceladus">Enceladus</option>
+                <option value="Algieba">Algieba</option>
+                <option value="Algenib">Algenib</option>
+                <option value="Achernar">Achernar</option>
+                <option value="Gacrux">Gacrux</option>
+                <option value="Zubenelgenubi">Zubenelgenubi</option>
+                <option value="Sadaltager">Sadaltager</option>
+                <option value="Charon">Charon</option>
+                <option value="Leda">Leda</option>
+                <option value="Callirrhoe">Callirrhoe</option>
+                <option value="Iapetus">Iapetus</option>
+                <option value="Despina">Despina</option>
+                <option value="Rasalgethi">Rasalgethi</option>
+                <option value="Alnilam">Alnilam</option>
+                <option value="Pulcherrima">Pulcherrima</option>
+                <option value="Vindemiatrix">Vindemiatrix</option>
+                <option value="Sulafat">Sulafat</option>
+              </select>
+              <div class="setting-hint">Gemini Live prebuilt voice used for Fairy audio output.</div>
+              <div id="gemini-live-voice-hint" class="setting-hint">Current live voice: Sulafat.</div>
+              <div id="gemini-source-hint" class="setting-hint">Source: Command Center local settings.</div>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <div class="setting-row" style="gap:8px; flex-wrap:wrap;">
+                <button id="save-gemini-settings-btn" class="secondary-button" type="button">SAVE FAIRY SETTINGS</button>
+                <button id="test-fairy-live-btn" class="secondary-button" type="button">TEST FAIRY LIVE</button>
+              </div>
+              <div id="fairy-test-status" class="setting-hint">No Fairy Live test run yet.</div>
+              <div id="fairy-diagnostics-settings" class="fairy-diagnostics-settings setting-hint">Diagnostics load when settings open.</div>
+            </div>
+          </div>
+        </details>
+
+        <details id="companion-settings-group" class="setting-group collapsible-setting">
+          <summary class="collapsible-setting-summary">
+            <span>Companion Visuals</span>
+            <span class="setting-hint">Per-agent looks, imports, and assignment</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <div class="setting-group nested-setting-group">
+              <div class="setting-row between">
+                <label>Per-agent companion visuals</label>
+              </div>
+              <div class="setting-hint">Set each agent to keep the current CommandCenter look or use a companion-style animated character instead.</div>
+              <div class="setting-row companion-import-row">
+                <input id="companion-import-source" type="text" autocomplete="off" placeholder="Paste extracted Codex pet folder path containing pet.json + spritesheet asset">
+                <button id="import-companion-btn" class="secondary-button" type="button">IMPORT CODEX PET</button>
+              </div>
+              <div class="setting-row companion-import-row">
+                <label class="companion-upload-field">
+                  <input id="companion-import-folder" type="file" webkitdirectory directory multiple>
+                  <span>Choose Codex pet folder</span>
+                </label>
+                <select id="companion-import-agent">
+                  <option value="">Do not auto-assign</option>
+                </select>
+                <button id="import-companion-folder-btn" class="secondary-button" type="button">UPLOAD FOLDER</button>
+              </div>
+              <div class="setting-row companion-import-row">
+                <label class="companion-upload-field">
+                  <input id="companion-import-zip" type="file" accept=".zip,application/zip">
+                  <span>Choose Codex pet zip</span>
+                </label>
+                <button id="import-companion-zip-btn" class="secondary-button" type="button">UPLOAD ZIP</button>
+              </div>
+              <div id="companion-import-status" class="setting-hint"></div>
+              <div id="agent-companion-list" class="agent-voice-list"></div>
+            </div>
+          </div>
+        </details>
+
+        <details id="wake-settings-group" class="setting-group collapsible-setting">
+          <summary class="collapsible-setting-summary">
+            <span>Wake Word</span>
+            <span class="setting-hint">Access key, aliases, and built-in wake options</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <div class="setting-group nested-setting-group">
+              <label for="porcupine-access-key">Porcupine Access Key</label>
+              <input id="porcupine-access-key" type="password" autocomplete="off" placeholder="Paste your Picovoice / Porcupine access key">
+              <div id="saved-porcupine-key-hint" class="setting-hint"></div>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <label>Per-agent wake behavior</label>
+              <div id="wakeword-list" class="agent-voice-list"></div>
+              <div class="setting-hint">Wake mode already works from built-in alias detection and transcription matching. Use the built-in dropdown only if you want a Porcupine keyword override for a specific agent.</div>
+            </div>
+          </div>
+        </details>
 
         <details class="setting-group collapsible-setting" id="workspace-settings-group">
           <summary class="collapsible-setting-summary">
@@ -644,32 +884,40 @@
           </div>
         </details>
 
-        <div class="setting-group">
-          <div class="setting-row between">
-            <label for="vignette-strength">Vignette strength</label>
-            <span id="vignette-strength-value" class="setting-hint">96%</span>
-          </div>
-          <input id="vignette-strength" type="range" min="0" max="220" step="1" value="96">
-          <div class="setting-hint">Adjust the overall vignette intensity/size. Changes preview live and save when you save settings.</div>
+        <details id="vignette-settings-group" class="setting-group collapsible-setting">
+          <summary class="collapsible-setting-summary">
+            <span>Vignette</span>
+            <span class="setting-hint">Screen-edge shading and intensity</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <div class="setting-group nested-setting-group">
+              <div class="setting-row between">
+                <label for="vignette-strength">Vignette strength</label>
+                <span id="vignette-strength-value" class="setting-hint">96%</span>
+              </div>
+              <input id="vignette-strength" type="range" min="0" max="220" step="1" value="96">
+              <div class="setting-hint">Adjust the overall vignette intensity/size. Changes preview live and save when you save settings.</div>
 
-          <div class="setting-row between" style="margin-top:10px;">
-            <label for="vignette-top">Top intensity</label>
-            <span id="vignette-top-value" class="setting-hint">100%</span>
-          </div>
-          <input id="vignette-top" type="range" min="0" max="200" step="1" value="100">
+              <div class="setting-row between" style="margin-top:10px;">
+                <label for="vignette-top">Top intensity</label>
+                <span id="vignette-top-value" class="setting-hint">100%</span>
+              </div>
+              <input id="vignette-top" type="range" min="0" max="200" step="1" value="100">
 
-          <div class="setting-row between" style="margin-top:10px;">
-            <label for="vignette-side">Side intensity</label>
-            <span id="vignette-side-value" class="setting-hint">100%</span>
-          </div>
-          <input id="vignette-side" type="range" min="0" max="200" step="1" value="100">
+              <div class="setting-row between" style="margin-top:10px;">
+                <label for="vignette-side">Side intensity</label>
+                <span id="vignette-side-value" class="setting-hint">100%</span>
+              </div>
+              <input id="vignette-side" type="range" min="0" max="200" step="1" value="100">
 
-          <div class="setting-row between" style="margin-top:10px;">
-            <label for="vignette-bottom">Bottom intensity</label>
-            <span id="vignette-bottom-value" class="setting-hint">100%</span>
+              <div class="setting-row between" style="margin-top:10px;">
+                <label for="vignette-bottom">Bottom intensity</label>
+                <span id="vignette-bottom-value" class="setting-hint">100%</span>
+              </div>
+              <input id="vignette-bottom" type="range" min="0" max="200" step="1" value="100">
+            </div>
           </div>
-          <input id="vignette-bottom" type="range" min="0" max="200" step="1" value="100">
-        </div>
+        </details>
 
         <div id="settings-status" class="settings-status"></div>
       </div>
@@ -682,6 +930,6 @@
 
   <script src="vendor/picovoice/web-voice-processor.js"></script>
   <script src="vendor/picovoice/porcupine-web.js"></script>
-  <script type="module" src="js/app.js?v=20260516-authmodal2"></script>
+  <script type="module" src="js/app.js?v=20260517-fairy-pwa1"></script>
 </body>
 </html>

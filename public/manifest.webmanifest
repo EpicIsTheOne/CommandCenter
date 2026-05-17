@@ -1,0 +1,26 @@
+{
+  "name": "OpenClaw Command Center",
+  "short_name": "Command Center",
+  "description": "OpenClaw Command Center dashboard for agents, voice, Fairy Live, and workspace control.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "browser"],
+  "background_color": "#070b12",
+  "theme_color": "#0b1018",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "openclaw_command_center.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

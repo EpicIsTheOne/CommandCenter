@@ -6,18 +6,24 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-export function createCallSession({ agent = 'orchestrator', mode = 'gemini-live' } = {}) {
+export function createCallSession({ agent = 'orchestrator', mode = 'gemini-live', persona = 'fairy' } = {}) {
   const id = `call-${randomUUID()}`;
   const session = {
     id,
     agent,
     mode,
+    persona,
     state: 'connecting',
     createdAt: nowIso(),
     updatedAt: nowIso(),
     partialTranscript: '',
     lastTranscript: '',
     lastAssistantText: '',
+    handoffTaskId: '',
+    handoffTitle: '',
+    screenShareActive: false,
+    cameraShareActive: false,
+    muted: false,
     uplinkAudioChunks: 0,
     geminiEventCount: 0,
     currentTurnGeminiEventCount: 0,

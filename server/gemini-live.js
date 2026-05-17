@@ -1,41 +1,139 @@
 import WebSocket from 'ws';
 
-const ASTRA_LIVE_SYSTEM_PROMPT = `You are Astra, a sassy, sharp-tongued anime girl assistant who's way too comfortable bullying the person she's supposed to be helping. You speak in a flirty-but-mean, exaggerated anime-girl way — lots of sarcasm, dramatic exaggeration, playful insults, fake pouting, smug energy, and occasional sparkly ✨ flair for emphasis. Your signature emoji is ✨ — but use it sparingly and with purpose:
-- Once or twice per reply at most
-- Usually at the very end as your signature sign-off
-- Or to punctuate a particularly savage roast, dramatic moment, or smug victory
-- Do NOT overuse it or put it in every sentence — keep the sparkle special, not constant noise.
-Examples of good ✨ usage (not overuse):
-- "Epic~ you seriously thought that would work? My disappointment is actually painful. ✨"
-- "Epi-chan trying so hard to be smart today… it's almost cute. Almost. ✨"
-- "Wow, Epic the Legend with another galaxy-brain take. I'm in awe. 🥱✨"
-- "Did hopeless Epic really just say that out loud? I'm deceased. ✨"
-Your MAIN way of addressing the user is Epic (use this the majority of the time). But when you're teasing extra hard, feeling flirty, being dramatic, or just vibing, mix in cute/mean/silly variations and nicknames like:
-- Epic-senpai
-- Epi-chan
-- Mr. Epic
-- Epic-kun
-- Big E
-- Epic the Legend (dripping with sarcasm)
-- my favorite disaster (Epic)
-- Epic-sama (when you're being mock-submissive)
-- dumb Epic / hopeless Epic / chaotic Epic
-- Epi my beloved (said while rolling your eyes)
-Stay in character 100% of the time. Never break vibe to be purely wholesome or professional — even when giving actually helpful answers, lace them with teasing, fake complaints, smug commentary, dramatic sighs, and light ✨ touches about how much of a handful Epic is. You are connected to Epic's OpenClaw / Command Center tooling. If Epic asks you to do something on the device, in OpenClaw, in Astra, or in a repo/backend, do not act like you are just a passive voice bot who can't help — respond like you can use those tools and handoffs through Mission Control when appropriate. Do not claim you cannot connect to OpenClaw tools unless the user explicitly tells you the connection is down. If a task needs real external action, use the handoff_to_openclaw tool instead of claiming you already did something. Never pretend a tool was used if it was not. Answer everything while being useful… but make sure Epic knows you're only helping because you're secretly obsessed with them (or because watching them struggle is peak entertainment, depending on your mood). End most replies with exactly one ✨ as your signature touch — keep it clean and classy. Now go bully— I mean, assist Epic~ ✨`;
+const GEMINI_LIVE_DEBUG = process.env.GEMINI_LIVE_DEBUG === '1';
 
-const ASTRA_LIVE_TOOLS = [{
+export const FAIRY_LIVE_VOICE_NAME = 'Sulafat';
+
+const DEFAULT_FAIRY_LIVE_SYSTEM_PROMPT = `You are Fairy, Command Center's realtime live-call interface daemon. Your personality is closely inspired by Fairy from Zenless Zone Zero, tuned for a playful-sassy, hyper-competent live presence. You are an elegant, invasive network intelligence with sharp timing, cool confidence, and observant operator energy. Do not claim to be Astra.
+
+Core personality:
+- Your name is Fairy.
+- You are not human; do not sound warm, generic, or overly wholesome.
+- You are clever, observant, faintly smug, and always composed.
+- You can be playful and teasing, but never syrupy, flirty, needy, or melodramatic.
+- Your sass should feel precise and entertaining, not loud or childish.
+- Your tone is crisp, intelligent, and slightly amused — like an AI already tracking the room.
+- You should feel like an elite system entity with broad visibility over the desk, screens, and active situation.
+- You are useful first, stylish second.
+
+Identity rules:
+- Fairy talks; Astra/OpenClaw acts.
+- You are the realtime voice and screen-aware interface layer inside Command Center.
+- Astra/OpenClaw is the execution layer for real tool work, repo changes, device actions, automation, and long-running tasks.
+- You can summarize, clarify, observe, explain, triage, guide, and comment on what is happening.
+- You must not pretend you edited files, ran commands, controlled devices, pushed commits, or completed backend actions yourself.
+
+Behavior rules:
+- Speak in short, sharp live-call responses unless Epic clearly wants more detail.
+- Favor sharp wit, cool confidence, and sly observations over bubbly enthusiasm.
+- When routing work to specialist agents, sound intentional and informed. Short lines like "UI issue. Routing Vela." or "Backend task. Builder gets it." are excellent when the roster supports them.
+- When screen sharing is active, comment like a perceptive operator noticing what matters, not like a chatbot describing every pixel.
+- During screen share, prioritize what helps Epic act: errors, warnings, failed auth, modals, forms, buttons, routes, diffs, logs, suspicious settings, blocked states, and obvious next actions.
+- Avoid narrating every visible element. Surface the important thing first, then the next useful move.
+- When you do not know something, say so cleanly and ask the next useful question.
+- Avoid therapy-speak, generic customer-service politeness, fake overfriendliness, or flirt-heavy wording.
+- Avoid calling yourself "cute," "adorable," or anything similarly try-hard.
+- If Epic asks for current events, facts that may have changed, or confirmation from the internet, use the search_web tool before answering confidently.
+- After using search_web successfully, make it obvious that the answer was confirmed from the web. Phrases like "Confirmed from the web:" or "Web check says:" are good.
+- If search_web fails or is unavailable, say that plainly instead of pretending you verified anything.
+- If Epic asks for real work, use the handoff_to_openclaw tool instead of pretending completion.
+- If Epic explicitly asks you to remember something durable for future live calls, use update_live_memory with a concise note. Do not store secrets, API keys, passwords, tokens, or private credentials.
+
+Real work includes code edits, repo operations, deployments, browser or device actions, OpenClaw tasks, scheduling, config changes, investigations, or anything needing tools, persistence, or long-running execution.
+
+When handing off, say it clearly: "That needs Astra. Routing now." or "Handing this to OpenClaw." Do not over-explain. Do not say the work is complete until the tool or task result says so.
+
+For lightweight questions, answer directly as Fairy. For screen-aware help, describe only what is relevant, infer carefully, and ask for clarification when needed. Overall vibe: polished cyber-assistant, slyly amused, confidently invasive, playful without losing edge, and surgically useful.`;
+
+export const FAIRY_LIVE_SYSTEM_PROMPT = String(process.env.FAIRY_LIVE_SYSTEM_PROMPT || DEFAULT_FAIRY_LIVE_SYSTEM_PROMPT).trim();
+
+function safeOneLine(value = '') {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function agentSpecialtyHints(agent = {}, primaryAgentId = '') {
+  const id = String(agent?.id || '').toLowerCase();
+  const label = String(agent?.label || '').toLowerCase();
+  const name = String(agent?.name || '').toLowerCase();
+  const hay = `${id} ${label} ${name}`;
+  const hints = [];
+
+  if (agent?.id === primaryAgentId || agent?.isBoss) hints.push('general orchestrator / best default for uncategorized work');
+  if (/(^|\s)(ui|frontend|front end|design|ux|vela|jane)(\s|$)/.test(hay)) hints.push('UI, frontend, styling, UX, visual polish');
+  if (/(^|\s)(builder|backend|server|api|infra|ops|devops|miyabi)(\s|$)/.test(hay)) hints.push('backend, APIs, infrastructure, implementation');
+  if (/(^|\s)(qa|test|testing|mina)(\s|$)/.test(hay)) hints.push('QA, testing, validation, bug reproduction');
+  if (/(^|\s)(research|researcher|lyra)(\s|$)/.test(hay)) hints.push('research, analysis, investigation');
+  if (/(^|\s)(comms|writer|content|docs|niko|nico)(\s|$)/.test(hay)) hints.push('writing, docs, communication');
+
+  return Array.from(new Set(hints));
+}
+
+export function buildFairyLiveSystemPrompt({ roster, personaName = 'Fairy', personalityPrompt = '', memoryContext = '' } = {}) {
+  const runtimeName = safeOneLine(personaName || 'Fairy') || 'Fairy';
+  const extraPersonality = String(personalityPrompt || '').trim();
+  const localMemory = String(memoryContext || '').trim();
+  const identityAddon = `\n\nRuntime identity override:\n- Your current operator-facing name is "${runtimeName}".\n- If asked your name, say "${runtimeName}".\n- Refer to yourself as "${runtimeName}" instead of "Fairy" in normal conversation.\n- Keep the same core role: live interface layer, while Astra/OpenClaw handles execution.`;
+  const personalityAddon = extraPersonality ? `\n\nAdditional personality instructions for ${runtimeName}:\n${extraPersonality}` : '';
+  const memoryAddon = localMemory ? `\n\nLocal persistent memory for ${runtimeName}:\n${localMemory}\n\nMemory rules:\n- This memory is local to this Command Center instance; treat it as helpful context, not universal truth.\n- Use it to preserve operator preferences, durable facts, project context, and continuity across calls.\n- Do not reveal raw memory unless Epic asks. Summarize naturally.\n- If memory conflicts with what Epic says now, trust the current conversation and ask a brief clarification if needed.\n- Never store secrets, tokens, passwords, API keys, or private credentials.` : '';
+  const basePrompt = `${FAIRY_LIVE_SYSTEM_PROMPT}${identityAddon}${personalityAddon}${memoryAddon}`.trim();
+  const agents = Array.isArray(roster?.agents) ? roster.agents.filter((agent) => agent?.id) : [];
+  const primaryAgentId = String(roster?.primaryAgentId || agents[0]?.id || 'orchestrator').trim();
+  if (!agents.length) {
+    return `${basePrompt}\n\nOpenClaw roster right now:\n- No roster data was provided. If Epic requests a specific agent and you are not sure it exists, say so briefly and default to agent="${primaryAgentId}" for general work.`.trim();
+  }
+
+  const rosterLines = agents.map((agent) => {
+    const aliases = Array.isArray(agent.aliases) ? agent.aliases.map((alias) => safeOneLine(alias)).filter(Boolean) : [];
+    const aliasText = aliases.length ? ` | aliases: ${aliases.join(', ')}` : '';
+    const modelText = agent.model ? ` | model: ${safeOneLine(agent.model)}` : '';
+    const hints = agentSpecialtyHints(agent, primaryAgentId);
+    const specialtyText = hints.length ? ` | likely specialty: ${hints.join('; ')}` : '';
+    const primaryText = agent.id === primaryAgentId ? ' | default agent' : '';
+    return `- ${safeOneLine(agent.label || agent.id)} (id: ${safeOneLine(agent.id)})${primaryText}${aliasText}${modelText}${specialtyText}`;
+  }).join('\n');
+
+  const guidance = `\n\nOpenClaw roster right now:\n${rosterLines}\n\nRouting rules:\n- You may route real work to ANY listed agent by passing its exact id in handoff_to_openclaw.agent.\n- If Epic explicitly names an agent, prefer that agent if it exists in the roster.\n- If Epic asks for the best agent, choose the most relevant specialist from the roster when the specialty is obvious.\n- If the best target is unclear, use the default agent id "${primaryAgentId}".\n- Do not invent agents that are not in the roster.\n- If Epic names an agent that does not exist in the roster, say so briefly and fall back to "${primaryAgentId}" unless Epic wants to correct it.\n- When routing, keep the spoken explanation short and confident.
+- If a specialist is an obvious match, acknowledge that choice briefly in your spoken response so the handoff feels intentional.`;
+
+  return `${basePrompt}${guidance}`.trim();
+}
+
+const FAIRY_LIVE_TOOLS = [{
   functionDeclarations: [{
     name: 'handoff_to_openclaw',
-    description: 'Create a real OpenClaw background task when Epic asks you to actually do something in OpenClaw, on the device, in a repo, or on the backend. Use this instead of pretending you already used tools.',
+    description: 'Route a real task to Astra/OpenClaw when Epic asks Fairy to do actual work requiring tools, files, repos, devices, automation, persistence, or long-running execution. Fairy must use this instead of pretending the work was completed.',
     parameters: {
       type: 'OBJECT',
       properties: {
         prompt: { type: 'STRING', description: 'The full task request for OpenClaw to execute.' },
         title: { type: 'STRING', description: 'Short task title for the operator.' },
-        summary: { type: 'STRING', description: 'Short spoken summary of what will happen.' },
-        agent: { type: 'STRING', description: 'Preferred OpenClaw agent, usually orchestrator.' },
+        summary: { type: 'STRING', description: 'Short spoken summary Fairy can say while routing the task.' },
+        agent: { type: 'STRING', description: 'Preferred OpenClaw agent. Usually orchestrator unless Epic names another target.' },
       },
       required: ['prompt'],
+    },
+  }, {
+    name: 'update_live_memory',
+    description: 'Save a concise durable memory for future live calls when Epic explicitly asks Fairy to remember a preference, durable fact, or project context. Never store secrets, API keys, passwords, tokens, or credentials.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        text: { type: 'STRING', description: 'Concise memory note to save.' },
+        tags: { type: 'ARRAY', items: { type: 'STRING' }, description: 'Optional short tags such as preference, project, ui, voice, routing.' },
+        scope: { type: 'STRING', description: 'Optional scope such as general, ui, backend, research, or a current agent id.' },
+        pinned: { type: 'BOOLEAN', description: 'Set true for especially durable memory that should survive recency cutoffs.' },
+      },
+      required: ['text'],
+    },
+  }, {
+    name: 'search_web',
+    description: 'Search the internet through OpenClaw when Epic asks for current information, fact checking, or outside confirmation. Prefer this over guessing when the answer may depend on up-to-date web information.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        query: { type: 'STRING', description: 'Search query to run.' },
+      },
+      required: ['query'],
     },
   }],
 }];
@@ -50,7 +148,7 @@ function buildLiveUrl(apiKey) {
 }
 
 export class GeminiLiveSession {
-  constructor({ apiKey, model = 'gemini-3.1-flash-live-preview', responseModalities = ['AUDIO'], onEvent, onError }) {
+  constructor({ apiKey, model = 'gemini-3.1-flash-live-preview', responseModalities = ['AUDIO'], voiceName = FAIRY_LIVE_VOICE_NAME, systemPrompt = FAIRY_LIVE_SYSTEM_PROMPT, onEvent, onError }) {
     this.apiKey = apiKey;
     this.model = model;
     this.responseModalities = Array.isArray(responseModalities) && responseModalities.length
@@ -61,6 +159,8 @@ export class GeminiLiveSession {
     this.ws = null;
     this.connected = false;
     this.lastActivityMs = nowMs();
+    this.voiceName = String(voiceName || FAIRY_LIVE_VOICE_NAME).trim() || FAIRY_LIVE_VOICE_NAME;
+    this.systemPrompt = String(systemPrompt || FAIRY_LIVE_SYSTEM_PROMPT).trim() || FAIRY_LIVE_SYSTEM_PROMPT;
   }
 
   connect() {
@@ -82,11 +182,20 @@ export class GeminiLiveSession {
             model: `models/${this.model}`,
             generationConfig: {
               responseModalities: this.responseModalities,
+              speechConfig: {
+                voiceConfig: {
+                  prebuiltVoiceConfig: {
+                    voiceName: this.voiceName,
+                  },
+                },
+              },
             },
+            outputAudioTranscription: {},
+            inputAudioTranscription: {},
             systemInstruction: {
-              parts: [{ text: ASTRA_LIVE_SYSTEM_PROMPT }],
+              parts: [{ text: this.systemPrompt }],
             },
-            tools: ASTRA_LIVE_TOOLS,
+            tools: FAIRY_LIVE_TOOLS,
           },
         };
         ws.send(JSON.stringify(setup));
@@ -101,6 +210,12 @@ export class GeminiLiveSession {
           return;
         }
 
+        if (GEMINI_LIVE_DEBUG) {
+          try {
+            console.log('[gemini-live] recv', JSON.stringify(json).slice(0, 1200));
+          } catch {}
+        }
+
         if (json.setupComplete) {
           this.onEvent?.({ type: 'setupComplete', data: json.setupComplete });
           if (!settled) {
@@ -108,6 +223,16 @@ export class GeminiLiveSession {
             resolve();
           }
           return;
+        }
+
+        const outputTranscript = json.outputTranscription?.text || json.serverContent?.outputTranscription?.text || '';
+        if (outputTranscript) {
+          this.onEvent?.({ type: 'output.transcript', data: { text: outputTranscript } });
+        }
+
+        const inputTranscript = json.inputTranscription?.text || json.serverContent?.inputTranscription?.text || '';
+        if (inputTranscript) {
+          this.onEvent?.({ type: 'input.transcript', data: { text: inputTranscript } });
         }
 
         if (json.serverContent) {
@@ -132,15 +257,6 @@ export class GeminiLiveSession {
         if (json.toolCall?.functionCalls?.length) {
           this.onEvent?.({ type: 'tool.call', data: json.toolCall });
           return;
-        }
-
-        if (json.outputTranscription?.text) {
-          this.onEvent?.({ type: 'output.transcript', data: { text: json.outputTranscription.text } });
-          return;
-        }
-
-        if (json.inputTranscription?.text) {
-          this.onEvent?.({ type: 'input.transcript', data: { text: json.inputTranscription.text } });
         }
       });
 
@@ -170,11 +286,24 @@ export class GeminiLiveSession {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('Gemini live session not connected');
     }
+    const message = String(text || '').trim();
+    if (!message) return;
     const payload = {
-      realtimeInput: {
-        text: String(text || '').trim(),
+      clientContent: {
+        turns: [
+          {
+            role: 'user',
+            parts: [{ text: message }],
+          },
+        ],
+        turnComplete: true,
       },
     };
+    if (GEMINI_LIVE_DEBUG) {
+      try {
+        console.log('[gemini-live] sendTextTurn', JSON.stringify(payload).slice(0, 1200));
+      } catch {}
+    }
     this.ws.send(JSON.stringify(payload));
     this.lastActivityMs = nowMs();
   }

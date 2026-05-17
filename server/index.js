@@ -26,12 +26,14 @@ import { loadWakeSettings, saveWakeSettings, maskAccessKey } from './wake-settin
 import { transcribeWakeAudio, warmWakeTranscriber } from './wake-transcriber.js';
 import { detectWakeKeyword, warmWakeKeywordDetector } from './wake-keyword-detector.js';
 import { startSessionMonitor } from './session-monitor.js';
-import { loadGeminiRuntimeConfig } from './gemini-config.js';
+import { GEMINI_LIVE_VOICE_OPTIONS, loadGeminiRuntimeConfig, loadGeminiSettings, saveGeminiSettings } from './gemini-config.js';
 import { createLiveTask, getLiveTask, listLiveTasks, looksComplexRequest, runLiveTask } from './live-tasks.js';
 import { createCallSession, endCallSession, getCallSession, listCallSessions, updateCallSession } from './call-session-store.js';
-import { GeminiLiveSession } from './gemini-live.js';
+import { GeminiLiveSession, FAIRY_LIVE_VOICE_NAME, buildFairyLiveSystemPrompt } from './gemini-live.js';
+import { addFairyMemoryEntry, buildFairyMemoryContext, loadFairyMemory, removeFairyMemoryEntry, selectRelevantFairyMemory, updateFairyMemoryEntry } from './fairy-memory.js';
 import { requireApiAuth } from './api-auth.js';
 import { runApiChatTurn } from './api-chat-runner.js';
+import { runRoleplayChatTurn } from './roleplay-chat-runner.js';
 import { appendApiSessionMessage, createApiSession, getApiSession, getApiSessionMeta, listApiSessions, searchApiSessions } from './api-session-store.js';
 import { loadUiAuthConfig, setUiPassword, checkPassword, createSessionToken, createSession, isValidSession, revokeSession } from './ui-auth.js';
 
@@ -403,6 +405,18 @@ function clearLiveWatchdog(sessionId) {
   }
 }
 
+function setCallSessionState(sessionId, state, patch = {}, { broadcastState = true } = {}) {
+  const updated = updateCallSession(sessionId, { ...patch, state });
+  if (updated && broadcastState) {
+    broadcast({ type: 'call:session.state', data: { sessionId, state: updated.state, session: updated } });
+  }
+  return updated;
+}
+
+function broadcastCallHandoff(type, sessionId, payload = {}) {
+  broadcast({ type, data: { sessionId, ...payload } });
+}
+
 function armLiveWatchdog(sessionId, text, { broadcast }) {
   clearLiveWatchdog(sessionId);
   const timer = setTimeout(() => {
@@ -603,6 +617,71 @@ app.get(`${basePath}/api/v1/files/:id/download`, async (req, res) => {
     if (item.kind === 'link') return res.redirect(item.sourceUrl);
     if (!item.path || !existsSync(item.path)) return res.status(404).json({ ok: false, error: 'Stored file missing', code: 'FILE_NOT_FOUND' });
     res.download(item.path, item.originalName || item.name || 'download');
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get(`${basePath}/api/settings/gemini`, async (req, res) => {
+  const settings = await loadGeminiSettings();
+  const runtime = await loadGeminiRuntimeConfig();
+  res.json({
+    ok: true,
+    settings: {
+      hasApiKey: !!runtime.hasApiKey,
+      apiKeyMasked: maskApiKey(settings.apiKey || runtime.apiKey || ''),
+      model: settings.model || runtime.model,
+      responseModalities: settings.responseModalities || runtime.responseModalities || ['AUDIO'],
+      thinkingLevel: settings.thinkingLevel || runtime.thinkingLevel || 'minimal',
+      voiceName: settings.voiceName || runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
+      liveVoiceName: settings.voiceName || runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
+      personaName: settings.personaName || runtime.personaName || 'Fairy',
+      personalityPrompt: settings.personalityPrompt || runtime.personalityPrompt || '',
+      memoryEnabled: settings.memoryEnabled ?? runtime.memoryEnabled ?? true,
+      memoryNotes: settings.memoryNotes || runtime.memoryNotes || '',
+      availableVoiceNames: GEMINI_LIVE_VOICE_OPTIONS,
+      source: runtime.source || 'command-center-local',
+      usingEnvKey: String(runtime.source || '').startsWith('env:'),
+    },
+  });
+});
+
+app.post(`${basePath}/api/settings/gemini`, async (req, res) => {
+  try {
+    const existing = await loadGeminiSettings();
+    const body = req.body || {};
+    const next = {
+      apiKey: body.apiKey ? String(body.apiKey).trim() : existing.apiKey,
+      model: body.model !== undefined ? String(body.model || '').trim() : existing.model,
+      responseModalities: body.responseModalities !== undefined ? body.responseModalities : existing.responseModalities,
+      thinkingLevel: body.thinkingLevel !== undefined ? String(body.thinkingLevel || '').trim() : existing.thinkingLevel,
+      voiceName: body.voiceName !== undefined ? String(body.voiceName || '').trim() : existing.voiceName,
+      personaName: body.personaName !== undefined ? String(body.personaName || '').trim() : existing.personaName,
+      personalityPrompt: body.personalityPrompt !== undefined ? String(body.personalityPrompt || '') : existing.personalityPrompt,
+      memoryEnabled: body.memoryEnabled !== undefined ? body.memoryEnabled !== false : existing.memoryEnabled,
+      memoryNotes: body.memoryNotes !== undefined ? String(body.memoryNotes || '') : existing.memoryNotes,
+    };
+    const saved = await saveGeminiSettings(next);
+    const runtime = await loadGeminiRuntimeConfig();
+    res.json({
+      ok: true,
+      settings: {
+        hasApiKey: !!runtime.hasApiKey,
+        apiKeyMasked: maskApiKey(saved.apiKey || runtime.apiKey || ''),
+        model: saved.model,
+        responseModalities: saved.responseModalities,
+        thinkingLevel: saved.thinkingLevel,
+        voiceName: saved.voiceName || runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
+        liveVoiceName: saved.voiceName || runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
+        personaName: saved.personaName || runtime.personaName || 'Fairy',
+        personalityPrompt: saved.personalityPrompt || runtime.personalityPrompt || '',
+        memoryEnabled: saved.memoryEnabled ?? runtime.memoryEnabled ?? true,
+        memoryNotes: saved.memoryNotes || runtime.memoryNotes || '',
+        availableVoiceNames: GEMINI_LIVE_VOICE_OPTIONS,
+        source: runtime.source || 'command-center-local',
+        usingEnvKey: String(runtime.source || '').startsWith('env:'),
+      },
+    });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
   }
@@ -1221,8 +1300,22 @@ app.post(`${basePath}/api/settings/voice`, async (req, res) => {
   try {
     const existing = await loadVoiceSettings();
     const body = req.body || {};
+    const provider = String(body.provider || existing.provider || 'elevenlabs').trim() === 'fish' ? 'fish' : 'elevenlabs';
+    const bodyElevenlabsAgentVoices = body.elevenlabsAgentVoices && typeof body.elevenlabsAgentVoices === 'object' && !Array.isArray(body.elevenlabsAgentVoices)
+      ? body.elevenlabsAgentVoices
+      : null;
+    const bodyFishAgentVoices = body.fishAgentVoices && typeof body.fishAgentVoices === 'object' && !Array.isArray(body.fishAgentVoices)
+      ? body.fishAgentVoices
+      : null;
+    const elevenlabsAgentVoices = provider === 'elevenlabs'
+      ? (bodyElevenlabsAgentVoices || existing.elevenlabsAgentVoices || {})
+      : (existing.elevenlabsAgentVoices || {});
+    const fishAgentVoices = provider === 'fish'
+      ? (bodyFishAgentVoices || existing.fishAgentVoices || {})
+      : (existing.fishAgentVoices || {});
+
     const next = {
-      provider: body.provider || existing.provider || 'elevenlabs',
+      provider,
       elevenlabsApiKey: body.elevenlabsApiKey ? String(body.elevenlabsApiKey).trim() : existing.elevenlabsApiKey,
       defaultVoiceId: body.defaultVoiceId !== undefined ? String(body.defaultVoiceId || '').trim() : (existing.defaultVoiceId || ''),
       fishAudioApiBase: String(body.fishAudioApiBase || existing.fishAudioApiBase || 'https://your-domain.example/aichat').trim(),
@@ -1239,11 +1332,9 @@ app.post(`${basePath}/api/settings/voice`, async (req, res) => {
       sttFishApiKey: body.sttFishApiKey ? String(body.sttFishApiKey).trim() : existing.sttFishApiKey,
       sttOpenAiApiKey: body.sttOpenAiApiKey ? String(body.sttOpenAiApiKey).trim() : existing.sttOpenAiApiKey,
       sttElevenlabsApiKey: body.sttElevenlabsApiKey ? String(body.sttElevenlabsApiKey).trim() : existing.sttElevenlabsApiKey,
-      elevenlabsAgentVoices: body.elevenlabsAgentVoices || existing.elevenlabsAgentVoices || {},
-      fishAgentVoices: body.fishAgentVoices || existing.fishAgentVoices || {},
-      agentVoices: String(body.provider || existing.provider || '').trim() === 'fish'
-        ? (body.fishAgentVoices || existing.fishAgentVoices || {})
-        : (body.elevenlabsAgentVoices || existing.elevenlabsAgentVoices || {}),
+      elevenlabsAgentVoices,
+      fishAgentVoices,
+      agentVoices: provider === 'fish' ? fishAgentVoices : elevenlabsAgentVoices,
     };
     const saved = await saveVoiceSettings(next);
     res.json({
@@ -1565,6 +1656,56 @@ app.get(`${basePath}/api/weather`, async (req, res) => {
     res.json(weatherCache.data || { temp_c: 0, desc: 'Unavailable', code: 0 });
   }
 });
+
+function runOpenClawWebSearch(query, { agentId } = {}) {
+  return new Promise((resolve, reject) => {
+    const roster = getRoster();
+    const requested = String(agentId || roster.primaryAgentId || 'orchestrator').trim();
+    const target = roster.agents.some((item) => item.id === requested)
+      ? requested
+      : String(roster.primaryAgentId || 'orchestrator').trim();
+    const openclawBin = process.env.OPENCLAW_BIN || 'openclaw';
+    const prompt = [
+      'Use the web_search tool if it is available in this OpenClaw install.',
+      'Search the web for the query below and return a concise factual result for Fairy to speak.',
+      'Include the most relevant findings in plain language.',
+      'If useful, include 2-5 source domains or URLs inline.',
+      'If web search is unavailable, say that clearly instead of pretending you searched.',
+      `Query: ${String(query || '').trim()}`,
+    ].join('\n');
+
+    execFile(openclawBin, [
+      'agent', '--agent', target,
+      '--thinking', 'off',
+      '--message', prompt,
+    ], {
+      timeout: 90000,
+      env: { ...process.env, PATH: process.env.HOME + '/.local/bin:' + process.env.PATH },
+      maxBuffer: 2 * 1024 * 1024,
+    }, (err, stdout, stderr) => {
+      if (err) {
+        reject(new Error(String(stderr || err.message || 'Web search failed').trim()));
+        return;
+      }
+      resolve(String(stdout || '').trim());
+    });
+  });
+}
+
+
+function summarizeWebSearchResult(result = '') {
+  const text = String(result || '').trim();
+  const urls = Array.from(new Set((text.match(/https?:\/\/[^\s)]+/g) || []).slice(0, 4)));
+  const domains = Array.from(new Set(urls.map((url) => {
+    try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; }
+  }).filter(Boolean))).slice(0, 4);
+  const cleaned = text.replace(/https?:\/\/[^\s)]+/g, '').replace(/\s+/g, ' ').trim();
+  return {
+    preview: cleaned.slice(0, 260),
+    urls,
+    domains,
+  };
+}
 
 function sendToAgent(agentId, message) {
   const cleanMessage = String(message || '').trim();
@@ -1892,9 +2033,52 @@ app.get(`${basePath}/api/live/config`, async (req, res) => {
       model: config.model,
       responseModalities: config.responseModalities,
       thinkingLevel: config.thinkingLevel,
-      transport: 'websocket-proxy-pending',
+      voiceName: config.voiceName || FAIRY_LIVE_VOICE_NAME,
+      liveVoiceName: config.voiceName || FAIRY_LIVE_VOICE_NAME,
+      personaName: config.personaName || 'Fairy',
+      personalityPrompt: config.personalityPrompt || '',
+      memoryEnabled: config.memoryEnabled ?? true,
+      memoryNotes: config.memoryNotes || '',
+      availableVoiceNames: GEMINI_LIVE_VOICE_OPTIONS,
+      source: config.source,
+      transport: 'server-websocket',
     },
   });
+});
+
+app.get(`${basePath}/api/fairy/memory`, async (req, res) => {
+  const store = await loadFairyMemory();
+  const scope = String(req.query?.scope || 'all').trim().toLowerCase();
+  const query = String(req.query?.q || '').trim();
+  let entries = Array.isArray(store.entries) ? [...store.entries] : [];
+  if (scope && scope !== 'all') entries = entries.filter((entry) => String(entry.scope || 'general') === scope);
+  if (query) {
+    const lowered = query.toLowerCase();
+    entries = selectRelevantFairyMemory({ store: { entries }, query, scope: scope === 'all' ? 'general' : scope, limit: 40 }).filter((entry) => {
+      const hay = `${String(entry.text || '').toLowerCase()} ${(entry.tags || []).join(' ').toLowerCase()} ${String(entry.scope || '')}`;
+      return hay.includes(lowered) || query.split(/\s+/).some((part) => part && hay.includes(part.toLowerCase()));
+    });
+  }
+  entries.sort((a, b) => (b.pinned === true) - (a.pinned === true) || Date.parse(b.updatedAt || b.createdAt || 0) - Date.parse(a.updatedAt || a.createdAt || 0));
+  res.json({ ok: true, entries, count: entries.length });
+});
+
+app.delete(`${basePath}/api/fairy/memory/:id`, async (req, res) => {
+  const result = await removeFairyMemoryEntry(String(req.params.id || ''));
+  if (!result.ok) return res.status(404).json({ ok: false, error: 'Memory entry not found' });
+  res.json({ ok: true, count: result.store.entries.length });
+});
+
+app.post(`${basePath}/api/fairy/memory/:id`, async (req, res) => {
+  const patch = {
+    text: req.body?.text,
+    tags: req.body?.tags,
+    scope: req.body?.scope,
+    pinned: req.body?.pinned,
+  };
+  const result = await updateFairyMemoryEntry(String(req.params.id || ''), patch);
+  if (!result.ok) return res.status(404).json({ ok: false, error: 'Memory entry not found' });
+  res.json({ ok: true, entry: result.entry, count: result.store.entries.length });
 });
 
 app.get(`${basePath}/api/call/sessions`, async (req, res) => {
@@ -1911,17 +2095,39 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
   try {
     const runtime = await loadGeminiRuntimeConfig();
     if (!runtime.hasApiKey) {
-      return res.status(400).json({ ok: false, error: 'Gemini API key is not configured in Mission Control' });
+      return res.status(400).json({ ok: false, error: 'Gemini API key is not configured in Command Center settings' });
     }
+    const currentRoster = getRoster();
+    const requestedAgent = String(req.body?.agent || currentRoster.primaryAgentId || 'orchestrator').trim();
+    const sessionAgent = currentRoster.agents.some((agent) => agent.id === requestedAgent)
+      ? requestedAgent
+      : String(currentRoster.primaryAgentId || 'orchestrator').trim();
     const session = createCallSession({
-      agent: String(req.body?.agent || getRoster().primaryAgentId || 'orchestrator'),
+      agent: sessionAgent,
       mode: 'gemini-live',
+      persona: 'fairy',
+    });
+
+    const memoryStore = runtime.memoryEnabled ? await loadFairyMemory() : { entries: [] };
+    const memoryContext = buildFairyMemoryContext({
+      enabled: runtime.memoryEnabled !== false,
+      memoryNotes: runtime.memoryNotes || '',
+      store: memoryStore,
+      scope: sessionAgent || 'general',
+      limit: 10,
     });
 
     const gemini = new GeminiLiveSession({
       apiKey: runtime.apiKey,
       model: runtime.model,
       responseModalities: runtime.responseModalities,
+      voiceName: runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
+      systemPrompt: buildFairyLiveSystemPrompt({
+        roster: currentRoster,
+        personaName: runtime.personaName || 'Fairy',
+        personalityPrompt: runtime.personalityPrompt || '',
+        memoryContext,
+      }),
       onEvent: (event) => {
         const current = getCallSession(session.id);
         updateCallSession(session.id, {
@@ -1931,15 +2137,24 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
         });
         clearLiveWatchdog(session.id);
         if (event.type === 'setupComplete') {
-          broadcast({ type: 'call:debug', data: { sessionId: session.id, message: 'Gemini live setup complete' } });
+          setCallSessionState(session.id, 'ready');
+          broadcast({ type: 'call:debug', data: { sessionId: session.id, message: 'Fairy live setup complete' } });
           return;
         }
         if (event.type === 'input.transcript') {
-          broadcast({ type: 'call:debug', data: { sessionId: session.id, message: `Gemini heard input: ${String(event.data?.text || '').slice(0, 120)}` } });
+          const text = String(event.data?.text || '').trim();
+          const updated = updateCallSession(session.id, { partialTranscript: text, state: 'listening' });
+          broadcast({ type: 'call:transcript.partial', data: { sessionId: session.id, text, state: updated?.state || 'listening' } });
+          broadcast({ type: 'call:debug', data: { sessionId: session.id, message: `Gemini heard input: ${text.slice(0, 120)}` } });
           return;
         }
         if (event.type === 'output.transcript') {
-          broadcast({ type: 'call:debug', data: { sessionId: session.id, message: `Gemini output transcript: ${String(event.data?.text || '').slice(0, 120)}` } });
+          const text = String(event.data?.text || '').trim();
+          const updated = text
+            ? setCallSessionState(session.id, 'speaking', { lastAssistantText: text })
+            : getCallSession(session.id);
+          if (text) broadcast({ type: 'call:response.text', data: { sessionId: session.id, text, done: false, state: updated?.state || 'speaking' } });
+          broadcast({ type: 'call:debug', data: { sessionId: session.id, message: `Gemini output transcript: ${text.slice(0, 120)}` } });
           return;
         }
         if (event.type === 'tool.call') {
@@ -1951,6 +2166,97 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
               const name = String(fc?.name || '').trim();
               const id = String(fc?.id || '').trim();
               const args = fc?.args && typeof fc.args === 'object' ? fc.args : {};
+              if (name === 'update_live_memory') {
+                const text = String(args.text || '').trim();
+                const tags = Array.isArray(args.tags) ? args.tags.map((tag) => String(tag || '').trim()).filter(Boolean).slice(0, 8) : [];
+                const scope = String(args.scope || session.agent || 'general').trim().toLowerCase() || 'general';
+                const pinned = args.pinned === true;
+                if (runtime.memoryEnabled === false) {
+                  functionResponses.push({ name, id, response: { ok: false, error: 'Live memory is disabled in Command Center settings' } });
+                  continue;
+                }
+                if (!text) {
+                  functionResponses.push({ name, id, response: { ok: false, error: 'Missing text for update_live_memory' } });
+                  continue;
+                }
+                if (/(api[_ -]?key|password|passwd|token|secret|cookie|credential)/i.test(text)) {
+                  functionResponses.push({ name, id, response: { ok: false, error: 'Refusing to store likely secret material in live memory' } });
+                  continue;
+                }
+                const savedMemory = await addFairyMemoryEntry({ text, tags, scope, pinned, source: 'gemini-live' });
+                broadcast({
+                  type: 'call:memory.saved',
+                  data: {
+                    sessionId: session.id,
+                    ok: true,
+                    entry: savedMemory.entry,
+                    count: savedMemory.store.entries.length,
+                  },
+                });
+                functionResponses.push({
+                  name,
+                  id,
+                  response: {
+                    ok: true,
+                    memoryId: savedMemory.entry.id,
+                    count: savedMemory.store.entries.length,
+                  },
+                });
+                continue;
+              }
+              if (name === 'search_web') {
+                const query = String(args.query || '').trim();
+                if (!query) {
+                  functionResponses.push({ name, id, response: { error: 'Missing query for search_web' } });
+                  continue;
+                }
+                broadcast({ type: 'call:debug', data: { sessionId: session.id, message: `Fairy requested web search: ${query.slice(0, 120)}` } });
+                broadcast({ type: 'call:web_search.started', data: { sessionId: session.id, query } });
+                try {
+                  const result = await runOpenClawWebSearch(query, { agentId: roster.primaryAgentId || session.agent || 'orchestrator' });
+                  const summary = summarizeWebSearchResult(result);
+                  broadcast({
+                    type: 'call:web_search.result',
+                    data: {
+                      sessionId: session.id,
+                      query,
+                      ok: true,
+                      preview: summary.preview,
+                      urls: summary.urls,
+                      domains: summary.domains,
+                    },
+                  });
+                  functionResponses.push({
+                    name,
+                    id,
+                    response: {
+                      ok: true,
+                      query,
+                      result,
+                    },
+                  });
+                } catch (error) {
+                  broadcast({
+                    type: 'call:web_search.result',
+                    data: {
+                      sessionId: session.id,
+                      query,
+                      ok: false,
+                      error: error.message || 'Web search failed',
+                    },
+                  });
+                  functionResponses.push({
+                    name,
+                    id,
+                    response: {
+                      ok: false,
+                      query,
+                      error: error.message || 'Web search failed',
+                    },
+                  });
+                }
+                continue;
+              }
               if (name !== 'handoff_to_openclaw') {
                 functionResponses.push({ name, id, response: { error: `Unsupported tool: ${name}` } });
                 continue;
@@ -1958,12 +2264,25 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
               const prompt = String(args.prompt || '').trim();
               const title = String(args.title || prompt.slice(0, 80) || 'OpenClaw task').trim();
               const summary = String(args.summary || "I'm working on that through OpenClaw.").trim();
-              const agent = String(args.agent || session.agent || 'orchestrator').trim();
+              const requestedAgent = String(args.agent || session.agent || 'orchestrator').trim();
+              const agent = roster.agents.some((item) => item.id === requestedAgent)
+                ? requestedAgent
+                : String(roster.primaryAgentId || session.agent || 'orchestrator').trim();
               if (!prompt) {
                 functionResponses.push({ name, id, response: { error: 'Missing prompt for handoff_to_openclaw' } });
                 continue;
               }
+              const handoffStarted = setCallSessionState(session.id, 'handing_off', {
+                handoffTitle: title,
+                handoffTaskId: '',
+              });
+              broadcastCallHandoff('call:handoff.started', session.id, { title, summary, agent, session: handoffStarted });
               const task = await createLiveTask({ title, summary, prompt, agent });
+              const handoffLinked = setCallSessionState(session.id, 'task_running', {
+                handoffTaskId: task.id,
+                handoffTitle: title,
+              });
+              broadcastCallHandoff('call:handoff.task_created', session.id, { taskId: task.id, task, session: handoffLinked });
               broadcast({ type: 'live_task:update', data: task });
               runLiveTask(task, { broadcast, roster });
               functionResponses.push({
@@ -1982,6 +2301,8 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
               broadcast({ type: 'call:debug', data: { sessionId: session.id, message: `Gemini used live tool handoff (${functionResponses.length} call(s))` } });
             }
           })().catch((error) => {
+            const failed = setCallSessionState(session.id, 'error', { lastAssistantText: error.message || 'Tool handoff failed' });
+            broadcastCallHandoff('call:handoff.failed', session.id, { message: error.message || 'Tool handoff failed', session: failed });
             broadcast({ type: 'call:error', data: { sessionId: session.id, message: error.message || 'Tool handoff failed' } });
           });
           return;
@@ -1989,14 +2310,14 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
         if (event.type === 'response.text') {
           const text = String(event.data?.text || '').trim();
           if (!text) return;
-          updateCallSession(session.id, { lastAssistantText: text, state: event.data?.done ? 'speaking' : 'thinking' });
-          broadcast({ type: 'call:response.text', data: { sessionId: session.id, text, done: !!event.data?.done } });
+          const updated = setCallSessionState(session.id, event.data?.done ? 'speaking' : 'thinking', { lastAssistantText: text });
+          broadcast({ type: 'call:response.text', data: { sessionId: session.id, text, done: !!event.data?.done, state: updated?.state || (event.data?.done ? 'speaking' : 'thinking') } });
           return;
         }
         if (event.type === 'response.audio') {
           const pcm16Base64 = String(event.data?.pcm16Base64 || '');
           const mimeType = String(event.data?.mimeType || 'audio/pcm;rate=24000');
-          updateCallSession(session.id, { state: 'speaking' });
+          const updated = setCallSessionState(session.id, 'speaking');
           broadcast({
             type: 'call:response.audio',
             data: {
@@ -2004,6 +2325,7 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
               pcm16Base64,
               mimeType,
               done: !!event.data?.done,
+              state: updated?.state || 'speaking',
             },
           });
           broadcast({ type: 'call:debug', data: { sessionId: session.id, message: `Gemini audio chunk ${pcm16Base64.length}b ${mimeType}` } });
@@ -2018,6 +2340,7 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
         }
       },
       onError: (error) => {
+        setCallSessionState(session.id, 'error', { lastAssistantText: error.message || 'Gemini live error' });
         broadcast({ type: 'call:error', data: { sessionId: session.id, message: error.message || 'Gemini live error' } });
       },
     });
@@ -2025,7 +2348,7 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
     await gemini.connect();
     liveGeminiSessions.set(session.id, gemini);
 
-    const ready = updateCallSession(session.id, { state: 'ready' }) || session;
+    const ready = setCallSessionState(session.id, 'ready', {}, { broadcastState: false }) || session;
     broadcast({ type: 'call:session.started', data: ready });
     res.json({ ok: true, session: ready, runtime: { model: runtime.model, thinkingLevel: runtime.thinkingLevel } });
   } catch (err) {
@@ -2086,6 +2409,11 @@ app.post(`${basePath}/api/call/:id/screen`, async (req, res) => {
     const mimeType = String(req.body?.mimeType || 'image/jpeg').trim();
     if (!jpegBase64) return res.status(400).json({ ok: false, error: 'Missing jpegBase64' });
     live.sendVideoFrame({ imageBase64: jpegBase64, mimeType });
+    const current = getCallSession(sessionId);
+    const updated = updateCallSession(sessionId, { screenShareActive: true });
+    if (!current?.screenShareActive) {
+      broadcast({ type: 'call:screen.enabled', data: { sessionId, session: updated } });
+    }
     broadcast({ type: 'call:debug', data: { sessionId, message: `Screen frame uplink ${jpegBase64.length}b ${mimeType}` } });
     return res.json({ ok: true });
   } catch (err) {
@@ -2119,15 +2447,21 @@ app.post(`${basePath}/api/call/:id/event`, async (req, res) => {
       broadcast({ type: 'call:transcript.final', data: { sessionId, text, state: updated?.state || 'thinking' } });
 
       if (looksComplexRequest(text)) {
+        const title = text.slice(0, 80) || 'Background task';
+        const summary = "That needs Astra. Routing it through OpenClaw.";
+        const started = setCallSessionState(sessionId, 'handing_off', { handoffTitle: title, handoffTaskId: '' });
+        broadcastCallHandoff('call:handoff.started', sessionId, { title, summary, agent: session.agent, session: started });
         const task = await createLiveTask({
-          title: text.slice(0, 80) || 'Background task',
-          summary: "I'm working on that in the background.",
+          title,
+          summary,
           prompt: text,
           agent: session.agent,
         });
+        const linked = setCallSessionState(sessionId, 'task_running', { handoffTitle: title, handoffTaskId: task.id });
+        broadcastCallHandoff('call:handoff.task_created', sessionId, { taskId: task.id, task, session: linked });
         broadcast({ type: 'live_task:update', data: task });
         runLiveTask(task, { broadcast, roster });
-        const spoken = "I'm working on that in the background.";
+        const spoken = summary;
         const after = updateCallSession(sessionId, { lastAssistantText: spoken, state: 'speaking' });
         broadcast({ type: 'call:response.text', data: { sessionId, text: spoken, taskId: task.id, state: after?.state || 'speaking' } });
         return res.json({ ok: true, route: 'openclaw-task', taskId: task.id, spoken, session: after });
@@ -2141,7 +2475,24 @@ app.post(`${basePath}/api/call/:id/event`, async (req, res) => {
         return res.json({ ok: false, route: 'gemini-live-missing', spoken, session: after });
       }
 
-      live.sendTextTurn(text);
+      const runtime = await loadGeminiRuntimeConfig();
+      const turnMemoryStore = runtime.memoryEnabled !== false ? await loadFairyMemory() : { entries: [] };
+      const relevantMemory = buildFairyMemoryContext({
+        enabled: runtime.memoryEnabled !== false,
+        memoryNotes: runtime.memoryNotes || '',
+        store: turnMemoryStore,
+        query: text,
+        scope: session.agent || 'general',
+        limit: 6,
+      });
+      const enrichedText = relevantMemory
+        ? `[Local memory context — do not quote verbatim unless useful]
+${relevantMemory}
+
+[Operator request]
+${text}`
+        : text;
+      live.sendTextTurn(enrichedText);
       const after = updateCallSession(sessionId, { state: 'thinking' });
       return res.json({ ok: true, route: 'gemini-live', session: after });
     }
@@ -2150,6 +2501,66 @@ app.post(`${basePath}/api/call/:id/event`, async (req, res) => {
       clearLiveWatchdog(sessionId);
       const updated = updateCallSession(sessionId, { state: 'ready', currentTurnAudioChunks: 0 });
       broadcast({ type: 'call:session.state', data: { sessionId, state: updated?.state || 'ready' } });
+      return res.json({ ok: true, session: updated });
+    }
+
+    if (eventType === 'assistant.interrupted') {
+      clearLiveWatchdog(sessionId);
+      const reason = String(req.body?.reason || 'user_speaking').trim() || 'user_speaking';
+      const updated = updateCallSession(sessionId, { state: 'listening', currentTurnAudioChunks: 0, partialTranscript: '' });
+      broadcast({ type: 'call:assistant.interrupted', data: { sessionId, reason, state: updated?.state || 'listening' } });
+      return res.json({ ok: true, session: updated });
+    }
+
+    if (eventType === 'screen.started') {
+      const updated = updateCallSession(sessionId, { screenShareActive: true });
+      const live = liveGeminiSessions.get(sessionId);
+      if (live) {
+        try {
+          live.sendTextTurn('Screen sharing is now active. Use incoming screen frames as visual context. If Epic asks about the screen, answer based on what you can see. If he asks for changes or actions, hand off to OpenClaw.');
+        } catch (err) {
+          broadcast({ type: 'call:error', data: { sessionId, message: err.message || 'Could not send screen context to Gemini' } });
+        }
+      }
+      broadcast({ type: 'call:screen.enabled', data: { sessionId, session: updated } });
+      return res.json({ ok: true, session: updated });
+    }
+
+    if (eventType === 'screen.stopped') {
+      const updated = updateCallSession(sessionId, { screenShareActive: false });
+      const live = liveGeminiSessions.get(sessionId);
+      if (live) {
+        try {
+          live.sendTextTurn('Screen sharing stopped. Do not claim current visual awareness unless new screen frames arrive.');
+        } catch {}
+      }
+      broadcast({ type: 'call:screen.disabled', data: { sessionId, session: updated } });
+      return res.json({ ok: true, session: updated });
+    }
+
+    if (eventType === 'camera.started') {
+      const updated = updateCallSession(sessionId, { cameraShareActive: true });
+      const live = liveGeminiSessions.get(sessionId);
+      if (live) {
+        try {
+          live.sendTextTurn('Camera sharing is now active. Use incoming camera frames as visual context for what Epic is showing you. If Epic asks what you can see, answer from the camera frames. If he asks for actions, hand off to OpenClaw.');
+        } catch (err) {
+          broadcast({ type: 'call:error', data: { sessionId, message: err.message || 'Could not send camera context to Gemini' } });
+        }
+      }
+      broadcast({ type: 'call:camera.enabled', data: { sessionId, session: updated } });
+      return res.json({ ok: true, session: updated });
+    }
+
+    if (eventType === 'camera.stopped') {
+      const updated = updateCallSession(sessionId, { cameraShareActive: false });
+      const live = liveGeminiSessions.get(sessionId);
+      if (live) {
+        try {
+          live.sendTextTurn('Camera sharing stopped. Do not claim current camera visibility unless new camera frames arrive.');
+        } catch {}
+      }
+      broadcast({ type: 'call:camera.disabled', data: { sessionId, session: updated } });
       return res.json({ ok: true, session: updated });
     }
 
@@ -2227,6 +2638,53 @@ app.post(`${basePath}/api/live/route`, async (req, res) => {
 
 app.get(`${basePath}/api/memory/search`, async (req, res) => {
   res.json({ ok: true, results: [], available: false, reason: 'memory-provider-unavailable-or-not-yet-wired' });
+});
+
+app.get(`${basePath}/api/v1/fairy/config`, async (req, res) => {
+  const config = await loadGeminiRuntimeConfig();
+  res.json({
+    ok: true,
+    fairy: {
+      hasApiKey: config.hasApiKey,
+      model: config.model,
+      responseModalities: config.responseModalities,
+      thinkingLevel: config.thinkingLevel,
+      voiceName: config.voiceName || FAIRY_LIVE_VOICE_NAME,
+      personaName: config.personaName || 'Fairy',
+      personalityPrompt: config.personalityPrompt || '',
+      memoryEnabled: config.memoryEnabled ?? true,
+      memoryNotes: config.memoryNotes || '',
+      availableVoiceNames: GEMINI_LIVE_VOICE_OPTIONS,
+      source: config.source,
+      transport: 'server-websocket',
+    },
+  });
+});
+
+app.get(`${basePath}/api/v1/fairy/memory`, async (req, res) => {
+  const store = await loadFairyMemory();
+  const scope = String(req.query?.scope || 'all').trim().toLowerCase();
+  const query = String(req.query?.q || '').trim();
+  let entries = Array.isArray(store.entries) ? [...store.entries] : [];
+  if (scope && scope !== 'all') entries = entries.filter((entry) => String(entry.scope || 'general') === scope);
+  if (query) {
+    entries = selectRelevantFairyMemory({ store: { entries }, query, scope: scope === 'all' ? 'general' : scope, limit: 40 });
+  }
+  entries.sort((a, b) => (b.pinned === true) - (a.pinned === true) || Date.parse(b.updatedAt || b.createdAt || 0) - Date.parse(a.updatedAt || a.createdAt || 0));
+  res.json({ ok: true, entries, count: entries.length });
+});
+
+app.get(`${basePath}/api/v1/fairy/sessions`, async (req, res) => {
+  const sessions = listCallSessions().filter((session) => String(session?.persona || '') === 'fairy');
+  res.json({ ok: true, sessions });
+});
+
+app.get(`${basePath}/api/v1/fairy/sessions/:id`, async (req, res) => {
+  const session = getCallSession(String(req.params.id || ''));
+  if (!session || String(session.persona || '') !== 'fairy') {
+    return res.status(404).json({ ok: false, error: 'Fairy session not found' });
+  }
+  res.json({ ok: true, session });
 });
 
 app.get(`${basePath}/api/v1/sessions`, async (req, res) => {
@@ -2480,9 +2938,11 @@ app.get(`${basePath}/api/chat/history/:agent`, async (req, res) => {
 app.get(`${basePath}/api/chat/sessions`, async (req, res) => {
   try {
     const agent = String(req.query?.agent || '').trim();
-    const limit = Number(req.query?.limit || 20);
-    const sessions = await listApiSessions({ agent, limit });
-    res.json({ ok: true, sessions });
+    const mode = String(req.query?.mode || '').trim();
+    const limit = Math.max(1, Number(req.query?.limit || 20) || 20);
+    let sessions = await listApiSessions({ agent, limit: Math.max(limit, 100) });
+    if (mode) sessions = sessions.filter((item) => String(item.mode || 'agent') === mode);
+    res.json({ ok: true, sessions: sessions.slice(0, limit) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -2492,11 +2952,13 @@ app.post(`${basePath}/api/chat/sessions`, async (req, res) => {
   try {
     const agent = String(req.body?.agent || '').trim();
     const title = String(req.body?.title || '').trim();
+    const mode = String(req.body?.mode || 'agent').trim() === 'roleplay' ? 'roleplay' : 'agent';
+    const model = String(req.body?.model || '').trim();
     const metadata = req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {};
     if (!agent) return res.status(400).json({ ok: false, error: 'agent is required' });
     const exists = roster.agents.some((item) => item.id === agent);
     if (!exists) return res.status(404).json({ ok: false, error: 'Agent not found' });
-    const session = await createApiSession({ agent, title, metadata });
+    const session = await createApiSession({ agent, title, metadata, mode, model });
     res.json({ ok: true, session: getApiSessionMeta(session) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -2520,6 +2982,8 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
     const incomingText = req.body?.message ?? req.body?.text;
     const userText = String(incomingText || '').trim();
     const requestedAgent = String(req.body?.agent || '').trim();
+    const requestedMode = String(req.body?.mode || 'agent').trim() === 'roleplay' ? 'roleplay' : 'agent';
+    const requestedModel = String(req.body?.model || '').trim();
     const existingSessionId = String(req.body?.sessionId || '').trim();
     const title = String(req.body?.title || '').trim();
     const fileIds = Array.isArray(req.body?.fileIds) ? req.body.fileIds : [];
@@ -2534,7 +2998,13 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
       const target = requestedAgent || roster.primaryAgentId || 'main';
       const exists = roster.agents.some((item) => item.id === target);
       if (!exists) return res.status(404).json({ error: 'Agent not found' });
-      session = await createApiSession({ agent: target, title, metadata: req.body?.metadata || {} });
+      session = await createApiSession({
+        agent: target,
+        title,
+        metadata: req.body?.metadata || {},
+        mode: requestedMode,
+        model: requestedMode === 'roleplay' ? requestedModel : '',
+      });
     }
 
     const attachedFiles = await resolveChatFiles(fileIds);
@@ -2543,32 +3013,47 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
 
     const userAppend = await appendApiSessionMessage(session.id, { role: 'user', text: userText, meta: { files: attachmentPayload } });
     session = userAppend.session;
+    const sessionMode = String(session.mode || 'agent') === 'roleplay' ? 'roleplay' : 'agent';
 
     broadcast({
       type: 'agent:thinking',
       data: {
         agent: session.agent,
-        status: 'Processing...',
+        status: sessionMode === 'roleplay' ? 'Roleplay mode...' : 'Processing...',
         source: 'direct-chat',
         chat: true,
         sessionId: session.id,
         fileIds: attachedFiles.map((file) => file.id),
+        mode: sessionMode,
+        model: session.model || '',
       },
     });
 
-    const result = await runApiChatTurn({ session, latestMessage: userText, attachmentContext });
-    const assistantMeta = { files: [] };
+    const result = sessionMode === 'roleplay'
+      ? await runRoleplayChatTurn({ session, latestMessage: userText, attachmentContext, model: session.model || requestedModel })
+      : await runApiChatTurn({ session, latestMessage: userText, attachmentContext });
+    const assistantMeta = { files: [], mode: sessionMode, model: result.model || session.model || '' };
     const assistantAppend = await appendApiSessionMessage(session.id, { role: 'assistant', text: result.text, meta: assistantMeta });
 
     broadcast({
       type: 'agent:responding',
-      data: { agent: session.agent, message: result.text, source: 'direct-chat', chat: true, sessionId: session.id },
+      data: {
+        agent: session.agent,
+        message: result.text,
+        source: 'direct-chat',
+        chat: true,
+        sessionId: session.id,
+        mode: sessionMode,
+        model: result.model || session.model || '',
+      },
     });
 
     res.json({
       ok: true,
       session: getApiSessionMeta(assistantAppend.session),
       agent: session.agent,
+      mode: sessionMode,
+      model: result.model || session.model || '',
       text: userText,
       fileIds: attachedFiles.map((file) => file.id),
       message: userAppend.message,

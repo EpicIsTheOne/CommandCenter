@@ -3,7 +3,7 @@
   "info": {
     "title": "CommandCenter API",
     "version": "1.0.0",
-    "description": "API for agent lookup, session-based chat, optional SSE streaming, optional audio responses using each agent's configured CommandCenter voice, file attachments via reusable chat library IDs, session search, and voice assignment updates. Use Authorization: Bearer YOUR_COMMANDCENTER_API_KEY in examples."
+    "description": "API for agent lookup, session-based chat, optional SSE streaming, optional audio responses using each agent's configured CommandCenter voice, file attachments via reusable chat library IDs, session search, and voice assignment updates, and Fairy live config/session/memory inspection. Use Authorization: Bearer YOUR_COMMANDCENTER_API_KEY in examples."
   },
   "servers": [
     {
@@ -36,7 +36,12 @@
           "ok",
           "error",
           "code"
-        ]
+        ],
+        "example": {
+          "ok": false,
+          "error": "Unauthorized",
+          "code": "UNAUTHORIZED"
+        }
       },
       "SessionMeta": {
         "type": "object",
@@ -150,6 +155,200 @@
           "name",
           "mimeType"
         ]
+      },
+      "FairyConfig": {
+        "type": "object",
+        "properties": {
+          "hasApiKey": {
+            "type": "boolean"
+          },
+          "model": {
+            "type": "string"
+          },
+          "responseModalities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "thinkingLevel": {
+            "type": "string"
+          },
+          "voiceName": {
+            "type": "string"
+          },
+          "personaName": {
+            "type": "string"
+          },
+          "personalityPrompt": {
+            "type": "string"
+          },
+          "memoryEnabled": {
+            "type": "boolean"
+          },
+          "memoryNotes": {
+            "type": "string"
+          },
+          "availableVoiceNames": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "source": {
+            "type": "string"
+          },
+          "transport": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "hasApiKey",
+          "model",
+          "responseModalities",
+          "thinkingLevel",
+          "voiceName",
+          "personaName",
+          "memoryEnabled",
+          "availableVoiceNames",
+          "transport"
+        ],
+        "example": {
+          "hasApiKey": true,
+          "model": "gemini-3.1-flash-live-preview",
+          "responseModalities": [
+            "AUDIO"
+          ],
+          "thinkingLevel": "low",
+          "voiceName": "Sulafat",
+          "personaName": "Fairy",
+          "personalityPrompt": "Playful, observant, useful first.",
+          "memoryEnabled": true,
+          "memoryNotes": "Epic prefers concise UI-first answers.",
+          "availableVoiceNames": [
+            "Sulafat",
+            "Aoede",
+            "Kore"
+          ],
+          "source": "settings-file",
+          "transport": "server-websocket"
+        }
+      },
+      "FairyMemoryEntry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "scope": {
+            "type": "string",
+            "example": "general"
+          },
+          "pinned": {
+            "type": "boolean"
+          },
+          "source": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "text",
+          "tags",
+          "scope",
+          "pinned",
+          "source",
+          "createdAt",
+          "updatedAt"
+        ],
+        "example": {
+          "id": "fm_123",
+          "text": "Epic prefers UI-first iteration before backend cleanup.",
+          "tags": [
+            "preference",
+            "ui"
+          ],
+          "scope": "general",
+          "pinned": true,
+          "source": "fairy-live",
+          "createdAt": "2026-05-17T15:40:00.000Z",
+          "updatedAt": "2026-05-17T15:40:00.000Z"
+        }
+      },
+      "FairySession": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          },
+          "persona": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "starting",
+              "ready",
+              "listening",
+              "thinking",
+              "speaking",
+              "task_running",
+              "ended",
+              "error"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "lastUserText": {
+            "type": "string"
+          },
+          "lastAssistantText": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "example": {
+          "id": "call_abc123",
+          "agent": "orchestrator",
+          "mode": "gemini-live",
+          "persona": "fairy",
+          "state": "ready",
+          "createdAt": "2026-05-17T15:42:00.000Z",
+          "updatedAt": "2026-05-17T15:42:10.000Z",
+          "lastUserText": "What voice are you using?",
+          "lastAssistantText": "Sulafat right now. Dramatic, but employable."
+        }
       }
     }
   },
@@ -706,6 +905,283 @@
         "responses": {
           "200": {
             "description": "Voice list or Fish search results"
+          }
+        }
+      }
+    },
+    "/fairy/config": {
+      "get": {
+        "summary": "Get Fairy live runtime config",
+        "responses": {
+          "200": {
+            "description": "Fairy runtime config",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "fairy": {
+                      "$ref": "#/components/schemas/FairyConfig"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "fairy"
+                  ],
+                  "example": {
+                    "ok": true,
+                    "fairy": {
+                      "hasApiKey": true,
+                      "model": "gemini-3.1-flash-live-preview",
+                      "responseModalities": [
+                        "AUDIO"
+                      ],
+                      "thinkingLevel": "low",
+                      "voiceName": "Sulafat",
+                      "personaName": "Fairy",
+                      "personalityPrompt": "Playful, observant, useful first.",
+                      "memoryEnabled": true,
+                      "memoryNotes": "Epic prefers concise UI-first answers.",
+                      "availableVoiceNames": [
+                        "Sulafat",
+                        "Aoede",
+                        "Kore"
+                      ],
+                      "source": "settings-file",
+                      "transport": "server-websocket"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/fairy/memory": {
+      "get": {
+        "summary": "List Fairy memory entries",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "all"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fairy memory entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "entries": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/FairyMemoryEntry"
+                      }
+                    },
+                    "count": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "entries",
+                    "count"
+                  ],
+                  "example": {
+                    "ok": true,
+                    "entries": [
+                      {
+                        "id": "fm_123",
+                        "text": "Epic prefers UI-first iteration before backend cleanup.",
+                        "tags": [
+                          "preference",
+                          "ui"
+                        ],
+                        "scope": "general",
+                        "pinned": true,
+                        "source": "fairy-live",
+                        "createdAt": "2026-05-17T15:40:00.000Z",
+                        "updatedAt": "2026-05-17T15:40:00.000Z"
+                      }
+                    ],
+                    "count": 1
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/fairy/sessions": {
+      "get": {
+        "summary": "List Fairy call sessions",
+        "responses": {
+          "200": {
+            "description": "Fairy sessions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "sessions": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/FairySession"
+                      }
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "sessions"
+                  ],
+                  "example": {
+                    "ok": true,
+                    "sessions": [
+                      {
+                        "id": "call_abc123",
+                        "agent": "orchestrator",
+                        "mode": "gemini-live",
+                        "persona": "fairy",
+                        "state": "ready",
+                        "createdAt": "2026-05-17T15:42:00.000Z",
+                        "updatedAt": "2026-05-17T15:42:10.000Z",
+                        "lastUserText": "What voice are you using?",
+                        "lastAssistantText": "Sulafat right now. Dramatic, but employable."
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/fairy/sessions/{id}": {
+      "get": {
+        "summary": "Get one Fairy call session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fairy session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "session": {
+                      "$ref": "#/components/schemas/FairySession"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "session"
+                  ],
+                  "example": {
+                    "ok": true,
+                    "session": {
+                      "id": "call_abc123",
+                      "agent": "orchestrator",
+                      "mode": "gemini-live",
+                      "persona": "fairy",
+                      "state": "ready",
+                      "createdAt": "2026-05-17T15:42:00.000Z",
+                      "updatedAt": "2026-05-17T15:42:10.000Z",
+                      "lastUserText": "What voice are you using?",
+                      "lastAssistantText": "Sulafat right now. Dramatic, but employable."
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Fairy session not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }

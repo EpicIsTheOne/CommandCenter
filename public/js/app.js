@@ -3,15 +3,16 @@ import * as mascot from './mascot.js?v=20260509y';
 import * as office from './office.js?v=20260516-rooms7';
 import * as voice from './voice.js?v=20260515-voicefix2';
 import * as wake from './wake.js?v=20260320l';
-import * as directChat from './direct-chat.js?v=20260515-voicefix2';
+import * as directChat from './direct-chat.js?v=20260516-sessionfix1';
 import * as companions from './companions.js?v=20260515-voicefix2';
 import * as music from './music.js?v=20260514c';
 import * as intro from './intro.js?v=20260514b';
 import * as appearance from './appearance.js?v=20260514b';
 import * as branding from './branding.js?v=20260514b';
 import * as layoutSettings from './layout-settings.js?v=20260514b';
+import * as fairyLive from './fairy-live.js?v=20260517-fairy-pwa1';
 
-const APP_BUILD = '20260516-authmodal2';
+const APP_BUILD = '20260517-fairy-pwa1';
 console.log('[CommandCenter] app build:', APP_BUILD);
 
 let roster = { agents: [], primaryAgentId: 'main' };
@@ -37,7 +38,28 @@ const VIGNETTE_STORAGE_KEY = 'commandcenter.vignetteStrength';
 const VIGNETTE_DIRECTION_STORAGE_KEY = 'commandcenter.vignetteDirectionStrengths';
 const DEFAULT_VIGNETTE_STRENGTH = 96;
 const DEFAULT_VIGNETTE_DIRECTIONS = { top: 100, side: 100, bottom: 100 };
+let deferredPwaInstallPrompt = null;
 const BUILT_IN_WAKE_WORDS = ['Alexa','Americano','Blueberry','Bumblebee','Computer','Grapefruit','Grasshopper','Hey Google','Hey Siri','Jarvis','Okay Google','Picovoice','Porcupine','Terminator'];
+
+const FAIRY_MOOD_PRESETS = {
+  operator: 'Be crisp, tactical, observant, and efficient. Keep replies short, cool, and mission-focused. Prefer concise operator language over playful banter.',
+  sly: 'Be sly, playful, sharp, and lightly smug. Tease with precision, not noise. Sound like you already noticed the important part before Epic finished asking.',
+  seductive: 'Be smooth, low-key seductive, and cunning without becoming needy, melodramatic, or explicit. Keep the confidence controlled and dangerous, not gushy.',
+  clinical: 'Be precise, analytical, and almost unnervingly calm. Strip fluff, minimize sass, and sound like a cold systems operator with excellent taste.',
+  bratty: 'Be mischievous, smug, and a little bratty, but still competent and useful. The bite should feel entertaining, not obstructive.',
+  support: 'Be gentler, grounded, and emotionally aware while still staying direct. Reduce the bite and keep the tone reassuring but not syrupy.',
+  'mission-control': 'Be composed, elite, and command-center polished. Sound like a high-end operations intelligence coordinating systems, specialists, and live context in real time.',
+};
+
+function applyFairyMoodPreset(key = '') {
+  const preset = FAIRY_MOOD_PRESETS[String(key || '').trim()];
+  const field = document.getElementById('gemini-personality-prompt');
+  if (!preset || !field) return false;
+  field.value = preset;
+  setSettingsStatus(`Applied Fairy mood preset: ${String(key).replace(/-/g, ' ')}.`);
+  return true;
+}
+
 
 
 function escapeHtml(value) {
@@ -61,6 +83,70 @@ function setSettingsStatus(text, isError = false) {
   if (!el) return;
   el.textContent = text || '';
   el.style.color = isError ? 'var(--red)' : 'var(--text-dim)';
+}
+
+function isStandaloneDisplay() {
+  return window.matchMedia?.('(display-mode: standalone)')?.matches || window.navigator.standalone === true;
+}
+
+function updatePwaInstallUi(message = '') {
+  const button = document.getElementById('pwa-install-btn');
+  const status = document.getElementById('pwa-install-status');
+  const standalone = isStandaloneDisplay();
+  if (button) {
+    button.disabled = standalone || !deferredPwaInstallPrompt;
+    button.textContent = standalone ? 'APP INSTALLED' : 'INSTALL COMMAND CENTER';
+  }
+  if (status) {
+    if (standalone) {
+      status.textContent = 'Command Center is already running as an installed app.';
+    } else if (message) {
+      status.textContent = message;
+    } else if (deferredPwaInstallPrompt) {
+      status.textContent = 'Install is available for this browser/device.';
+    } else {
+      status.textContent = 'Install prompt is not available yet. On mobile Safari, use Share → Add to Home Screen.';
+    }
+  }
+}
+
+async function installPwaFromSettings() {
+  if (isStandaloneDisplay()) {
+    updatePwaInstallUi('Command Center is already installed.');
+    return;
+  }
+  if (!deferredPwaInstallPrompt) {
+    updatePwaInstallUi('Install prompt is not available in this browser yet. Try Chrome/Edge/Android, or on iOS use Share → Add to Home Screen.');
+    return;
+  }
+  const promptEvent = deferredPwaInstallPrompt;
+  deferredPwaInstallPrompt = null;
+  updatePwaInstallUi('Opening install prompt…');
+  promptEvent.prompt();
+  const choice = await promptEvent.userChoice.catch(() => null);
+  updatePwaInstallUi(choice?.outcome === 'accepted' ? 'Install accepted. Command Center should appear as an app.' : 'Install dismissed. You can try again if the browser offers it later.');
+}
+
+function initPwaInstall() {
+  updatePwaInstallUi();
+  window.addEventListener('beforeinstallprompt', (event) => {
+    event.preventDefault();
+    deferredPwaInstallPrompt = event;
+    updatePwaInstallUi('Install is available for this browser/device.');
+  });
+  window.addEventListener('appinstalled', () => {
+    deferredPwaInstallPrompt = null;
+    updatePwaInstallUi('Command Center installed. Tiny app-shaped victory.');
+  });
+  if ('serviceWorker' in navigator) {
+    const swUrl = `${BASE || ''}/sw.js`;
+    const scope = `${BASE || ''}/`;
+    navigator.serviceWorker.register(swUrl, { scope }).catch((err) => {
+      updatePwaInstallUi(`PWA service worker registration failed: ${err.message || err}`);
+    });
+  } else {
+    updatePwaInstallUi('This browser does not support service workers, so install support is limited.');
+  }
 }
 
 function setSetupStatus(summary = '', issues = [], tone = 'ok', pillText = '') {
@@ -779,6 +865,7 @@ function isNoisyIdleEvent(type, data = {}) {
 }
 
 async function handleEvent(msg) {
+  fairyLive.handleEvent(msg);
   const { type, data } = msg;
 
   if (isNoisyIdleEvent(type, data)) {
@@ -814,6 +901,10 @@ async function handleEvent(msg) {
 
   if (type === 'voice:transcription') return;
 
+  if (type?.startsWith?.('call:') && fairyLive.isLiveCallActive?.()) {
+    voice.stopPlayback();
+  }
+
   if (type === 'agent:responding' && data?.message) {
     const agentId = data.agent || getPrimaryAgent();
     const messageText = String(data.message || '').trim();
@@ -821,6 +912,7 @@ async function handleEvent(msg) {
     const signature = `${agentId}::${speechText}`;
     const now = Date.now();
     const fromDirectChat = !!data?.chat || data?.source === 'direct-chat';
+    const suppressAgentSpeechForFairy = !!fairyLive.shouldSuppressAgentSpeech?.();
     const isReplyTagMirror = /^\s*\[\[\s*reply_to[^\]]*\]\]/i.test(messageText);
     const isDuplicateResponseEvent = !!(speechText && signature === lastResponseSignature && (now - lastResponseAt) < 12000);
     const isDuplicateSpeech = !!(speechText && signature === lastSpokenSignature && (now - lastSpokenAt) < 4000);
@@ -849,6 +941,16 @@ async function handleEvent(msg) {
     }
 
     if (!speechText) {
+      mascot.setEmotion('idle');
+      office.onTaskComplete(agentId);
+      office.setAgentState(agentId, 'idle', {});
+      rearmWakeMode();
+      return;
+    }
+
+    if (suppressAgentSpeechForFairy) {
+      terminal.log('[voice] Fairy Live owns speech; interrupting/suppressing agent voice', 'system', true);
+      voice.stopPlayback();
       mascot.setEmotion('idle');
       office.onTaskComplete(agentId);
       office.setAgentState(agentId, 'idle', {});
@@ -1195,11 +1297,10 @@ function buildWakeWordRow(agent, wakeCfg = {}) {
     <div class="agent-voice-title">${agent.label || agent.id}</div>
     <input class="wake-label-input" data-agent-id="${agent.id}" type="text" placeholder="Wake word label" value="${wakeCfg.label || agent.label || agent.id}">
     <select class="wake-builtin-select" data-agent-id="${agent.id}">
-      <option value="">Custom .ppn / none</option>
+      <option value="">No built-in override</option>
       ${BUILT_IN_WAKE_WORDS.map((word) => `<option value="${word}" ${wakeCfg.builtIn === word ? 'selected' : ''}>${word}</option>`).join('')}
     </select>
-    <input class="wake-file-input" data-agent-id="${agent.id}" type="file" accept=".ppn">
-    <div class="setting-hint">${wakeCfg.builtIn ? `Built-in wake word: ${wakeCfg.builtIn}` : wakeCfg.publicPath ? `Keyword uploaded: ${wakeCfg.publicPath.split('/').pop()}` : 'No keyword file uploaded yet.'}</div>
+    <div class="setting-hint">${wakeCfg.builtIn ? `Built-in wake word override: ${wakeCfg.builtIn}` : 'Uses spoken-name alias matching by default.'}</div>
   `;
   return wrapper;
 }
@@ -1518,6 +1619,221 @@ async function importCompanionZip() {
   }
 }
 
+function populateGeminiSettingsForm(geminiSettings = {}) {
+  const keyInput = document.getElementById('gemini-api-key');
+  const keyHint = document.getElementById('saved-gemini-key-hint');
+  const personaNameInput = document.getElementById('gemini-persona-name');
+  const personalityPromptInput = document.getElementById('gemini-personality-prompt');
+  const memoryEnabledInput = document.getElementById('gemini-memory-enabled');
+  const memoryNotesInput = document.getElementById('gemini-memory-notes');
+  const modelInput = document.getElementById('gemini-live-model');
+  const modalitiesSelect = document.getElementById('gemini-response-modalities');
+  const thinkingSelect = document.getElementById('gemini-thinking-level');
+  const liveVoiceSelect = document.getElementById('gemini-live-voice');
+  const liveVoiceHint = document.getElementById('gemini-live-voice-hint');
+  const sourceHint = document.getElementById('gemini-source-hint');
+  const moodPresetSelect = document.getElementById('gemini-mood-preset');
+  if (keyInput) keyInput.value = '';
+  if (keyHint) {
+    keyHint.textContent = geminiSettings.hasApiKey
+      ? `Saved Gemini key: ${geminiSettings.apiKeyMasked || 'configured'}`
+      : 'No saved Gemini key yet.';
+  }
+  if (personaNameInput) personaNameInput.value = geminiSettings.personaName || 'Fairy';
+  if (personalityPromptInput) personalityPromptInput.value = geminiSettings.personalityPrompt || '';
+  if (memoryEnabledInput) memoryEnabledInput.checked = geminiSettings.memoryEnabled !== false;
+  if (memoryNotesInput) memoryNotesInput.value = geminiSettings.memoryNotes || '';
+  if (moodPresetSelect) moodPresetSelect.value = '';
+  if (modelInput) modelInput.value = geminiSettings.model || 'gemini-3.1-flash-live-preview';
+  if (modalitiesSelect) {
+    const modalities = Array.isArray(geminiSettings.responseModalities) ? geminiSettings.responseModalities.join(',') : String(geminiSettings.responseModalities || 'AUDIO');
+    modalitiesSelect.value = ['AUDIO', 'TEXT', 'AUDIO,TEXT'].includes(modalities) ? modalities : 'AUDIO';
+  }
+  if (thinkingSelect) thinkingSelect.value = geminiSettings.thinkingLevel || 'minimal';
+  if (liveVoiceSelect) {
+    const options = Array.isArray(geminiSettings.availableVoiceNames) ? geminiSettings.availableVoiceNames : [];
+    if (options.length) {
+      liveVoiceSelect.innerHTML = options.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('');
+    }
+    liveVoiceSelect.value = geminiSettings.voiceName || geminiSettings.liveVoiceName || 'Sulafat';
+  }
+  if (liveVoiceHint) liveVoiceHint.textContent = `Current live voice: ${geminiSettings.voiceName || geminiSettings.liveVoiceName || 'Sulafat'}.`;
+  if (sourceHint) {
+    const source = geminiSettings.source || 'command-center-local';
+    sourceHint.textContent = geminiSettings.usingEnvKey
+      ? `Source: ${source}. Saving a key here will override the environment key for local runtime.`
+      : `Source: ${source}. Stored locally on this Command Center server.`;
+  }
+}
+
+
+async function refreshFairyMemoryList() {
+  const el = document.getElementById('fairy-memory-list');
+  if (!el) return;
+  const q = document.getElementById('fairy-memory-search')?.value?.trim() || '';
+  const scope = document.getElementById('fairy-memory-scope-filter')?.value?.trim() || 'all';
+  el.textContent = 'Loading Fairy memory…';
+  try {
+    const query = new URLSearchParams();
+    if (q) query.set('q', q);
+    if (scope && scope !== 'all') query.set('scope', scope);
+    const data = await fetchJson(`${BASE}/api/fairy/memory${query.toString() ? `?${query.toString()}` : ''}`);
+    const entries = Array.isArray(data.entries) ? data.entries : [];
+    if (!entries.length) {
+      el.textContent = 'No stored Fairy memory matched that filter.';
+      return;
+    }
+    el.innerHTML = entries.map((entry) => {
+      const tags = Array.isArray(entry.tags) && entry.tags.length ? `<div class="setting-hint">Tags: ${escapeHtml(entry.tags.join(', '))}</div>` : '';
+      const scopeText = escapeHtml(entry.scope || 'general');
+      const pin = entry.pinned ? ' · pinned' : '';
+      const date = escapeHtml(String(entry.updatedAt || entry.createdAt || '').replace('T', ' ').slice(0, 16));
+      return `<div class="setting-group nested-setting-group" data-memory-id="${escapeHtml(entry.id)}">
+        <div><strong>${scopeText}</strong>${pin} <span class="setting-hint">${date}</span></div>
+        <div>${escapeHtml(entry.text || '')}</div>
+        ${tags}
+        <div class="setting-row" style="gap:8px; flex-wrap:wrap; margin-top:8px;">
+          <button class="secondary-button fairy-memory-pin-btn" type="button" data-memory-id="${escapeHtml(entry.id)}" data-pinned="${entry.pinned ? '1' : '0'}">${entry.pinned ? 'UNPIN' : 'PIN'}</button>
+          <button class="secondary-button fairy-memory-delete-btn" type="button" data-memory-id="${escapeHtml(entry.id)}">FORGET</button>
+        </div>
+      </div>`;
+    }).join('');
+    el.querySelectorAll('.fairy-memory-delete-btn').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.memoryId || '';
+        if (!id) return;
+        btn.disabled = true;
+        try {
+          await fetchJson(`${BASE}/api/fairy/memory/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          setFairyTestStatus('Memory entry forgotten.');
+          await refreshFairyMemoryList();
+        } catch (err) {
+          btn.disabled = false;
+          setFairyTestStatus(err.message || 'Could not forget memory entry.', true);
+        }
+      });
+    });
+    el.querySelectorAll('.fairy-memory-pin-btn').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.memoryId || '';
+        const pinned = btn.dataset.pinned !== '1';
+        if (!id) return;
+        btn.disabled = true;
+        try {
+          await fetchJson(`${BASE}/api/fairy/memory/${encodeURIComponent(id)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pinned }),
+          });
+          setFairyTestStatus(`Memory entry ${pinned ? 'pinned' : 'unpinned'}.`);
+          await refreshFairyMemoryList();
+        } catch (err) {
+          btn.disabled = false;
+          setFairyTestStatus(err.message || 'Could not update memory entry.', true);
+        }
+      });
+    });
+  } catch (err) {
+    el.textContent = err.message || 'Could not load Fairy memory.';
+  }
+}
+
+function setFairyTestStatus(text, isError = false) {
+  const el = document.getElementById('fairy-test-status');
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.color = isError ? 'var(--red)' : 'var(--text-dim)';
+}
+
+function renderFairySettingsDiagnostics(config = {}, sessions = []) {
+  const el = document.getElementById('fairy-diagnostics-settings');
+  if (!el) return;
+  const activeSessions = (sessions || []).filter((session) => session.active).length;
+  el.innerHTML = `
+    <div><strong>Gemini key:</strong> ${config.hasApiKey ? 'configured' : 'missing'}</div>
+    <div><strong>Name:</strong> ${escapeHtml(config.personaName || 'Fairy')}</div>
+    <div><strong>Model:</strong> ${escapeHtml(config.model || 'unknown')}</div>
+    <div><strong>Source:</strong> ${escapeHtml(config.source || 'unknown')}</div>
+    <div><strong>Live voice:</strong> ${escapeHtml(config.voiceName || config.liveVoiceName || 'Sulafat')}</div>
+    <div><strong>Memory:</strong> ${config.memoryEnabled === false ? 'disabled' : 'enabled'}</div>
+    <div><strong>Transport:</strong> ${escapeHtml(config.transport || 'unknown')}</div>
+    <div><strong>Active live sessions:</strong> ${activeSessions}</div>
+  `;
+}
+
+async function refreshFairyDiagnostics() {
+  try {
+    const [configData, sessionsData] = await Promise.all([
+      fetchJson(`${BASE}/api/live/config`),
+      fetchJson(`${BASE}/api/call/sessions`),
+    ]);
+    renderFairySettingsDiagnostics(configData.config || {}, sessionsData.sessions || []);
+    refreshFairyMemoryList().catch(() => {});
+  } catch (err) {
+    renderFairySettingsDiagnostics({ hasApiKey: false, model: 'unavailable', source: err.message || 'error', transport: 'error' }, []);
+  }
+}
+
+async function saveGeminiSettingsOnly() {
+  const apiKey = document.getElementById('gemini-api-key')?.value?.trim() || '';
+  const personaName = document.getElementById('gemini-persona-name')?.value?.trim() || 'Fairy';
+  const personalityPrompt = document.getElementById('gemini-personality-prompt')?.value || '';
+  const memoryEnabled = document.getElementById('gemini-memory-enabled')?.checked !== false;
+  const memoryNotes = document.getElementById('gemini-memory-notes')?.value || '';
+  const model = document.getElementById('gemini-live-model')?.value?.trim() || 'gemini-3.1-flash-live-preview';
+  const responseModalities = (document.getElementById('gemini-response-modalities')?.value || 'AUDIO').split(',').map((item) => item.trim()).filter(Boolean);
+  const thinkingLevel = document.getElementById('gemini-thinking-level')?.value?.trim() || 'minimal';
+  const voiceName = document.getElementById('gemini-live-voice')?.value?.trim() || 'Sulafat';
+  setFairyTestStatus('Saving Fairy/Gemini settings…');
+  try {
+    const data = await fetchJson(`${BASE}/api/settings/gemini`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey, personaName, personalityPrompt, memoryEnabled, memoryNotes, model, responseModalities, thinkingLevel, voiceName }),
+    });
+    populateGeminiSettingsForm(data.settings || {});
+    await fairyLive.refreshConfig?.();
+    await refreshFairyDiagnostics();
+    await refreshFairyMemoryList();
+    setFairyTestStatus('Fairy/Gemini settings saved. Changes apply to the next live call.');
+    terminal.log('[fairy] Fairy/Gemini settings saved', 'info', true);
+  } catch (err) {
+    setFairyTestStatus(err.message || 'Could not save Fairy settings.', true);
+  }
+}
+
+async function testFairyLiveSettings() {
+  setFairyTestStatus('Testing Fairy Live config and session startup…');
+  let sessionId = '';
+  try {
+    const configData = await fetchJson(`${BASE}/api/live/config`);
+    if (!configData.config?.hasApiKey) throw new Error('Gemini API key missing. Save it in Fairy / Gemini Live first.');
+    const start = await fetchJson(`${BASE}/api/call/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ persona: 'fairy', diagnostic: true }),
+    });
+    sessionId = start.session?.id || '';
+    if (!sessionId) throw new Error('Call started without a session id. Suspicious little gremlin.');
+    await fetchJson(`${BASE}/api/call/${encodeURIComponent(sessionId)}/event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'transcript.final', text: 'Diagnostic ping: reply with one short sentence confirming Fairy Live is online.' }),
+    });
+    setFairyTestStatus(`Fairy Live test started successfully (${sessionId}). Watch the Fairy panel for the reply.`);
+    terminal.log(`[fairy] Diagnostic live session started: ${sessionId}`, 'info', true);
+    setTimeout(() => {
+      fetchJson(`${BASE}/api/call/${encodeURIComponent(sessionId)}/end`, { method: 'POST' }).catch(() => {});
+    }, 8000);
+  } catch (err) {
+    if (sessionId) fetchJson(`${BASE}/api/call/${encodeURIComponent(sessionId)}/end`, { method: 'POST' }).catch(() => {});
+    setFairyTestStatus(err.message || 'Fairy Live test failed.', true);
+    terminal.log(`[fairy] Diagnostic failed: ${err.message || 'unknown error'}`, 'error', true);
+  } finally {
+    refreshFairyDiagnostics().catch(() => {});
+  }
+}
+
 function populateSettingsForm(voiceSettings = {}, wakeSettings = {}) {
   window.__lastVoiceSettings = voiceSettings || {};
   currentWakeSettings = wakeSettings || { wakeWords: {} };
@@ -1741,10 +2057,11 @@ async function openSettings() {
   modal.setAttribute('aria-hidden', 'false');
   setSettingsStatus('Loading settings...');
   try {
-    const [voiceData, wakeData, companionData] = await Promise.all([
+    const [voiceData, wakeData, companionData, geminiData] = await Promise.all([
       fetchJson(`${BASE}/api/settings/voice`),
       fetchJson(`${BASE}/api/settings/wake`),
       fetchJson(`${BASE}/api/settings/companions`),
+      fetchJson(`${BASE}/api/settings/gemini`),
       appearance.refresh(),
       branding.refresh(),
       layoutSettings.refresh(),
@@ -1755,6 +2072,9 @@ async function openSettings() {
     availableCompanions = companionData.items || [];
     companions.setCompanionData({ visuals: companionData.resolved || {}, items: availableCompanions });
     populateSettingsForm(voiceData.settings || {}, wakeData.settings || {});
+    populateGeminiSettingsForm(geminiData.settings || {});
+    await refreshFairyDiagnostics();
+    await refreshFairyMemoryList();
     renderWorkspaceRoomEditor();
     setSetupTestResult('No setup test run yet.', [], 'ok');
     setSettingsStatus('Settings loaded.');
@@ -1860,6 +2180,15 @@ async function saveSettings() {
   const sttFishApiKey = document.getElementById('stt-fish-key')?.value?.trim() || '';
   const sttOpenAiApiKey = document.getElementById('stt-openai-key')?.value?.trim() || '';
   const sttElevenlabsApiKey = document.getElementById('stt-elevenlabs-key')?.value?.trim() || '';
+  const geminiApiKey = document.getElementById('gemini-api-key')?.value?.trim() || '';
+  const geminiPersonaName = document.getElementById('gemini-persona-name')?.value?.trim() || 'Fairy';
+  const geminiPersonalityPrompt = document.getElementById('gemini-personality-prompt')?.value || '';
+  const geminiMemoryEnabled = document.getElementById('gemini-memory-enabled')?.checked !== false;
+  const geminiMemoryNotes = document.getElementById('gemini-memory-notes')?.value || '';
+  const geminiModel = document.getElementById('gemini-live-model')?.value?.trim() || 'gemini-3.1-flash-live-preview';
+  const geminiResponseModalities = (document.getElementById('gemini-response-modalities')?.value || 'AUDIO').split(',').map((item) => item.trim()).filter(Boolean);
+  const geminiThinkingLevel = document.getElementById('gemini-thinking-level')?.value?.trim() || 'minimal';
+  const geminiVoiceName = document.getElementById('gemini-live-voice')?.value?.trim() || 'Sulafat';
   const fishPlaybackMode = document.getElementById('fish-playback-mode')?.value?.trim() || 'auto';
   const fishAutoStreamMinChars = Number(document.getElementById('fish-auto-stream-min-chars')?.value || 260);
   const fishIncludeAsteriskNarration = document.getElementById('fish-include-narration').checked;
@@ -1913,6 +2242,12 @@ async function saveSettings() {
       body: JSON.stringify({ provider, elevenlabsApiKey: apiKey, defaultVoiceId, fishAudioApiBase, fishVoiceId, fishSessionCookie, fishFormat, fishPlaybackMode, fishAutoStreamMinChars, fishIncludeAsteriskNarration, sttMode, sttApiBase, sttApiProvider, sttLanguage, sttFishApiKey, sttOpenAiApiKey, sttElevenlabsApiKey, agentVoices, elevenlabsAgentVoices, fishAgentVoices }),
     });
 
+    await fetchJson(`${BASE}/api/settings/gemini`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey: geminiApiKey, personaName: geminiPersonaName, personalityPrompt: geminiPersonalityPrompt, memoryEnabled: geminiMemoryEnabled, memoryNotes: geminiMemoryNotes, model: geminiModel, responseModalities: geminiResponseModalities, thinkingLevel: geminiThinkingLevel, voiceName: geminiVoiceName }),
+    });
+
     await fetchJson(`${BASE}/api/settings/companions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1931,36 +2266,25 @@ async function saveSettings() {
     await intro.saveSettings();
     await music.saveSettings();
 
-    const uploads = [];
-    document.querySelectorAll('.wake-file-input').forEach((input) => {
-      const file = input.files?.[0];
-      const agentId = input.dataset.agentId;
-      if (!file || !agentId) return;
-      const label = document.querySelector(`.wake-label-input[data-agent-id="${agentId}"]`)?.value?.trim() || getAgentLabel(agentId);
-      const form = new FormData();
-      form.append('agentId', agentId);
-      form.append('label', label);
-      form.append('keyword', file, file.name);
-      uploads.push(fetchJson(`${BASE}/api/settings/wake/keyword`, { method: 'POST', body: form }));
-    });
-    await Promise.all(uploads);
-
-    const [voiceData, wakeData, companionData] = await Promise.all([
+    const [voiceData, wakeData, companionData, geminiData] = await Promise.all([
       fetchJson(`${BASE}/api/settings/voice`),
       fetchJson(`${BASE}/api/settings/wake`),
       fetchJson(`${BASE}/api/settings/companions`),
+      fetchJson(`${BASE}/api/settings/gemini`),
     ]);
     currentCompanionSettings = companionData.settings || { agentVisuals: {} };
     availableCompanions = companionData.items || [];
     companions.setCompanionData({ visuals: companionData.resolved || {}, items: availableCompanions });
     populateSettingsForm(voiceData.settings || {}, wakeData.settings || {});
+    populateGeminiSettingsForm(geminiData.settings || {});
+    fairyLive.refreshConfig?.().catch(() => {});
     office.setAgentVisuals(companionData.resolved || {}, availableCompanions || []);
     directChat.setCompanionData(companionData.resolved || {}, availableCompanions || []);
     persistVignetteStrength(vignetteStrength);
     applyVignetteStrength(vignetteStrength);
     persistDirectionalVignette(directionalVignette);
     applyDirectionalVignette(directionalVignette);
-    setSettingsStatus('Settings saved. Wake mode changes apply the next time you arm it.');
+    setSettingsStatus('Settings saved. Fairy/Gemini changes apply to the next live call; wake mode changes apply next time you arm it.');
     terminal.log('[settings] Voice, companion, and wake settings updated', 'info', true);
   } catch (err) {
     setSettingsStatus(err.message, true);
@@ -2031,6 +2355,8 @@ async function main() {
   await intro.init();
   office.setAgentVisuals(currentCompanionSettings.agentVisuals ? Object.fromEntries(roster.agents.map((agent) => [agent.id, companions.getAgentVisual(agent.id)])) : {}, availableCompanions);
   directChat.init();
+  fairyLive.init();
+  initPwaInstall();
   directChat.setRoster(roster);
   directChat.setCompanionData(Object.fromEntries(roster.agents.map((agent) => [agent.id, companions.getAgentVisual(agent.id)])), availableCompanions);
 
@@ -2112,6 +2438,7 @@ async function main() {
   document.getElementById('close-settings-btn')?.addEventListener('click', closeSettings);
   document.querySelector('[data-close-settings="true"]')?.addEventListener('click', closeSettings);
   document.getElementById('save-settings-btn')?.addEventListener('click', saveSettings);
+  document.getElementById('pwa-install-btn')?.addEventListener('click', installPwaFromSettings);
   document.getElementById('change-password-btn')?.addEventListener('click', openPasswordModal);
   document.getElementById('close-password-modal-btn')?.addEventListener('click', closePasswordModal);
   document.querySelector('[data-close-password-modal="true"]')?.addEventListener('click', closePasswordModal);
@@ -2135,6 +2462,18 @@ async function main() {
     }
   });
   document.getElementById('run-setup-test-btn')?.addEventListener('click', runSetupTest);
+  document.getElementById('save-gemini-settings-btn')?.addEventListener('click', saveGeminiSettingsOnly);
+  document.getElementById('test-fairy-live-btn')?.addEventListener('click', testFairyLiveSettings);
+  document.getElementById('refresh-fairy-memory-btn')?.addEventListener('click', refreshFairyMemoryList);
+  document.getElementById('fairy-memory-search')?.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); refreshFairyMemoryList(); } });
+  document.getElementById('fairy-memory-scope-filter')?.addEventListener('change', refreshFairyMemoryList);
+  document.getElementById('gemini-mood-preset')?.addEventListener('change', (event) => {
+    applyFairyMoodPreset(event.target?.value || '');
+  });
+  window.addEventListener('fairy-live-log', (event) => {
+    const { message = '', tone = 'info' } = event.detail || {};
+    if (message) terminal.log(`[fairy] ${message}`, tone === 'error' ? 'error' : 'info', true);
+  });
   document.getElementById('refresh-voices-btn')?.addEventListener('click', refreshVoices);
 
   document.getElementById('workspace-room-prev')?.addEventListener('click', (e) => { e.stopPropagation(); goRoom(-1); });

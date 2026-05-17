@@ -1,31 +1,152 @@
-export async function loadGeminiRuntimeConfig() {
-  const missionControlUrl = String(process.env.MISSION_CONTROL_URL || 'https://your-domain.example/missioncontrol').replace(/\/$/, '');
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+
+const ROOT = process.cwd();
+const DATA_DIR = join(ROOT, 'data');
+const SETTINGS_FILE = join(DATA_DIR, 'gemini-settings.json');
+
+export const GEMINI_LIVE_VOICE_OPTIONS = [
+  'Zephyr', 'Kore', 'Orus', 'Autonoe', 'Umbriel', 'Erinome', 'Laomedeia', 'Schedar', 'Achird', 'Sadachbia',
+  'Puck', 'Fenrir', 'Aoede', 'Enceladus', 'Algieba', 'Algenib', 'Achernar', 'Gacrux', 'Zubenelgenubi', 'Sadaltager',
+  'Charon', 'Leda', 'Callirrhoe', 'Iapetus', 'Despina', 'Rasalgethi', 'Alnilam', 'Pulcherrima', 'Vindemiatrix', 'Sulafat',
+];
+
+const DEFAULT_GEMINI_SETTINGS = {
+  apiKey: '',
+  model: 'gemini-3.1-flash-live-preview',
+  responseModalities: ['AUDIO'],
+  thinkingLevel: 'minimal',
+  voiceName: 'Sulafat',
+  personaName: 'Fairy',
+  personalityPrompt: '',
+  memoryEnabled: true,
+  memoryNotes: '',
+};
+
+function normalizeModalities(value) {
+  if (Array.isArray(value)) {
+    const items = value.map((item) => String(item || '').trim().toUpperCase()).filter(Boolean);
+    return items.length ? [...new Set(items)] : ['AUDIO'];
+  }
+  const text = String(value || '').trim();
+  if (!text) return ['AUDIO'];
+  const items = text.split(/[,+\s]+/).map((item) => item.trim().toUpperCase()).filter(Boolean);
+  return items.length ? [...new Set(items)] : ['AUDIO'];
+}
+
+function normalizeThinkingLevel(value = '') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['none', 'minimal', 'low', 'medium', 'high'].includes(normalized) ? normalized : 'minimal';
+}
+
+function normalizeVoiceName(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return DEFAULT_GEMINI_SETTINGS.voiceName;
+  const matched = GEMINI_LIVE_VOICE_OPTIONS.find((item) => item.toLowerCase() == raw.toLowerCase());
+  return matched || DEFAULT_GEMINI_SETTINGS.voiceName;
+}
+
+function normalizePersonaName(value = '') {
+  const raw = String(value || '').replace(/\s+/g, ' ').trim();
+  return raw.slice(0, 80) || DEFAULT_GEMINI_SETTINGS.personaName;
+}
+
+function normalizePersonalityPrompt(value = '') {
+  return String(value || '').trim().slice(0, 8000);
+}
+
+function normalizeMemoryEnabled(value = true) {
+  if (value === false) return false;
+  if (typeof value === 'string') return !['false', '0', 'off', 'no'].includes(value.trim().toLowerCase());
+  return true;
+}
+
+function normalizeMemoryNotes(value = '') {
+  return String(value || '').trim().slice(0, 12000);
+}
+
+function normalizeGeminiSettings(input = {}) {
+  return {
+    apiKey: String(input.apiKey || '').trim(),
+    model: String(input.model || DEFAULT_GEMINI_SETTINGS.model).trim() || DEFAULT_GEMINI_SETTINGS.model,
+    responseModalities: normalizeModalities(input.responseModalities || DEFAULT_GEMINI_SETTINGS.responseModalities),
+    thinkingLevel: normalizeThinkingLevel(input.thinkingLevel || DEFAULT_GEMINI_SETTINGS.thinkingLevel),
+    voiceName: normalizeVoiceName(input.voiceName || DEFAULT_GEMINI_SETTINGS.voiceName),
+    personaName: normalizePersonaName(input.personaName || DEFAULT_GEMINI_SETTINGS.personaName),
+    personalityPrompt: normalizePersonalityPrompt(input.personalityPrompt || DEFAULT_GEMINI_SETTINGS.personalityPrompt),
+    memoryEnabled: normalizeMemoryEnabled(input.memoryEnabled ?? DEFAULT_GEMINI_SETTINGS.memoryEnabled),
+    memoryNotes: normalizeMemoryNotes(input.memoryNotes || DEFAULT_GEMINI_SETTINGS.memoryNotes),
+  };
+}
+
+export async function loadGeminiSettings() {
   try {
-    const res = await fetch(`${missionControlUrl}/api/user/gemini-key`, {
-      headers: { Accept: 'application/json' },
-      cache: 'no-store',
-    });
-    if (!res.ok) throw new Error(`Mission Control Gemini config failed (${res.status})`);
-    const json = await res.json();
+    if (!existsSync(SETTINGS_FILE)) return { ...DEFAULT_GEMINI_SETTINGS };
+    const raw = await readFile(SETTINGS_FILE, 'utf8');
+    return { ...DEFAULT_GEMINI_SETTINGS, ...normalizeGeminiSettings(JSON.parse(raw)) };
+  } catch {
+    return { ...DEFAULT_GEMINI_SETTINGS };
+  }
+}
+
+export async function saveGeminiSettings(input = {}) {
+  const settings = normalizeGeminiSettings(input);
+  await mkdir(DATA_DIR, { recursive: true });
+  await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+  return settings;
+}
+
+export async function loadGeminiRuntimeConfig() {
+  const local = await loadGeminiSettings();
+  if (local.apiKey) {
     return {
-      ok: Boolean(json?.hasApiKey),
-      hasApiKey: Boolean(json?.hasApiKey),
-      apiKey: String(json?.apiKey || ''),
-      model: String(json?.model || 'gemini-3.1-flash-live-preview'),
-      responseModalities: Array.isArray(json?.responseModalities) ? json.responseModalities : ['AUDIO'],
-      thinkingLevel: String(json?.thinkingLevel || 'minimal'),
-      source: 'mission-control',
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      hasApiKey: false,
-      apiKey: '',
-      model: 'gemini-3.1-flash-live-preview',
-      responseModalities: ['AUDIO'],
-      thinkingLevel: 'minimal',
-      source: 'mission-control',
-      error: error.message || 'Gemini config unavailable',
+      ok: true,
+      hasApiKey: true,
+      apiKey: local.apiKey,
+      model: local.model,
+      responseModalities: local.responseModalities,
+      thinkingLevel: local.thinkingLevel,
+      voiceName: local.voiceName,
+      personaName: local.personaName,
+      personalityPrompt: local.personalityPrompt,
+      memoryEnabled: local.memoryEnabled,
+      memoryNotes: local.memoryNotes,
+      source: 'command-center-local',
     };
   }
+
+  const envApiKey = String(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '').trim();
+  if (envApiKey) {
+    return {
+      ok: true,
+      hasApiKey: true,
+      apiKey: envApiKey,
+      model: String(process.env.GEMINI_LIVE_MODEL || local.model || DEFAULT_GEMINI_SETTINGS.model).trim(),
+      responseModalities: normalizeModalities(process.env.GEMINI_LIVE_RESPONSE_MODALITIES || local.responseModalities),
+      thinkingLevel: normalizeThinkingLevel(process.env.GEMINI_LIVE_THINKING_LEVEL || local.thinkingLevel),
+      voiceName: normalizeVoiceName(process.env.GEMINI_LIVE_VOICE_NAME || local.voiceName),
+      personaName: normalizePersonaName(process.env.GEMINI_LIVE_PERSONA_NAME || local.personaName),
+      personalityPrompt: normalizePersonalityPrompt(process.env.GEMINI_LIVE_PERSONALITY_PROMPT || local.personalityPrompt),
+      memoryEnabled: normalizeMemoryEnabled(process.env.GEMINI_LIVE_MEMORY_ENABLED ?? local.memoryEnabled),
+      memoryNotes: normalizeMemoryNotes(process.env.GEMINI_LIVE_MEMORY_NOTES || local.memoryNotes),
+      source: process.env.GEMINI_API_KEY ? 'env:GEMINI_API_KEY' : 'env:GOOGLE_API_KEY',
+    };
+  }
+
+  return {
+    ok: false,
+    hasApiKey: false,
+    apiKey: '',
+    model: local.model || DEFAULT_GEMINI_SETTINGS.model,
+    responseModalities: local.responseModalities || ['AUDIO'],
+    thinkingLevel: local.thinkingLevel || 'minimal',
+    voiceName: local.voiceName || DEFAULT_GEMINI_SETTINGS.voiceName,
+    personaName: local.personaName || DEFAULT_GEMINI_SETTINGS.personaName,
+    personalityPrompt: local.personalityPrompt || DEFAULT_GEMINI_SETTINGS.personalityPrompt,
+    memoryEnabled: local.memoryEnabled,
+    memoryNotes: local.memoryNotes || DEFAULT_GEMINI_SETTINGS.memoryNotes,
+    source: 'command-center-local',
+    error: 'Gemini API key is not configured in Command Center settings',
+  };
 }
