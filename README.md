@@ -1,8 +1,21 @@
 # OpenClaw Command Center
 
+_A living, self-hosted AI ops dashboard with a pixel-art office, voice I/O, real-time agent monitoring, and Raspberry Pi kiosk support._
+
 ![OpenClaw Command Center](public/docs/command-center-preview.png)
 
-A web-based AI command center with a living pixel-art office, real-time OpenClaw agent activity, voice input/output, companion avatars, wake mode, direct chat, and system monitoring. It was originally built for Raspberry Pi 5 + 7" touchscreen kiosk use, but runs anywhere Node.js can run.
+A self-hosted AI command center that turns your agent stack into a living pixel-art office you can actually operate. It’s built for people running OpenClaw at home, on a server, or on a Raspberry Pi kiosk who want one place to watch, talk to, and steer their agents in real time. Unlike a plain chat UI, Command Center makes AI ops feel alive—with voice, motion, and ambient system awareness—without giving up practical control.
+
+OpenClaw is the agent runtime this project plugs into: it handles sessions, tools, routing, and gateway events while Command Center gives that activity a live visual/voice interface you can run and monitor. In short, OpenClaw is the engine, Command Center is the cockpit—grab OpenClaw here: [OPENCLAW_REPO_OR_DOCS_LINK].
+
+## Screenshots / Demo
+
+![Command Center Screenshot 1](public/docs/screenshot-1.png)
+![Command Center Screenshot 2](public/docs/screenshot-2.png)
+
+## Theme / Inspiration
+
+The current default theme, agent names, and companion visuals are inspired by **Zenless Zone Zero** (the HoYoverse gacha game), because yes, operations should look cool. It’s purely cosmetic though—the system works with any OpenClaw agent names and any Codex pet companions you want to run.
 
 ## Quick Start
 
@@ -480,3 +493,8 @@ Current project repo:
 ```text
 https://github.com/EpicIsTheOne/CommandCenter
 ```
+
+
+## LICENSE
+
+[LICENSE_TYPE], see LICENSE file for details.
