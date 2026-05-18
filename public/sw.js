@@ -1,11 +1,11 @@
-const CACHE_NAME = 'command-center-shell-20260517-fairy-pwa1';
+const CACHE_NAME = 'command-center-shell-20260517-fairy-search1';
 const SHELL_ASSETS = [
   './',
   './index.html',
   './manifest.webmanifest',
   './favicon.svg',
-  './css/styles.css?v=20260517-fairy-pwa1',
-  './js/app.js?v=20260517-fairy-pwa1'
+  './css/styles.css?v=20260517-fairy-search1',
+  './js/app.js?v=20260517-fairy-search1'
 ];
 
 self.addEventListener('install', (event) => {

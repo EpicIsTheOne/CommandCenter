@@ -13,7 +13,7 @@
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=VT323&family=Inter:wght@400;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/styles.css?v=20260517-fairy-pwa1">
+  <link rel="stylesheet" href="css/styles.css?v=20260517-fairy-search1">
 </head>
 <body>
   <div id="command-center">
@@ -24,6 +24,10 @@
         <span id="app-brand-title" class="brand-title-inline">OpenClaw Command Center</span>
       </div>
       <canvas id="mascot-canvas"></canvas>
+      <div id="fairy-live-camera-preview-wrap" class="fairy-live-camera-preview-wrap status-camera-preview hidden" aria-label="Camera preview">
+        <video id="fairy-live-camera-preview" class="fairy-live-camera-preview" muted playsinline></video>
+        <span id="fairy-live-camera-preview-label" class="fairy-live-camera-preview-label">BACK CAM</span>
+      </div>
       <div id="mascot-label">IDLE</div>
     </div>
 
@@ -41,6 +45,7 @@
           <button id="fairy-live-mic-header-btn" class="header-button fairy-live-header-btn hidden" type="button" disabled>MIC OFF</button>
           <button id="fairy-live-screen-header-btn" class="header-button fairy-live-header-btn hidden" type="button" disabled>SCREEN OFF</button>
           <button id="fairy-live-camera-header-btn" class="header-button fairy-live-header-btn hidden" type="button" disabled>CAM OFF</button>
+          <button id="fairy-live-camera-facing-header-btn" class="header-button fairy-live-header-btn hidden" type="button" disabled>BACK CAM</button>
           <button id="settings-btn" class="header-button" type="button">SETTINGS</button>
         </div>
       </div>
@@ -91,10 +96,6 @@
         <button id="fairy-live-camera" class="secondary-button fairy-live-camera" type="button" disabled>START CAMERA</button>
         <button id="fairy-live-camera-facing" class="secondary-button fairy-live-camera-facing" type="button" disabled>BACK CAM</button>
         <span id="fairy-live-camera-status" class="fairy-live-audio-status">Camera off.</span>
-      </div>
-      <div id="fairy-live-camera-preview-wrap" class="fairy-live-camera-preview-wrap hidden" aria-label="Camera preview">
-        <video id="fairy-live-camera-preview" class="fairy-live-camera-preview" muted playsinline></video>
-        <span id="fairy-live-camera-preview-label" class="fairy-live-camera-preview-label">BACK CAMERA PREVIEW</span>
       </div>
       <div id="fairy-live-diagnostics" class="fairy-live-diagnostics"></div>
       <div class="fairy-live-text-row">
@@ -444,8 +445,14 @@
             </div>
 
             <div class="setting-group nested-setting-group">
+              <label for="gemini-operator-name">Your name</label>
+              <input id="gemini-operator-name" type="text" autocomplete="off" placeholder="Epic" maxlength="80">
+              <div class="setting-hint">What Fairy should call you during live calls instead of generic nonsense like “user.”</div>
+            </div>
+
+            <div class="setting-group nested-setting-group">
               <label for="gemini-personality-prompt">Personality instructions</label>
-              <textarea id="gemini-personality-prompt" rows="8" placeholder="Playful-sassy, observant, confident, concise, slightly smug, useful first..."></textarea>
+              <textarea id="gemini-personality-prompt" class="setting-textarea setting-textarea-lg" rows="8" placeholder="Playful-sassy, observant, confident, concise, slightly smug, useful first..."></textarea>
               <div class="setting-hint">Extra live-call personality guidance layered on top of the base Fairy behavior for this Command Center instance.</div>
             </div>
 
@@ -474,7 +481,7 @@
 
             <div class="setting-group nested-setting-group">
               <label for="gemini-memory-notes">Pinned memory / operator context</label>
-              <textarea id="gemini-memory-notes" rows="6" placeholder="Durable preferences or context this live persona should remember on this Command Center instance..."></textarea>
+              <textarea id="gemini-memory-notes" class="setting-textarea setting-textarea-md" rows="6" placeholder="Durable preferences or context this live persona should remember on this Command Center instance..."></textarea>
               <div class="setting-hint">Injected into new live calls as local context. Keep secrets out of here, obviously.</div>
             </div>
 
@@ -870,7 +877,16 @@
                 <span id="music-speech-duck-level-value" class="setting-hint">35% of normal</span>
               </div>
               <input id="music-speech-duck-level" type="range" min="0" max="100" step="1" value="35">
-              <div class="setting-hint">Lower means the background music ducks more while an agent is speaking.</div>
+              <div class="setting-hint">Lower means the background music ducks more while a normal agent is speaking.</div>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <div class="setting-row between">
+                <label for="music-fairy-call-duck-level">Music during Fairy calls</label>
+                <span id="music-fairy-call-duck-level-value" class="setting-hint">22% of normal</span>
+              </div>
+              <input id="music-fairy-call-duck-level" type="range" min="0" max="100" step="1" value="22">
+              <div class="setting-hint">How loud the background music should stay while Fairy Live is active. Lower means Fairy gets the room instead of fighting the soundtrack.</div>
             </div>
 
             <div class="setting-group nested-setting-group">
@@ -930,6 +946,6 @@
 
   <script src="vendor/picovoice/web-voice-processor.js"></script>
   <script src="vendor/picovoice/porcupine-web.js"></script>
-  <script type="module" src="js/app.js?v=20260517-fairy-pwa1"></script>
+  <script type="module" src="js/app.js?v=20260517-fairy-search1"></script>
 </body>
 </html>

@@ -30,6 +30,10 @@ let sessionListEl = null;
 let sessionSearchEl = null;
 let newSessionBtnEl = null;
 let sessionMenuToggleEl = null;
+let modeToggleEls = [];
+
+const ROLEPLAY_MODEL = 'z-ai/glm-5';
+let activeChatMode = 'agent';
 
 const chatHistory = {};
 const pendingByAgent = {};
@@ -74,6 +78,10 @@ function createPanel() {
         <canvas class="dc-agent-companion hidden" width="44" height="44"></canvas>
         <div class="dc-chat-header-main">
           <span class="dc-agent-name"></span>
+          <div class="dc-chat-mode-row">
+            <button class="dc-mode-toggle active" type="button" data-chat-mode="agent">Agent</button>
+            <button class="dc-mode-toggle" type="button" data-chat-mode="roleplay">Roleplay</button>
+          </div>
           <div class="dc-session-bar">
             <button class="dc-session-toggle" type="button" aria-expanded="false">Session: <span class="dc-session-title">Latest</span> ▾</button>
             <button class="dc-session-new" type="button">＋ New</button>
@@ -138,6 +146,7 @@ function createPanel() {
   sessionSearchEl = panelEl.querySelector('.dc-session-search');
   newSessionBtnEl = panelEl.querySelector('.dc-session-new');
   sessionMenuToggleEl = panelEl.querySelector('.dc-session-toggle');
+  modeToggleEls = Array.from(panelEl.querySelectorAll('.dc-mode-toggle'));
 
   panelEl.querySelector('.dc-close').addEventListener('click', closeChatPanel);
   panelEl.querySelector('.dc-back').addEventListener('click', showAgentList);
@@ -153,6 +162,7 @@ function createPanel() {
   filePanelToggleEl?.addEventListener('click', toggleFileLibrary);
   sessionMenuToggleEl?.addEventListener('click', toggleSessionMenu);
   newSessionBtnEl?.addEventListener('click', createNewSession);
+  modeToggleEls.forEach((btn) => btn.addEventListener('click', () => setChatMode(btn.dataset.chatMode || 'agent')));
   sessionSearchEl?.addEventListener('input', () => renderSessionList(sessionSearchEl.value));
   panelEl.addEventListener('click', async (event) => {
     const speakButton = event.target?.closest?.('.dc-message-speak');
@@ -164,6 +174,7 @@ function createPanel() {
 
   syncFileLibraryVisibility();
   syncSessionMenuVisibility();
+  syncModeToggle();
 }
 
 async function loadRoster() {
@@ -186,7 +197,7 @@ async function loadFileLibrary() {
 
 async function loadAgentSessions(agentId) {
   try {
-    const res = await fetch(`${BASE}/api/chat/sessions?agent=${encodeURIComponent(agentId)}&limit=40`);
+    const res = await fetch(`${BASE}/api/chat/sessions?agent=${encodeURIComponent(agentId)}&mode=${encodeURIComponent(activeChatMode)}&limit=40`);
     if (!res.ok) return [];
     const data = await res.json();
     sessionsByAgent[agentId] = Array.isArray(data.sessions) ? data.sessions : [];
@@ -244,6 +255,7 @@ function openChatPanel() {
   panelEl?.classList.add('open');
   launcherEl?.classList.add('active');
   isChatOpen = true;
+  syncModeToggle();
   loadRoster();
   loadFileLibrary();
 }
@@ -260,6 +272,7 @@ async function openChatWithAgent(agentId) {
   activeChatSessionId = null;
   isFileLibraryExpanded = false;
   isSessionMenuOpen = false;
+  syncModeToggle();
 
   const agent = getAgent(agentId);
   panelEl.querySelector('.dc-agent-name').textContent = agent.label;
@@ -284,8 +297,8 @@ async function openChatWithAgent(agentId) {
   if (sessions.length) {
     await selectSession(sessions[0].id);
   } else {
-    chatHistory[agentId] = [];
-    updateSessionTitle('New session');
+    chatHistory[getActiveHistoryKey()] = [];
+    updateSessionTitle(activeChatMode === 'roleplay' ? 'New roleplay' : 'New session');
     renderMessages();
     renderSessionList();
   }
@@ -322,7 +335,37 @@ function applyAgentTheme(agent = null) {
 }
 
 function getActiveHistoryKey() {
-  return activeChatSessionId || activeChatAgent || 'main';
+  if (activeChatSessionId) return activeChatSessionId;
+  if (activeChatAgent) return `${activeChatAgent}:${activeChatMode}`;
+  return `main:${activeChatMode}`;
+}
+
+function syncModeToggle() {
+  modeToggleEls.forEach((btn) => {
+    const active = (btn.dataset.chatMode || 'agent') === activeChatMode;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', String(active));
+  });
+}
+
+async function setChatMode(mode = 'agent') {
+  const nextMode = String(mode || 'agent') === 'roleplay' ? 'roleplay' : 'agent';
+  if (nextMode === activeChatMode) return;
+  activeChatMode = nextMode;
+  activeChatSessionId = null;
+  isSessionMenuOpen = false;
+  syncModeToggle();
+  syncSessionMenuVisibility();
+  if (!activeChatAgent) return;
+  const sessions = await loadAgentSessions(activeChatAgent);
+  if (sessions.length) {
+    await selectSession(sessions[0].id);
+  } else {
+    chatHistory[getActiveHistoryKey()] = [];
+    updateSessionTitle(nextMode === 'roleplay' ? 'New roleplay' : 'New session');
+    renderMessages();
+    renderSessionList();
+  }
 }
 
 function toggleFileLibrary() {
@@ -401,7 +444,7 @@ function renderMessage(msg, index = 0, messages = []) {
     ? 'Tool'
     : msg.kind === 'error'
       ? 'Error'
-      : (isUser ? 'You' : (getAgent(activeChatAgent || 'main').label || 'Assistant'));
+      : (isUser ? 'You' : (activeChatMode === 'roleplay' ? `${getAgent(activeChatAgent || 'main').label || 'Assistant'} · RP` : (getAgent(activeChatAgent || 'main').label || 'Assistant')));
 
   const canSpeak = !isUser && msg.kind !== 'typing' && msg.kind !== 'tool' && msg.kind !== 'file' && String(msg.text || '').trim();
   const speakButton = canSpeak
@@ -589,7 +632,7 @@ async function deleteFile(id) {
 }
 
 function getSessionLabel(session = null) {
-  if (!session) return 'Latest';
+  if (!session) return activeChatMode === 'roleplay' ? 'Roleplay' : 'Latest';
   return String(session.title || session.lastMessagePreview || 'Untitled session').trim().slice(0, 36) || 'Untitled session';
 }
 
@@ -649,7 +692,7 @@ async function createNewSession() {
     const res = await fetch(`${BASE}/api/chat/sessions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent: activeChatAgent, title: '' }),
+      body: JSON.stringify({ agent: activeChatAgent, title: '', mode: activeChatMode, model: activeChatMode === 'roleplay' ? ROLEPLAY_MODEL : '' }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Failed to create session');
@@ -657,7 +700,7 @@ async function createNewSession() {
     sessionsByAgent[activeChatAgent] = [data.session, ...sessionsByAgent[activeChatAgent].filter((item) => item.id !== data.session.id)];
     activeChatSessionId = data.session.id;
     chatHistory[activeChatSessionId] = [];
-    updateSessionTitle('New session');
+    updateSessionTitle(activeChatMode === 'roleplay' ? 'New roleplay' : 'New session');
     renderMessages();
     renderSessionList(sessionSearchEl?.value || '');
     isSessionMenuOpen = false;
@@ -682,12 +725,13 @@ async function sendMessage() {
   renderMessages();
 
   const agentLabel = getAgent(activeChatAgent).label;
-  terminal.log(`[you → ${agentLabel}] ${text}`, 'agent', true);
+  const modeLabel = activeChatMode === 'roleplay' ? `roleplay:${ROLEPLAY_MODEL}` : 'agent';
+  terminal.log(`[you → ${agentLabel} (${modeLabel})] ${text}`, 'agent', true);
 
   try {
     const payload = activeChatSessionId
-      ? { message: text, sessionId: activeChatSessionId, fileIds: selectedFileIds }
-      : { message: text, agent: activeChatAgent, fileIds: selectedFileIds };
+      ? { message: text, sessionId: activeChatSessionId, fileIds: selectedFileIds, mode: activeChatMode, model: activeChatMode === 'roleplay' ? ROLEPLAY_MODEL : '' }
+      : { message: text, agent: activeChatAgent, fileIds: selectedFileIds, mode: activeChatMode, model: activeChatMode === 'roleplay' ? ROLEPLAY_MODEL : '' };
 
     const res = await fetch(`${BASE}/api/chat/direct`, {
       method: 'POST',
@@ -741,6 +785,10 @@ export function handleChatEvent(msg) {
   const agentId = data?.agent;
   if (!agentId || !pendingByAgent[agentId]) return;
   if (agentId !== activeChatAgent) return;
+
+  const isDirectChatEvent = data?.chat === true || data?.source === 'direct-chat';
+  if (!isDirectChatEvent) return;
+  if (data?.sessionId && activeChatSessionId && data.sessionId !== activeChatSessionId) return;
 
   const historyKey = getActiveHistoryKey();
 

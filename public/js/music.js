@@ -5,6 +5,7 @@ let state = {
     enabled: false,
     volume: 0.45,
     speechDuckLevel: 0.35,
+    fairyCallDuckLevel: 0.22,
     playbackScope: 'tab',
     selectedTrackId: '',
   },
@@ -16,6 +17,7 @@ let unlocked = false;
 let attemptedAutoplay = false;
 let fadeFrame = 0;
 let speechDuckActive = false;
+let fairyCallDuckActive = false;
 
 function qs(id) {
   return document.getElementById(id);
@@ -69,9 +71,16 @@ function getDuckLevel() {
   return clamp01(state.settings.speechDuckLevel, 0.35);
 }
 
+function getFairyCallDuckLevel() {
+  return clamp01(state.settings.fairyCallDuckLevel, 0.22);
+}
+
 function getTargetVolume() {
   const base = getBaseVolume();
-  return speechDuckActive ? base * getDuckLevel() : base;
+  let multiplier = 1;
+  if (fairyCallDuckActive) multiplier *= getFairyCallDuckLevel();
+  if (speechDuckActive) multiplier *= getDuckLevel();
+  return base * multiplier;
 }
 
 function fadeToVolume(targetVolume, durationMs = 450) {
@@ -139,6 +148,8 @@ export function renderSettings() {
   const volumeValue = qs('music-volume-value');
   const duck = qs('music-speech-duck-level');
   const duckValue = qs('music-speech-duck-level-value');
+  const fairyDuck = qs('music-fairy-call-duck-level');
+  const fairyDuckValue = qs('music-fairy-call-duck-level-value');
   const select = qs('music-track-select');
   const status = qs('music-upload-status');
 
@@ -148,6 +159,8 @@ export function renderSettings() {
   if (volumeValue) volumeValue.textContent = `${Math.round(getBaseVolume() * 100)}%`;
   if (duck) duck.value = String(Math.round(getDuckLevel() * 100));
   if (duckValue) duckValue.textContent = `${Math.round(getDuckLevel() * 100)}% of normal`;
+  if (fairyDuck) fairyDuck.value = String(Math.round(getFairyCallDuckLevel() * 100));
+  if (fairyDuckValue) fairyDuckValue.textContent = `${Math.round(getFairyCallDuckLevel() * 100)}% of normal`;
 
   if (select) {
     const selectedId = String(state.settings.selectedTrackId || '');
@@ -169,12 +182,14 @@ export function renderSettings() {
 export function collectSettings() {
   const volumePercent = Number(qs('music-volume')?.value || 45);
   const duckPercent = Number(qs('music-speech-duck-level')?.value || 35);
+  const fairyDuckPercent = Number(qs('music-fairy-call-duck-level')?.value || 22);
   return {
     enabled: qs('music-enabled')?.checked === true,
     playbackScope: qs('music-playback-scope')?.value === 'always' ? 'always' : 'tab',
     selectedTrackId: String(qs('music-track-select')?.value || '').trim(),
     volume: clamp01(volumePercent / 100, 0.45),
     speechDuckLevel: clamp01(duckPercent / 100, 0.35),
+    fairyCallDuckLevel: clamp01(fairyDuckPercent / 100, 0.22),
   };
 }
 
@@ -226,6 +241,13 @@ export function setSpeechDuckActive(active, options = {}) {
   if (speechDuckActive === next) return;
   speechDuckActive = next;
   applyTargetVolume({ fade: options.fade !== false, durationMs: Number(options.durationMs || (next ? 320 : 650)) });
+}
+
+export function setFairyCallDuckActive(active, options = {}) {
+  const next = active === true;
+  if (fairyCallDuckActive === next) return;
+  fairyCallDuckActive = next;
+  applyTargetVolume({ fade: options.fade !== false, durationMs: Number(options.durationMs || (next ? 280 : 700)) });
 }
 
 export function duckForSpeech() {
@@ -308,6 +330,8 @@ function installEventHandlers() {
   });
   document.addEventListener('commandcenter:voice-playback-start', () => duckForSpeech());
   document.addEventListener('commandcenter:voice-playback-stop', () => releaseSpeechDuck());
+  document.addEventListener('commandcenter:fairy-call-start', () => setFairyCallDuckActive(true, { durationMs: 280 }));
+  document.addEventListener('commandcenter:fairy-call-end', () => setFairyCallDuckActive(false, { durationMs: 700 }));
   document.addEventListener('click', unlock, { passive: true });
   document.addEventListener('keydown', unlock, { passive: true });
   document.addEventListener('visibilitychange', () => syncPlayback());
@@ -326,6 +350,12 @@ function installEventHandlers() {
     if (qs('music-speech-duck-level-value')) qs('music-speech-duck-level-value').textContent = `${value}% of normal`;
     state.settings.speechDuckLevel = clamp01(value / 100, 0.35);
     if (speechDuckActive) applyTargetVolume({ fade: true, durationMs: 180 });
+  });
+  qs('music-fairy-call-duck-level')?.addEventListener('input', () => {
+    const value = Number(qs('music-fairy-call-duck-level')?.value || 22);
+    if (qs('music-fairy-call-duck-level-value')) qs('music-fairy-call-duck-level-value').textContent = `${value}% of normal`;
+    state.settings.fairyCallDuckLevel = clamp01(value / 100, 0.22);
+    if (fairyCallDuckActive) applyTargetVolume({ fade: true, durationMs: 180 });
   });
   qs('music-track-select')?.addEventListener('change', () => {
     state.settings.selectedTrackId = String(qs('music-track-select')?.value || '').trim();

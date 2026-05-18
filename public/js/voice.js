@@ -5,6 +5,7 @@ function humanizeVoiceError(err) {
   const message = String(err?.message || err || '').trim();
   const lower = message.toLowerCase();
   if (!message) return 'Voice failed for an unknown reason.';
+  if (lower.includes('signal is aborted') || lower.includes('aborterror') || lower.includes('aborted') || lower.includes('canceled') || lower.includes('cancelled')) return 'Playback was cancelled.';
   if (lower.includes('permission') || lower.includes('denied')) return 'Microphone permission was denied.';
   if (lower.includes('no audio file provided')) return 'No microphone audio was captured.';
   if (lower.includes('empty-transcription')) return 'I heard audio, but the transcript came back empty.';

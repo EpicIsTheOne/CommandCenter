@@ -1,6 +1,14 @@
 const BASE = window.__BASE_PATH__ || '';
 const INPUT_SAMPLE_RATE = 16000;
 const AUDIO_CHUNK_SAMPLES = 3200; // 200ms at 16kHz
+const VAD_HANGOVER_MS = 520;
+const VAD_MIN_SPEECH_MS = 110;
+const VAD_NOISE_LEARN_MS = 1400;
+const VAD_MIN_RMS_START = 0.013;
+const VAD_MIN_RMS_END = 0.007;
+const VAD_MIN_PEAK_START = 0.045;
+const VAD_INTERRUPT_RMS = 0.02;
+const VAD_INTERRUPT_PEAK = 0.08;
 
 const state = {
   sessionId: '',
@@ -15,6 +23,7 @@ const state = {
   micContext: null,
   micSource: null,
   micProcessor: null,
+  vad: null,
   pcmQueue: [],
   audioPostChain: Promise.resolve(),
   playbackContext: null,
@@ -28,6 +37,8 @@ const state = {
   screenCanvas: null,
   screenTimer: null,
   screenPostChain: Promise.resolve(),
+  screenChangeLastSample: null,
+  screenChangeLastAt: 0,
   cameraActive: false,
   cameraStream: null,
   cameraVideo: null,
@@ -74,11 +85,16 @@ function emitLog(message, tone = 'info') {
   window.dispatchEvent(new CustomEvent('fairy-live-log', { detail: { message, tone } }));
 }
 
+function emitFairyCallAudioEvent(type, detail = {}) {
+  window.dispatchEvent(new CustomEvent(type, { detail }));
+}
+
 function renderDiagnostics() {
   const html = `
     <div><strong>Key:</strong> ${state.hasApiKey ? 'configured' : 'missing'}</div>
     <div><strong>Session:</strong> ${state.sessionId ? state.sessionId.slice(0, 18) + '…' : 'none'}</div>
-    <div><strong>Mic:</strong> ${state.micActive ? (state.micMuted ? 'muted' : 'live') : 'off'} · <strong>Screen:</strong> ${state.screenActive ? 'live' : 'off'} · <strong>Camera:</strong> ${state.cameraActive ? 'live' : 'off'}</div>
+    <div><strong>Mic:</strong> ${state.micActive ? (state.micMuted ? 'muted' : 'live') : 'off'} · <strong>VAD:</strong> ${state.vad?.speaking ? 'speech' : 'idle'} · <strong>Screen:</strong> ${state.screenActive ? 'live' : 'off'} · <strong>Camera:</strong> ${state.cameraActive ? 'live' : 'off'}</div>
+    ${state.micActive && state.vad ? `<div><strong>VAD level:</strong> rms ${state.vad.lastRms.toFixed(3)} · noise ${state.vad.noiseFloor.toFixed(3)} · peak ${state.vad.lastPeak.toFixed(3)}</div>` : ''}
     <div><strong>Last:</strong> ${escapeHtml(state.lastEvent || 'none')}</div>
     ${state.lastError ? `<div class="fairy-diag-error"><strong>Error:</strong> ${escapeHtml(state.lastError)}</div>` : ''}
   `;
@@ -145,6 +161,12 @@ function updateHeaderCallControls() {
     els.headerCamera.disabled = !state.sessionId;
     els.headerCamera.textContent = state.cameraActive ? 'CAM LIVE' : 'CAM OFF';
     els.headerCamera.classList.toggle('active', state.cameraActive);
+  }
+  if (els.headerCameraFacing) {
+    setHidden(els.headerCameraFacing, !active);
+    els.headerCameraFacing.disabled = !state.sessionId;
+    els.headerCameraFacing.textContent = cameraFacingLabel();
+    els.headerCameraFacing.classList.toggle('active', state.cameraActive);
   }
 }
 
@@ -230,7 +252,7 @@ function updateCameraUi() {
       : `Camera off. Next source: ${state.cameraFacingMode === 'user' ? 'front camera' : 'back camera'}.`;
   }
   if (els.cameraPreviewWrap) setHidden(els.cameraPreviewWrap, !state.cameraActive);
-  if (els.cameraPreviewLabel) els.cameraPreviewLabel.textContent = `${state.cameraFacingMode === 'user' ? 'FRONT' : 'BACK'} CAMERA PREVIEW`;
+  if (els.cameraPreviewLabel) els.cameraPreviewLabel.textContent = `${state.cameraFacingMode === 'user' ? 'FRONT' : 'BACK'} CAM`;
   updateHeaderCallControls();
   renderDiagnostics();
 }
@@ -323,18 +345,109 @@ function resampleToInt16(input, sourceRate, targetRate = INPUT_SAMPLE_RATE) {
   return out;
 }
 
+function createVadState() {
+  return {
+    noiseFloor: 0.006,
+    startedAt: Date.now(),
+    speaking: false,
+    speechMs: 0,
+    silenceMs: 0,
+    preroll: [],
+    lastRms: 0,
+    lastPeak: 0,
+  };
+}
+
+function samplesDurationMs(samples) {
+  return Math.round((Number(samples?.length || 0) / INPUT_SAMPLE_RATE) * 1000);
+}
+
+function measureSamples(samples) {
+  if (!samples?.length) return { rms: 0, peak: 0 };
+  let sum = 0;
+  let peak = 0;
+  for (let i = 0; i < samples.length; i += 1) {
+    const value = Math.abs(samples[i] / 0x7fff);
+    sum += value * value;
+    if (value > peak) peak = value;
+  }
+  return { rms: Math.sqrt(sum / samples.length), peak };
+}
+
+function rememberVadPreroll(vad, samples, durationMs) {
+  // Kept as a no-op compatibility shim for older debug notes: mic upload is continuous now,
+  // so pre-roll is unnecessary and local VAD must not gate Gemini Live input.
+  void vad;
+  void samples;
+  void durationMs;
+}
+
+function enqueueRawPcmSamples(samples) {
+  if (!samples?.length || state.micMuted || !state.sessionId) return;
+  for (let i = 0; i < samples.length; i += 1) state.pcmQueue.push(samples[i]);
+  while (state.pcmQueue.length >= AUDIO_CHUNK_SAMPLES) {
+    const chunk = new Int16Array(state.pcmQueue.splice(0, AUDIO_CHUNK_SAMPLES));
+    postAudioChunk(chunk);
+  }
+}
+
+function observeVadSamples(samples) {
+  if (!samples?.length || state.micMuted || !state.sessionId) return;
+  const vad = state.vad || (state.vad = createVadState());
+  const durationMs = samplesDurationMs(samples);
+  const { rms, peak } = measureSamples(samples);
+  vad.lastRms = rms;
+  vad.lastPeak = peak;
+
+  const learningNoise = !vad.speaking && (Date.now() - vad.startedAt) < VAD_NOISE_LEARN_MS;
+  const endThreshold = Math.max(VAD_MIN_RMS_END, vad.noiseFloor * 2.0);
+  const startThreshold = Math.max(VAD_MIN_RMS_START, vad.noiseFloor * 3.2);
+  const speechCandidate = rms >= startThreshold || (rms >= endThreshold && peak >= VAD_MIN_PEAK_START);
+  const continuingSpeech = rms >= endThreshold || peak >= VAD_MIN_PEAK_START;
+
+  if (!vad.speaking && !speechCandidate) {
+    if (learningNoise || rms < Math.max(VAD_MIN_RMS_START, vad.noiseFloor * 2.6)) {
+      vad.noiseFloor = (vad.noiseFloor * 0.94) + (rms * 0.06);
+    }
+    rememberVadPreroll(vad, samples, durationMs);
+    renderDiagnostics();
+    return;
+  }
+
+  if (!vad.speaking && speechCandidate) {
+    vad.speaking = true;
+    vad.speechMs = 0;
+    vad.silenceMs = 0;
+    vad.preroll = [];
+  }
+
+  if (vad.speaking) {
+    if (continuingSpeech) {
+      vad.speechMs += durationMs;
+      vad.silenceMs = 0;
+    } else {
+      vad.silenceMs += durationMs;
+    }
+    if (vad.silenceMs >= VAD_HANGOVER_MS && vad.speechMs >= VAD_MIN_SPEECH_MS) {
+      vad.speaking = false;
+      vad.speechMs = 0;
+      vad.silenceMs = 0;
+      vad.preroll = [];
+    }
+  }
+  renderDiagnostics();
+}
+
 function shouldInterruptForSamples(samples) {
   if (!state.sessionId || !samples?.length) return false;
   if (!state.playbackActive) return false;
   if (!['speaking', 'thinking', 'handing_off', 'task_running'].includes(state.status)) return false;
   const now = Date.now();
   if (state.interrupting || (now - state.lastInterruptAt) < 900) return false;
-  let peak = 0;
-  for (let i = 0; i < samples.length; i += 1) {
-    const value = Math.abs(samples[i] / 0x7fff);
-    if (value > peak) peak = value;
-  }
-  return peak >= 0.075;
+  const { rms, peak } = measureSamples(samples);
+  const floor = state.vad?.noiseFloor || 0.006;
+  const rmsThreshold = Math.max(VAD_INTERRUPT_RMS, floor * 4.0);
+  return rms >= rmsThreshold && peak >= VAD_INTERRUPT_PEAK;
 }
 
 function interruptFairy(reason = 'user_speaking') {
@@ -359,12 +472,11 @@ function interruptFairy(reason = 'user_speaking') {
 
 function queuePcmSamples(samples) {
   if (!samples?.length || state.micMuted || !state.sessionId) return;
+  observeVadSamples(samples);
   if (shouldInterruptForSamples(samples)) interruptFairy('user_speaking');
-  for (let i = 0; i < samples.length; i += 1) state.pcmQueue.push(samples[i]);
-  while (state.pcmQueue.length >= AUDIO_CHUNK_SAMPLES) {
-    const chunk = new Int16Array(state.pcmQueue.splice(0, AUDIO_CHUNK_SAMPLES));
-    postAudioChunk(chunk);
-  }
+  // Gemini Live needs continuous mic input to do its own endpointing reliably.
+  // Local VAD is for diagnostics/barge-in only; do not gate Fairy's ears shut.
+  enqueueRawPcmSamples(samples);
 }
 
 function flushPcmQueue() {
@@ -424,9 +536,13 @@ async function playAudioChunk(pcm16Base64, mimeType = 'audio/pcm;rate=24000', do
   state.playbackActive = true;
   source.onended = () => {
     state.playbackSources.delete(source);
-    if (!state.playbackSources.size) state.playbackActive = false;
+    if (!state.playbackSources.size) {
+      state.playbackActive = false;
+      emitFairyCallAudioEvent('commandcenter:voice-playback-stop', { source: 'fairy-live', sessionId: state.sessionId, fairy: true });
+    }
     if (done && generation === state.playbackGeneration) notifyPlaybackFinishedSoon();
   };
+  emitFairyCallAudioEvent('commandcenter:voice-playback-start', { source: 'fairy-live', sessionId: state.sessionId, fairy: true });
   source.start(startAt);
 }
 
@@ -446,6 +562,7 @@ function notifyPlaybackFinishedSoon() {
 
 function stopPlayback() {
   state.playbackGeneration += 1;
+  if (state.playbackActive) emitFairyCallAudioEvent('commandcenter:voice-playback-stop', { source: 'fairy-live', sessionId: state.sessionId, fairy: true, interrupted: true });
   state.playbackActive = false;
   if (playbackFinishedTimer) clearTimeout(playbackFinishedTimer);
   playbackFinishedTimer = null;
@@ -488,6 +605,8 @@ async function startMic() {
     });
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
     await ctx.resume();
+    state.vad = createVadState();
+    state.pcmQueue = [];
     const source = ctx.createMediaStreamSource(stream);
     const processor = ctx.createScriptProcessor(4096, 1, 1);
     processor.onaudioprocess = (event) => {
@@ -527,6 +646,7 @@ async function stopMic() {
   state.micSource = null;
   state.micProcessor = null;
   state.pcmQueue = [];
+  state.vad = null;
   updateMicUi();
   if (state.sessionId) {
     emitLog('Mic stopped', 'info');
@@ -552,8 +672,62 @@ function postScreenFrame(jpegBase64) {
     });
 }
 
+function sampleVisualSignature(video, canvas) {
+  if (!video || !canvas) return null;
+  const width = 32;
+  const height = 18;
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
+  ctx.drawImage(video, 0, 0, width, height);
+  const { data } = ctx.getImageData(0, 0, width, height);
+  const sample = new Uint8Array(width * height);
+  let total = 0;
+  for (let i = 0, p = 0; i < data.length; i += 4, p += 1) {
+    const lum = Math.round((data[i] * 0.299) + (data[i + 1] * 0.587) + (data[i + 2] * 0.114));
+    sample[p] = lum;
+    total += lum;
+  }
+  return { sample, avg: total / sample.length };
+}
+
+function detectMeaningfulScreenChange(video) {
+  if (!video || !state.screenCanvas) return;
+  const signature = sampleVisualSignature(video, state.screenCanvas);
+  if (!signature) return;
+  const previous = state.screenChangeLastSample;
+  state.screenChangeLastSample = signature;
+  if (!previous) return;
+
+  let diffTotal = 0;
+  let changedCells = 0;
+  for (let i = 0; i < signature.sample.length; i += 1) {
+    const diff = Math.abs(signature.sample[i] - previous.sample[i]);
+    diffTotal += diff;
+    if (diff >= 28) changedCells += 1;
+  }
+  const avgDiff = diffTotal / signature.sample.length;
+  const changedRatio = changedCells / signature.sample.length;
+  const now = Date.now();
+  const significant = avgDiff >= 16 || changedRatio >= 0.22;
+  if (!significant) return;
+  if (now - state.screenChangeLastAt < 8000) return;
+  state.screenChangeLastAt = now;
+  markEvent(`screen changed (${Math.round(avgDiff)} / ${Math.round(changedRatio * 100)}%)`);
+  fetchJson(`${BASE}/api/call/${encodeURIComponent(state.sessionId)}/event`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      type: 'screen.changed',
+      avgDiff: Number(avgDiff.toFixed(1)),
+      changedRatio: Number(changedRatio.toFixed(3)),
+    }),
+  }).catch(() => {});
+}
+
 function captureScreenFrame() {
   if (!state.screenActive || !state.sessionId || !state.screenVideo || !state.screenCanvas) return;
+  detectMeaningfulScreenChange(state.screenVideo);
   const jpegBase64 = captureVisualFrame(state.screenVideo, state.screenCanvas, { quality: 0.68 });
   if (!jpegBase64) return;
   postScreenFrame(jpegBase64);
@@ -611,6 +785,8 @@ async function startScreenShare() {
     state.screenStream = stream;
     state.screenVideo = video;
     state.screenCanvas = document.createElement('canvas');
+    state.screenChangeLastSample = null;
+    state.screenChangeLastAt = 0;
     state.screenActive = true;
     stream.getVideoTracks().forEach((track) => {
       track.onended = () => stopScreenShare().catch(() => {});
@@ -643,6 +819,8 @@ async function stopScreenShare() {
   state.screenStream = null;
   state.screenVideo = null;
   state.screenCanvas = null;
+  state.screenChangeLastSample = null;
+  state.screenChangeLastAt = 0;
   updateScreenUi();
   if (hadSession) {
     emitLog('Screen sharing stopped', 'info');
@@ -781,6 +959,7 @@ async function startCall() {
     });
     state.sessionId = data.session?.id || '';
     setStatus(data.session?.state || 'ready', `${personaName()} is live. Auto-enabling the mic now.`);
+    emitFairyCallAudioEvent('commandcenter:fairy-call-start', { sessionId: state.sessionId });
     appendTranscript('system', `${personaName()} session started: ${state.sessionId}`, 'system');
     emitLog(`${personaName()} Live started: ${state.sessionId}`, 'info');
     showOverlay(`${personaName()} connected.`, 'info', 2200);
@@ -806,6 +985,7 @@ async function endCall() {
     await fetchJson(`${BASE}/api/call/${encodeURIComponent(id)}/end`, { method: 'POST' });
     state.sessionId = '';
     setStatus('ended', `${personaName()} Live ended. The desk is quiet again. Suspiciously quiet.`);
+    emitFairyCallAudioEvent('commandcenter:fairy-call-end', { sessionId: id });
     appendTranscript('system', `${personaName()} session ended: ${id}`, 'system');
     emitLog(`${personaName()} Live ended: ${id}`, 'info');
     showOverlay('', 'info', 0);
@@ -845,7 +1025,14 @@ function handleTaskUpdate(task) {
       <span>Status: ${escapeHtml(task.status || 'queued')}</span><br>
       <span>${escapeHtml(task.summary || '')}</span>
     `, task.status === 'failed' ? 'error' : task.status === 'completed' ? 'done' : '');
-    showOverlay(`${escapeHtml(task.title || task.id)} · ${escapeHtml(task.status || 'queued')}${task.summary ? `<br>${escapeHtml(task.summary)}` : ''}`, task.status === 'failed' ? 'error' : 'info', 9000);
+    const overlayTone = task.status === 'failed' ? 'error' : task.status === 'completed' ? 'done' : 'info';
+    const overlayDuration = task.status === 'working' ? 4200 : 9000;
+    showOverlay(`${escapeHtml(task.title || task.id)} · ${escapeHtml(task.status || 'queued')}${task.summary ? `<br>${escapeHtml(task.summary)}` : ''}`, overlayTone, overlayDuration);
+    if (task.status === 'working') {
+      setStatus('task_running', `Astra/OpenClaw is actively working. ${personaName()} is tracking it.`);
+      markEvent('task working');
+      return;
+    }
     if (['completed', 'failed', 'needs_input'].includes(task.status)) {
       appendTranscript(task.status === 'failed' ? 'error' : 'system', task.summary || `Task ${task.status}`, `task:${task.status}`);
       if (state.status === 'task_running') setStatus('ready', `Task update received. ${personaName()} is ready for the next bit of chaos.`);
@@ -861,6 +1048,7 @@ export function init() {
   els.headerMic = document.getElementById('fairy-live-mic-header-btn');
   els.headerScreen = document.getElementById('fairy-live-screen-header-btn');
   els.headerCamera = document.getElementById('fairy-live-camera-header-btn');
+  els.headerCameraFacing = document.getElementById('fairy-live-camera-facing-header-btn');
   els.overlay = document.getElementById('fairy-live-overlay');
   els.model = document.getElementById('fairy-live-model');
   els.status = document.getElementById('fairy-live-status');
@@ -888,6 +1076,7 @@ export function init() {
   els.headerMic?.addEventListener('click', (event) => { event.stopPropagation(); startMic(); });
   els.headerScreen?.addEventListener('click', (event) => { event.stopPropagation(); startScreenShare(); });
   els.headerCamera?.addEventListener('click', (event) => { event.stopPropagation(); startCameraShare(); });
+  els.headerCameraFacing?.addEventListener('click', (event) => { event.stopPropagation(); toggleCameraFacingMode(); });
   els.start?.addEventListener('click', (event) => { event.stopPropagation(); startCall(); });
   els.end?.addEventListener('click', (event) => { event.stopPropagation(); endCall(); });
   els.stopAudio?.addEventListener('click', (event) => { event.stopPropagation(); stopFairyAudio(); });
@@ -937,6 +1126,7 @@ export function handleEvent(msg = {}) {
       state.interrupting = false;
       state.sessionId = '';
       setStatus('ended', `${personaName()} Live ended.`);
+      emitFairyCallAudioEvent('commandcenter:fairy-call-end', { sessionId: data.id || data.sessionId || state.sessionId });
       emitLog(`${personaName()} Live ended`, 'info');
       showOverlay('', 'info', 0);
       markEvent('call ended');
@@ -983,6 +1173,13 @@ export function handleEvent(msg = {}) {
 
   if (type === 'call:screen.enabled' && data.sessionId === state.sessionId) {
     if (els.screenStatus) els.screenStatus.textContent = `Screen frame received by ${personaName()}.`;
+    return;
+  }
+
+  if (type === 'call:screen.changed' && data.sessionId === state.sessionId) {
+    const pct = Math.round(Number(data.changedRatio || 0) * 100);
+    markEvent(`screen change noticed (${pct}%)`);
+    if (els.screenStatus) els.screenStatus.textContent = `Screen changed noticeably (${pct}%). ${personaName()} has the new frame.`;
     return;
   }
 
@@ -1048,6 +1245,14 @@ export function handleEvent(msg = {}) {
     setStatus('task_running', `Astra/OpenClaw has the task now. ${personaName()} is watching the board.`);
     handleTaskUpdate(data.task || { id: state.lastTaskId, title: data.title, status: 'queued' });
     markEvent('task created');
+    return;
+  }
+
+  if (type === 'call:handoff.progress' && data.sessionId === state.sessionId) {
+    state.lastTaskId = data.taskId || state.lastTaskId;
+    setStatus('task_running', `${personaName()} is tracking the live task.`);
+    showOverlay(`${escapeHtml(data.title || 'Background task')} · working${data.summary ? `<br>${escapeHtml(data.summary)}` : ''}`, 'tool', 4200);
+    markEvent('handoff progress');
     return;
   }
 

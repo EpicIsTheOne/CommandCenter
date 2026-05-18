@@ -61,6 +61,8 @@ function sessionMeta(session) {
   return {
     id: session.id,
     agent: session.agent,
+    mode: session.mode === 'roleplay' ? 'roleplay' : 'agent',
+    model: String(session.model || '').trim(),
     title: session.title || '',
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
@@ -70,13 +72,15 @@ function sessionMeta(session) {
   };
 }
 
-export async function createApiSession({ agent, title = '', metadata = {} } = {}) {
+export async function createApiSession({ agent, title = '', metadata = {}, mode = 'agent', model = '' } = {}) {
   await ensureStore();
   const id = `ccs_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
   const now = nowIso();
   const session = {
     id,
     agent: String(agent || '').trim(),
+    mode: String(mode || 'agent').trim() === 'roleplay' ? 'roleplay' : 'agent',
+    model: String(model || '').trim(),
     title: String(title || '').trim(),
     metadata: metadata && typeof metadata === 'object' ? metadata : {},
     createdAt: now,
@@ -99,6 +103,8 @@ export async function getApiSession(id) {
   const parsed = safeJsonParse(raw, null);
   if (!parsed || typeof parsed !== 'object') return null;
   if (!Array.isArray(parsed.messages)) parsed.messages = [];
+  parsed.mode = String(parsed.mode || 'agent').trim() === 'roleplay' ? 'roleplay' : 'agent';
+  parsed.model = String(parsed.model || '').trim();
   return parsed;
 }
 

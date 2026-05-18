@@ -10,9 +10,9 @@ import * as intro from './intro.js?v=20260514b';
 import * as appearance from './appearance.js?v=20260514b';
 import * as branding from './branding.js?v=20260514b';
 import * as layoutSettings from './layout-settings.js?v=20260514b';
-import * as fairyLive from './fairy-live.js?v=20260517-fairy-pwa1';
+import * as fairyLive from './fairy-live.js?v=20260517-fairy-search1';
 
-const APP_BUILD = '20260517-fairy-pwa1';
+const APP_BUILD = '20260517-fairy-search1';
 console.log('[CommandCenter] app build:', APP_BUILD);
 
 let roster = { agents: [], primaryAgentId: 'main' };
@@ -1623,6 +1623,7 @@ function populateGeminiSettingsForm(geminiSettings = {}) {
   const keyInput = document.getElementById('gemini-api-key');
   const keyHint = document.getElementById('saved-gemini-key-hint');
   const personaNameInput = document.getElementById('gemini-persona-name');
+  const operatorNameInput = document.getElementById('gemini-operator-name');
   const personalityPromptInput = document.getElementById('gemini-personality-prompt');
   const memoryEnabledInput = document.getElementById('gemini-memory-enabled');
   const memoryNotesInput = document.getElementById('gemini-memory-notes');
@@ -1640,6 +1641,7 @@ function populateGeminiSettingsForm(geminiSettings = {}) {
       : 'No saved Gemini key yet.';
   }
   if (personaNameInput) personaNameInput.value = geminiSettings.personaName || 'Fairy';
+  if (operatorNameInput) operatorNameInput.value = geminiSettings.operatorName || 'Epic';
   if (personalityPromptInput) personalityPromptInput.value = geminiSettings.personalityPrompt || '';
   if (memoryEnabledInput) memoryEnabledInput.checked = geminiSettings.memoryEnabled !== false;
   if (memoryNotesInput) memoryNotesInput.value = geminiSettings.memoryNotes || '';
@@ -1752,6 +1754,7 @@ function renderFairySettingsDiagnostics(config = {}, sessions = []) {
   el.innerHTML = `
     <div><strong>Gemini key:</strong> ${config.hasApiKey ? 'configured' : 'missing'}</div>
     <div><strong>Name:</strong> ${escapeHtml(config.personaName || 'Fairy')}</div>
+    <div><strong>Operator:</strong> ${escapeHtml(config.operatorName || 'Epic')}</div>
     <div><strong>Model:</strong> ${escapeHtml(config.model || 'unknown')}</div>
     <div><strong>Source:</strong> ${escapeHtml(config.source || 'unknown')}</div>
     <div><strong>Live voice:</strong> ${escapeHtml(config.voiceName || config.liveVoiceName || 'Sulafat')}</div>
@@ -1777,6 +1780,7 @@ async function refreshFairyDiagnostics() {
 async function saveGeminiSettingsOnly() {
   const apiKey = document.getElementById('gemini-api-key')?.value?.trim() || '';
   const personaName = document.getElementById('gemini-persona-name')?.value?.trim() || 'Fairy';
+  const operatorName = document.getElementById('gemini-operator-name')?.value?.trim() || 'Epic';
   const personalityPrompt = document.getElementById('gemini-personality-prompt')?.value || '';
   const memoryEnabled = document.getElementById('gemini-memory-enabled')?.checked !== false;
   const memoryNotes = document.getElementById('gemini-memory-notes')?.value || '';
@@ -1789,7 +1793,7 @@ async function saveGeminiSettingsOnly() {
     const data = await fetchJson(`${BASE}/api/settings/gemini`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey, personaName, personalityPrompt, memoryEnabled, memoryNotes, model, responseModalities, thinkingLevel, voiceName }),
+      body: JSON.stringify({ apiKey, personaName, operatorName, personalityPrompt, memoryEnabled, memoryNotes, model, responseModalities, thinkingLevel, voiceName }),
     });
     populateGeminiSettingsForm(data.settings || {});
     await fairyLive.refreshConfig?.();
@@ -2182,6 +2186,7 @@ async function saveSettings() {
   const sttElevenlabsApiKey = document.getElementById('stt-elevenlabs-key')?.value?.trim() || '';
   const geminiApiKey = document.getElementById('gemini-api-key')?.value?.trim() || '';
   const geminiPersonaName = document.getElementById('gemini-persona-name')?.value?.trim() || 'Fairy';
+  const geminiOperatorName = document.getElementById('gemini-operator-name')?.value?.trim() || 'Epic';
   const geminiPersonalityPrompt = document.getElementById('gemini-personality-prompt')?.value || '';
   const geminiMemoryEnabled = document.getElementById('gemini-memory-enabled')?.checked !== false;
   const geminiMemoryNotes = document.getElementById('gemini-memory-notes')?.value || '';
@@ -2245,7 +2250,7 @@ async function saveSettings() {
     await fetchJson(`${BASE}/api/settings/gemini`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: geminiApiKey, personaName: geminiPersonaName, personalityPrompt: geminiPersonalityPrompt, memoryEnabled: geminiMemoryEnabled, memoryNotes: geminiMemoryNotes, model: geminiModel, responseModalities: geminiResponseModalities, thinkingLevel: geminiThinkingLevel, voiceName: geminiVoiceName }),
+      body: JSON.stringify({ apiKey: geminiApiKey, personaName: geminiPersonaName, operatorName: geminiOperatorName, personalityPrompt: geminiPersonalityPrompt, memoryEnabled: geminiMemoryEnabled, memoryNotes: geminiMemoryNotes, model: geminiModel, responseModalities: geminiResponseModalities, thinkingLevel: geminiThinkingLevel, voiceName: geminiVoiceName }),
     });
 
     await fetchJson(`${BASE}/api/settings/companions`, {

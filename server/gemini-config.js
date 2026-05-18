@@ -19,6 +19,7 @@ const DEFAULT_GEMINI_SETTINGS = {
   thinkingLevel: 'minimal',
   voiceName: 'Sulafat',
   personaName: 'Fairy',
+  operatorName: 'Epic',
   personalityPrompt: '',
   memoryEnabled: true,
   memoryNotes: '',
@@ -52,6 +53,11 @@ function normalizePersonaName(value = '') {
   return raw.slice(0, 80) || DEFAULT_GEMINI_SETTINGS.personaName;
 }
 
+function normalizeOperatorName(value = '') {
+  const raw = String(value || '').replace(/\s+/g, ' ').trim();
+  return raw.slice(0, 80) || DEFAULT_GEMINI_SETTINGS.operatorName;
+}
+
 function normalizePersonalityPrompt(value = '') {
   return String(value || '').trim().slice(0, 8000);
 }
@@ -74,6 +80,7 @@ function normalizeGeminiSettings(input = {}) {
     thinkingLevel: normalizeThinkingLevel(input.thinkingLevel || DEFAULT_GEMINI_SETTINGS.thinkingLevel),
     voiceName: normalizeVoiceName(input.voiceName || DEFAULT_GEMINI_SETTINGS.voiceName),
     personaName: normalizePersonaName(input.personaName || DEFAULT_GEMINI_SETTINGS.personaName),
+    operatorName: normalizeOperatorName(input.operatorName || DEFAULT_GEMINI_SETTINGS.operatorName),
     personalityPrompt: normalizePersonalityPrompt(input.personalityPrompt || DEFAULT_GEMINI_SETTINGS.personalityPrompt),
     memoryEnabled: normalizeMemoryEnabled(input.memoryEnabled ?? DEFAULT_GEMINI_SETTINGS.memoryEnabled),
     memoryNotes: normalizeMemoryNotes(input.memoryNotes || DEFAULT_GEMINI_SETTINGS.memoryNotes),
@@ -109,6 +116,7 @@ export async function loadGeminiRuntimeConfig() {
       thinkingLevel: local.thinkingLevel,
       voiceName: local.voiceName,
       personaName: local.personaName,
+      operatorName: local.operatorName,
       personalityPrompt: local.personalityPrompt,
       memoryEnabled: local.memoryEnabled,
       memoryNotes: local.memoryNotes,
@@ -127,6 +135,7 @@ export async function loadGeminiRuntimeConfig() {
       thinkingLevel: normalizeThinkingLevel(process.env.GEMINI_LIVE_THINKING_LEVEL || local.thinkingLevel),
       voiceName: normalizeVoiceName(process.env.GEMINI_LIVE_VOICE_NAME || local.voiceName),
       personaName: normalizePersonaName(process.env.GEMINI_LIVE_PERSONA_NAME || local.personaName),
+      operatorName: normalizeOperatorName(process.env.GEMINI_LIVE_OPERATOR_NAME || local.operatorName),
       personalityPrompt: normalizePersonalityPrompt(process.env.GEMINI_LIVE_PERSONALITY_PROMPT || local.personalityPrompt),
       memoryEnabled: normalizeMemoryEnabled(process.env.GEMINI_LIVE_MEMORY_ENABLED ?? local.memoryEnabled),
       memoryNotes: normalizeMemoryNotes(process.env.GEMINI_LIVE_MEMORY_NOTES || local.memoryNotes),
@@ -143,6 +152,7 @@ export async function loadGeminiRuntimeConfig() {
     thinkingLevel: local.thinkingLevel || 'minimal',
     voiceName: local.voiceName || DEFAULT_GEMINI_SETTINGS.voiceName,
     personaName: local.personaName || DEFAULT_GEMINI_SETTINGS.personaName,
+    operatorName: local.operatorName || DEFAULT_GEMINI_SETTINGS.operatorName,
     personalityPrompt: local.personalityPrompt || DEFAULT_GEMINI_SETTINGS.personalityPrompt,
     memoryEnabled: local.memoryEnabled,
     memoryNotes: local.memoryNotes || DEFAULT_GEMINI_SETTINGS.memoryNotes,

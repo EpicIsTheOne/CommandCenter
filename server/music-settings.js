@@ -11,6 +11,7 @@ export const DEFAULT_MUSIC_SETTINGS = {
   enabled: false,
   volume: 0.45,
   speechDuckLevel: 0.35,
+  fairyCallDuckLevel: 0.22,
   playbackScope: 'tab',
   selectedTrackId: '',
 };
@@ -30,6 +31,7 @@ function normalize(input = {}) {
     enabled: input.enabled === true,
     volume: normalizeVolume(input.volume),
     speechDuckLevel: normalizeVolume(input.speechDuckLevel ?? DEFAULT_MUSIC_SETTINGS.speechDuckLevel),
+    fairyCallDuckLevel: normalizeVolume(input.fairyCallDuckLevel ?? DEFAULT_MUSIC_SETTINGS.fairyCallDuckLevel),
     playbackScope: normalizeScope(input.playbackScope),
     selectedTrackId: String(input.selectedTrackId || '').trim(),
   };

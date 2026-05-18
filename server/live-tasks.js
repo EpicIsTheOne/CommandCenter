@@ -76,8 +76,12 @@ export function looksComplexRequest(text = '') {
     'build', 'implement', 'fix', 'debug', 'refactor', 'release', 'deploy', 'commit', 'github', 'pull request', 'pr ',
     'code', 'repository', 'repo', 'android app', 'backend', 'workflow', 'automation', 'openclaw', 'mission control',
     'write a script', 'edit files', 'change settings', 'multi-step', 'schedule', 'investigate', 'analyze the codebase',
+    'send a message', 'message ', 'text ', 'email ', 'dm ', 'notify ', 'contact ', 'reach out', 'tell ', 'say hi to',
   ];
-  return needles.some((needle) => input.includes(needle));
+  if (needles.some((needle) => input.includes(needle))) return true;
+  const likelyExternalAction = /(send|text|message|email|dm|notify|contact|tell|remind|invite|call)\s+.+\s+(to|about|that)/.test(input);
+  const saySomethingToSomeone = /(say\s+(hi|hello|hey|thanks|thank you|sorry)\s+to\s+)/.test(input);
+  return likelyExternalAction || saySomethingToSomeone;
 }
 
 export function runLiveTask(task, { broadcast, roster }) {

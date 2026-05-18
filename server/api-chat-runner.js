@@ -10,15 +10,26 @@ function summarizeMessageLine(message) {
 
 function buildPrompt(session, latestMessage, attachmentContext = '') {
   const history = Array.isArray(session.messages) ? session.messages.slice(-MAX_CONTEXT_MESSAGES) : [];
-  const historyLines = history.map(summarizeMessageLine).join('\n');
+  const priorHistory = history.slice(0, -1);
+  const historyLines = priorHistory.map(summarizeMessageLine).join('\n');
   return [
-    'You are continuing an API chat session with the same user.',
+    'You are replying inside a Command Center API chat session.',
     `Session agent: ${session.agent}`,
+    `Command Center chat id: ${session.id || 'unsaved'}`,
     historyLines ? `Conversation so far:\n${historyLines}` : '',
     `Latest user message:\n${String(latestMessage || '').trim()}`,
     attachmentContext || '',
-    'Reply naturally and continue the same conversation.',
+    'Treat only the conversation shown above as the active session context.',
+    'Ignore any unrelated OpenClaw session history, timeout continuation messages, heartbeat chatter, system recovery text, or prior conversations not explicitly shown above.',
+    'Do not assume missing prior turns, unfinished phrases, or off-screen history.',
+    'Reply naturally and directly to the latest user message.',
   ].filter(Boolean).join('\n\n');
+}
+
+function getOpenClawSessionId(session) {
+  const raw = String(session?.id || '').trim();
+  if (!raw) return '';
+  return `commandcenter_api_${raw}`;
 }
 
 export function runApiChatTurn({ session, latestMessage, attachmentContext = '', onEvent } = {}) {
@@ -34,15 +45,13 @@ export function runApiChatTurn({ session, latestMessage, attachmentContext = '',
 
     try { onEvent?.({ type: 'thinking', data: { agent: target, status: 'Processing...' } }); } catch {}
 
+    const openClawSessionId = getOpenClawSessionId(session);
     const args = [
       'agent', '--agent', target,
+      ...(openClawSessionId ? ['--session-id', openClawSessionId] : []),
       '--thinking', thinkingLevel,
       '--message', prompt,
     ];
-
-    if (session?.id) {
-      args.splice(3, 0, '--session-id', String(session.id));
-    }
 
     execFile(openclawBin, args, {
       timeout: 120000,

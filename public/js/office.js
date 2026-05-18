@@ -22,6 +22,9 @@ const BASE = window.__BASE_PATH__ || '';
 
 let canvas, ctx;
 let agents = [];
+let fullRoster = { agents: [], primaryAgentId: 'main' };
+let workspaceRooms = { version: 1, roomSize: 5, rooms: [] };
+let currentRoomId = '';
 let agentVisuals = {};
 let companionRegistry = {};
 const codexImageCache = new Map();
@@ -145,8 +148,17 @@ let huddleTopicIndex = 0;
 
 // --- Init & Data Fetching ---
 
+function getVisibleRosterAgents(roster = { agents: [] }) {
+  const all = roster.agents?.length ? roster.agents : [{ id: 'main', label: 'Main', color: '#FFD700', isBoss: true }];
+  const rooms = Array.isArray(workspaceRooms?.rooms) ? workspaceRooms.rooms : [];
+  const room = rooms.find((r) => r.id === currentRoomId) || rooms[0];
+  if (!room) return all.slice(0, 5);
+  const mapped = (room.agentIds || []).map((id) => all.find((a) => a.id === id)).filter(Boolean);
+  return mapped.length ? mapped.slice(0, 5) : all.slice(0, 5);
+}
+
 function buildAgentsFromRoster(roster = { agents: [], primaryAgentId: 'main' }) {
-  const sourceAgents = roster.agents?.length ? roster.agents : [{ id: 'main', label: 'Main', color: '#FFD700', isBoss: true }];
+  const sourceAgents = getVisibleRosterAgents(roster);
   const count = sourceAgents.length;
   agents = sourceAgents.map((agent, index) => {
     const existing = agents.find((item) => item.id === agent.id);
@@ -183,6 +195,13 @@ function buildAgentsFromRoster(roster = { agents: [], primaryAgentId: 'main' }) 
     }
     return built;
   });
+  if (typeof window !== 'undefined') {
+    window.__commandCenterOfficeDebug = {
+      currentRoomId,
+      visibleAgentIds: agents.map((a) => a.id),
+      roomAgentIds: getVisibleRosterAgents(fullRoster).map((a) => a.id),
+    };
+  }
 }
 
 export function init(canvasId, roster = { agents: [], primaryAgentId: 'main' }) {
@@ -191,7 +210,8 @@ export function init(canvasId, roster = { agents: [], primaryAgentId: 'main' }) 
   ctx.imageSmoothingEnabled = false;
   resize();
   window.addEventListener('resize', resize);
-  buildAgentsFromRoster(roster);
+  fullRoster = roster;
+  buildAgentsFromRoster(fullRoster);
   fetchWeather();
   fetchHealth();
 }
@@ -304,7 +324,15 @@ async function fetchHealth() {
 // --- Public API ---
 
 export function setRoster(roster = { agents: [], primaryAgentId: 'main' }) {
-  buildAgentsFromRoster(roster);
+  fullRoster = roster;
+  buildAgentsFromRoster(fullRoster);
+}
+
+export function setWorkspaceView({ roster, roomSettings, currentRoomId: roomId } = {}) {
+  if (roster) fullRoster = roster;
+  if (roomSettings) workspaceRooms = roomSettings;
+  if (roomId) currentRoomId = roomId;
+  buildAgentsFromRoster(fullRoster);
 }
 
 export function setAgentVisuals(visuals = {}, items = []) {

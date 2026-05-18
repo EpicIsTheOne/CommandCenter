@@ -574,20 +574,43 @@ body::after {
 }
 
 .setting-group input,
-.setting-group select {
+.setting-group select,
+.setting-group textarea {
   width: 100%;
   padding: 10px 12px;
   background: rgba(0, 0, 0, 0.2);
   border: 1px solid rgba(36, 47, 66, 0.78);
   border-radius: 6px;
   color: var(--text-primary);
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
 }
 
 .setting-group input:focus,
-.setting-group select:focus {
+.setting-group select:focus,
+.setting-group textarea:focus {
   border-color: var(--amber);
   outline: none;
+  box-shadow: 0 0 0 1px rgba(255, 184, 77, 0.18), 0 0 18px rgba(255, 184, 77, 0.08);
+  background: rgba(0, 0, 0, 0.26);
+}
+
+.setting-group textarea {
+  resize: vertical;
+  line-height: 1.45;
+  min-height: 120px;
+  font: inherit;
+}
+
+.setting-textarea {
+  display: block;
+}
+
+.setting-textarea-lg {
+  min-height: 168px;
+}
+
+.setting-textarea-md {
+  min-height: 132px;
 }
 
 .setting-group select option {
@@ -873,6 +896,19 @@ body::after {
   .header-button {
     padding: 2px 6px;
     font-size: 8px;
+  }
+
+  #fairy-live-camera-header-btn,
+  #fairy-live-camera-facing-header-btn {
+    display: inline-flex;
+  }
+
+  .status-camera-preview {
+    right: 8px;
+    bottom: 36px;
+    width: min(40%, 112px);
+    min-width: 78px;
+    min-height: 58px;
   }
 }
 
@@ -2386,12 +2422,59 @@ body[data-font-preset="modern"] {
   box-shadow: 0 0 18px rgba(102, 178, 204, 0.08) inset;
 }
 
+.status-camera-preview {
+  position: absolute;
+  right: 10px;
+  bottom: 42px;
+  z-index: 4;
+  width: min(34%, 132px);
+  min-width: 92px;
+  min-height: 68px;
+  aspect-ratio: 4 / 3;
+  border-color: rgba(102, 178, 204, 0.42);
+  background: rgba(3, 8, 14, 0.78);
+  box-shadow:
+    0 0 0 1px rgba(102, 178, 204, 0.08),
+    0 0 22px rgba(102, 178, 204, 0.22),
+    0 0 26px rgba(154, 122, 204, 0.12) inset;
+  animation: statusCameraFloat 3.8s ease-in-out infinite, statusCameraGlow 2.4s ease-in-out infinite;
+}
+
+.status-camera-preview::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  z-index: 2;
+  pointer-events: none;
+  border-radius: inherit;
+  background: linear-gradient(110deg, transparent 0%, rgba(154, 225, 255, 0.16) 44%, transparent 58%);
+  transform: translateX(-120%);
+  animation: statusCameraScan 2.8s linear infinite;
+}
+
+.status-camera-preview::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  border-radius: inherit;
+  background: repeating-linear-gradient(to bottom, rgba(255,255,255,0.035) 0 1px, transparent 1px 4px);
+  mix-blend-mode: screen;
+}
+
 .fairy-live-camera-preview {
   display: block;
   width: 100%;
+  height: 100%;
   max-height: 156px;
   object-fit: cover;
   background: rgba(0, 0, 0, 0.3);
+}
+
+.status-camera-preview .fairy-live-camera-preview {
+  max-height: none;
+  filter: saturate(1.08) contrast(1.05);
 }
 
 .fairy-live-camera-preview-label {
@@ -2406,6 +2489,30 @@ body[data-font-preset="modern"] {
   font-family: var(--font-display);
   font-size: 10px;
   letter-spacing: 1px;
+}
+
+.status-camera-preview .fairy-live-camera-preview-label {
+  left: 6px;
+  bottom: 5px;
+  z-index: 3;
+  padding: 2px 5px;
+  font-size: 8px;
+  letter-spacing: 0.8px;
+}
+
+@keyframes statusCameraFloat {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-3px) scale(1.015); }
+}
+
+@keyframes statusCameraGlow {
+  0%, 100% { border-color: rgba(102, 178, 204, 0.34); box-shadow: 0 0 0 1px rgba(102, 178, 204, 0.08), 0 0 18px rgba(102, 178, 204, 0.18), 0 0 22px rgba(154, 122, 204, 0.10) inset; }
+  50% { border-color: rgba(154, 225, 255, 0.64); box-shadow: 0 0 0 1px rgba(154, 225, 255, 0.14), 0 0 28px rgba(102, 178, 204, 0.34), 0 0 34px rgba(154, 122, 204, 0.18) inset; }
+}
+
+@keyframes statusCameraScan {
+  0% { transform: translateX(-130%); }
+  64%, 100% { transform: translateX(130%); }
 }
 
 .fairy-live-diagnostics {
@@ -2653,6 +2760,7 @@ body[data-font-preset="modern"] {
 
 #fairy-live-screen-header-btn.active,
 #fairy-live-camera-header-btn.active,
+#fairy-live-camera-facing-header-btn.active,
 .fairy-live-camera-facing.active {
   border-color: rgba(102, 178, 204, 0.48);
   color: var(--cyan);

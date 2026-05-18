@@ -391,6 +391,7 @@ await ensureBrandingStorage();
 
 const liveGeminiSessions = new Map();
 const liveGeminiWatchdogs = new Map();
+const announcedLiveTaskResults = new Set();
 app.use(`${basePath}/wakewords`, express.static(join(__dirname, '..', 'public', 'wakewords')));
 if (basePath) {
   app.get(basePath, (req, res) => res.redirect(basePath + '/'));
@@ -415,6 +416,152 @@ function setCallSessionState(sessionId, state, patch = {}, { broadcastState = tr
 
 function broadcastCallHandoff(type, sessionId, payload = {}) {
   broadcast({ type, data: { sessionId, ...payload } });
+}
+
+function stripAnsi(value = '') {
+  return String(value || '').replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '');
+}
+
+function compactForSpeech(value = '', maxChars = 1800) {
+  return stripAnsi(value)
+    .replace(/```[\s\S]*?```/g, (block) => block.replace(/```/g, '').slice(0, 900))
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxChars);
+}
+
+function findSessionForLiveTask(taskId = '') {
+  if (!taskId) return null;
+  return listCallSessions().find((session) => session.active && session.persona === 'fairy' && session.handoffTaskId === taskId) || null;
+}
+
+function inferTaskDomain(text = '') {
+  const input = String(text || '').toLowerCase();
+  if (/(ui|ux|frontend|front end|css|layout|button|mobile|responsive|animation|design)/.test(input)) return 'ui';
+  if (/(backend|server|api|database|db|infra|deploy|auth|socket|websocket|route)/.test(input)) return 'backend';
+  if (/(test|qa|repro|verify|validation|regression)/.test(input)) return 'qa';
+  if (/(research|investigate|why|compare|analyze|analysis|web search)/.test(input)) return 'research';
+  if (/(docs|readme|copy|write|wording|documentation)/.test(input)) return 'docs';
+  return 'general';
+}
+
+function describeAgentChoice(agentId = '', roster) {
+  const agents = Array.isArray(roster?.agents) ? roster.agents : [];
+  const agent = agents.find((item) => item.id === agentId) || {};
+  const label = compactForSpeech(agent.label || agent.name || agent.id || agentId || 'OpenClaw', 80);
+  const domain = inferTaskDomain(`${agent.id || ''} ${agent.label || ''} ${agent.name || ''}`);
+  if (domain === 'ui') return { label, reason: 'UI issue. Routing the visual specialist.' };
+  if (domain === 'backend') return { label, reason: 'Backend job. Routing the systems brain.' };
+  if (domain === 'qa') return { label, reason: 'Validation problem. Routing QA.' };
+  if (domain === 'research') return { label, reason: 'Research task. Routing the investigator.' };
+  if (domain === 'docs') return { label, reason: 'Docs work. Routing the writer.' };
+  return { label, reason: 'That needs Astra. Routing it through OpenClaw.' };
+}
+
+function buildHandoffSpokenSummary(text = '', agentId = '', roster) {
+  const { label, reason } = describeAgentChoice(agentId, roster);
+  const domain = inferTaskDomain(text);
+  if (domain === 'ui') return `${reason} ${label} gets this one.`;
+  if (domain === 'backend') return `${reason} ${label} gets it.`;
+  if (domain === 'qa') return `${reason} ${label} can verify it.`;
+  if (domain === 'research') return `${reason} ${label} can dig.`;
+  if (domain === 'docs') return `${reason} ${label} can tighten it up.`;
+  return reason;
+}
+
+function maybeAnnounceLiveTaskProgress(msg) {
+  if (msg?.type !== 'live_task:update') return;
+  const task = msg.data || {};
+  const taskId = String(task.id || '').trim();
+  const status = String(task.status || '').trim();
+  if (!taskId || status !== 'working') return;
+  const session = findSessionForLiveTask(taskId);
+  if (!session) return;
+  const updated = updateCallSession(session.id, { handoffTaskId: taskId, handoffTitle: task.title || session.handoffTitle || '' });
+  broadcast({
+    type: 'call:handoff.progress',
+    data: {
+      sessionId: session.id,
+      taskId,
+      status,
+      summary: task.summary || 'OpenClaw is working on it.',
+      title: task.title || session.handoffTitle || 'Background task',
+      session: updated || session,
+    },
+  });
+}
+
+function maybePromptScreenChange(sessionId, payload = {}) {
+  const session = getCallSession(sessionId);
+  if (!session || !session.active || !session.screenShareActive) return;
+  if (!['ready', 'listening'].includes(String(session.state || ''))) return;
+  const live = liveGeminiSessions.get(sessionId);
+  if (!live) return;
+  const avgDiff = Number(payload.avgDiff || 0);
+  const changedRatio = Number(payload.changedRatio || 0);
+  const prompt = [
+    'SYSTEM EVENT FOR LIVE CALL:',
+    'The shared screen changed noticeably.',
+    `Change strength: avgDiff=${avgDiff || 0}, changedRatio=${changedRatio || 0}`,
+    'Do not interrupt Epic just to narrate pixels. Simply update your visual assumptions. If Epic is already asking about the screen, use the newest frames. If you choose to speak, only mention meaningful state changes such as a new error, modal, redirect, enabled action, completed load, or a blocked step.',
+  ].join('\n');
+  broadcast({ type: 'call:debug', data: { sessionId, message: `Prompting Fairy with meaningful screen change (${avgDiff}/${changedRatio}).` } });
+  try {
+    live.sendTextTurn(prompt);
+  } catch (err) {
+    broadcast({ type: 'call:error', data: { sessionId, message: err.message || 'Could not send screen-change hint to Gemini' } });
+  }
+}
+
+function maybeAnnounceLiveTaskResult(msg) {
+  if (msg?.type !== 'live_task:update') return;
+  const task = msg.data || {};
+  const taskId = String(task.id || '').trim();
+  const status = String(task.status || '').trim();
+  if (!taskId || !['completed', 'failed', 'needs_input'].includes(status)) return;
+  const announcementKey = `${taskId}:${status}`;
+  if (announcedLiveTaskResults.has(announcementKey)) return;
+
+  const session = findSessionForLiveTask(taskId);
+  if (!session) return;
+  const live = liveGeminiSessions.get(session.id);
+  if (!live) return;
+  announcedLiveTaskResults.add(announcementKey);
+  if (announcedLiveTaskResults.size > 200) {
+    const oldest = announcedLiveTaskResults.values().next().value;
+    if (oldest) announcedLiveTaskResults.delete(oldest);
+  }
+
+  const title = compactForSpeech(task.title || session.handoffTitle || 'OpenClaw task', 180);
+  const agent = compactForSpeech(task.agent || session.agent || 'OpenClaw', 80);
+  const summary = compactForSpeech(task.summary || '', 700);
+  const result = compactForSpeech(task.result || task.error || '', 1800);
+  const statusLine = status === 'completed'
+    ? 'The OpenClaw agent finished successfully.'
+    : status === 'needs_input'
+      ? 'The OpenClaw agent needs more input from Epic.'
+      : 'The OpenClaw agent failed.';
+  const prompt = [
+    'SYSTEM EVENT FOR LIVE CALL:',
+    statusLine,
+    `Agent: ${agent}`,
+    `Task: ${title}`,
+    summary ? `Summary: ${summary}` : '',
+    result ? `Result/detail: ${result}` : '',
+    'Now tell Epic about this result out loud in your Fairy voice. Keep it concise, useful, and do not claim you personally did the backend work. Mention if Epic needs to answer or act next.',
+  ].filter(Boolean).join('\n');
+
+  const updated = setCallSessionState(session.id, 'thinking', {
+    handoffTaskId: taskId,
+    handoffTitle: title,
+  }, { broadcastState: false });
+  broadcast({ type: 'call:debug', data: { sessionId: session.id, message: `Prompting Fairy to announce live task ${taskId} (${status}).` } });
+  broadcast({ type: 'call:session.state', data: { sessionId: session.id, state: updated?.state || 'thinking', session: updated || session } });
+  try {
+    live.sendTextTurn(prompt);
+  } catch (err) {
+    broadcast({ type: 'call:error', data: { sessionId: session.id, message: err.message || 'Failed to prompt Fairy with task result' } });
+  }
 }
 
 function armLiveWatchdog(sessionId, text, { broadcast }) {
@@ -636,6 +783,7 @@ app.get(`${basePath}/api/settings/gemini`, async (req, res) => {
       voiceName: settings.voiceName || runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
       liveVoiceName: settings.voiceName || runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
       personaName: settings.personaName || runtime.personaName || 'Fairy',
+      operatorName: settings.operatorName || runtime.operatorName || 'Epic',
       personalityPrompt: settings.personalityPrompt || runtime.personalityPrompt || '',
       memoryEnabled: settings.memoryEnabled ?? runtime.memoryEnabled ?? true,
       memoryNotes: settings.memoryNotes || runtime.memoryNotes || '',
@@ -657,6 +805,7 @@ app.post(`${basePath}/api/settings/gemini`, async (req, res) => {
       thinkingLevel: body.thinkingLevel !== undefined ? String(body.thinkingLevel || '').trim() : existing.thinkingLevel,
       voiceName: body.voiceName !== undefined ? String(body.voiceName || '').trim() : existing.voiceName,
       personaName: body.personaName !== undefined ? String(body.personaName || '').trim() : existing.personaName,
+      operatorName: body.operatorName !== undefined ? String(body.operatorName || '').trim() : existing.operatorName,
       personalityPrompt: body.personalityPrompt !== undefined ? String(body.personalityPrompt || '') : existing.personalityPrompt,
       memoryEnabled: body.memoryEnabled !== undefined ? body.memoryEnabled !== false : existing.memoryEnabled,
       memoryNotes: body.memoryNotes !== undefined ? String(body.memoryNotes || '') : existing.memoryNotes,
@@ -674,6 +823,7 @@ app.post(`${basePath}/api/settings/gemini`, async (req, res) => {
         voiceName: saved.voiceName || runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
         liveVoiceName: saved.voiceName || runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
         personaName: saved.personaName || runtime.personaName || 'Fairy',
+        operatorName: saved.operatorName || runtime.operatorName || 'Epic',
         personalityPrompt: saved.personalityPrompt || runtime.personalityPrompt || '',
         memoryEnabled: saved.memoryEnabled ?? runtime.memoryEnabled ?? true,
         memoryNotes: saved.memoryNotes || runtime.memoryNotes || '',
@@ -1165,6 +1315,7 @@ app.post(`${basePath}/api/settings/music`, async (req, res) => {
       enabled: req.body?.enabled === true,
       volume: req.body?.volume,
       speechDuckLevel: req.body?.speechDuckLevel,
+      fairyCallDuckLevel: req.body?.fairyCallDuckLevel,
       playbackScope: req.body?.playbackScope,
       selectedTrackId: safeTrackId,
     });
@@ -2036,6 +2187,7 @@ app.get(`${basePath}/api/live/config`, async (req, res) => {
       voiceName: config.voiceName || FAIRY_LIVE_VOICE_NAME,
       liveVoiceName: config.voiceName || FAIRY_LIVE_VOICE_NAME,
       personaName: config.personaName || 'Fairy',
+      operatorName: config.operatorName || 'Epic',
       personalityPrompt: config.personalityPrompt || '',
       memoryEnabled: config.memoryEnabled ?? true,
       memoryNotes: config.memoryNotes || '',
@@ -2125,6 +2277,7 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
       systemPrompt: buildFairyLiveSystemPrompt({
         roster: currentRoster,
         personaName: runtime.personaName || 'Fairy',
+        operatorName: runtime.operatorName || 'Epic',
         personalityPrompt: runtime.personalityPrompt || '',
         memoryContext,
       }),
@@ -2212,49 +2365,72 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
                 }
                 broadcast({ type: 'call:debug', data: { sessionId: session.id, message: `Fairy requested web search: ${query.slice(0, 120)}` } });
                 broadcast({ type: 'call:web_search.started', data: { sessionId: session.id, query } });
-                try {
-                  const result = await runOpenClawWebSearch(query, { agentId: roster.primaryAgentId || session.agent || 'orchestrator' });
-                  const summary = summarizeWebSearchResult(result);
-                  broadcast({
-                    type: 'call:web_search.result',
-                    data: {
-                      sessionId: session.id,
-                      query,
-                      ok: true,
-                      preview: summary.preview,
-                      urls: summary.urls,
-                      domains: summary.domains,
-                    },
-                  });
-                  functionResponses.push({
-                    name,
-                    id,
-                    response: {
-                      ok: true,
-                      query,
-                      result,
-                    },
-                  });
-                } catch (error) {
-                  broadcast({
-                    type: 'call:web_search.result',
-                    data: {
-                      sessionId: session.id,
-                      query,
-                      ok: false,
-                      error: error.message || 'Web search failed',
-                    },
-                  });
-                  functionResponses.push({
-                    name,
-                    id,
-                    response: {
-                      ok: false,
-                      query,
-                      error: error.message || 'Web search failed',
-                    },
-                  });
-                }
+                functionResponses.push({
+                  name,
+                  id,
+                  response: {
+                    ok: true,
+                    query,
+                    started: true,
+                    pending: true,
+                    message: 'Web search started in the background. Acknowledge it briefly, keep listening, and tell Epic you will report back with results.',
+                  },
+                });
+                (async () => {
+                  try {
+                    const result = await runOpenClawWebSearch(query, { agentId: roster.primaryAgentId || session.agent || 'orchestrator' });
+                    const summary = summarizeWebSearchResult(result);
+                    broadcast({
+                      type: 'call:web_search.result',
+                      data: {
+                        sessionId: session.id,
+                        query,
+                        ok: true,
+                        preview: summary.preview,
+                        urls: summary.urls,
+                        domains: summary.domains,
+                      },
+                    });
+                    const live = liveGeminiSessions.get(session.id);
+                    if (live) {
+                      try {
+                        live.sendTextTurn([
+                          'SYSTEM EVENT FOR LIVE CALL:',
+                          `Background web search complete for query: ${query}`,
+                          summary.preview ? `Preview: ${summary.preview}` : '',
+                          summary.domains?.length ? `Sources: ${summary.domains.join(', ')}` : '',
+                          summary.urls?.length ? `URLs: ${summary.urls.slice(0, 3).join(' | ')}` : '',
+                          'Now tell Epic the web result briefly. Make it clear you checked the web, summarize the useful part, and keep the conversation moving.',
+                        ].filter(Boolean).join('\n'));
+                      } catch (err) {
+                        broadcast({ type: 'call:error', data: { sessionId: session.id, message: err.message || 'Could not relay web search result to Fairy' } });
+                      }
+                    }
+                  } catch (error) {
+                    broadcast({
+                      type: 'call:web_search.result',
+                      data: {
+                        sessionId: session.id,
+                        query,
+                        ok: false,
+                        error: error.message || 'Web search failed',
+                      },
+                    });
+                    const live = liveGeminiSessions.get(session.id);
+                    if (live) {
+                      try {
+                        live.sendTextTurn([
+                          'SYSTEM EVENT FOR LIVE CALL:',
+                          `Background web search failed for query: ${query}`,
+                          `Error: ${error.message || 'Web search failed'}`,
+                          'Tell Epic plainly that the web check failed, then continue the conversation without pretending you verified anything.',
+                        ].join('\n'));
+                      } catch (err) {
+                        broadcast({ type: 'call:error', data: { sessionId: session.id, message: err.message || 'Could not relay web search failure to Fairy' } });
+                      }
+                    }
+                  }
+                })();
                 continue;
               }
               if (name !== 'handoff_to_openclaw') {
@@ -2263,11 +2439,11 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
               }
               const prompt = String(args.prompt || '').trim();
               const title = String(args.title || prompt.slice(0, 80) || 'OpenClaw task').trim();
-              const summary = String(args.summary || "I'm working on that through OpenClaw.").trim();
               const requestedAgent = String(args.agent || session.agent || 'orchestrator').trim();
               const agent = roster.agents.some((item) => item.id === requestedAgent)
                 ? requestedAgent
                 : String(roster.primaryAgentId || session.agent || 'orchestrator').trim();
+              const summary = String(args.summary || buildHandoffSpokenSummary(prompt, agent, roster)).trim();
               if (!prompt) {
                 functionResponses.push({ name, id, response: { error: 'Missing prompt for handoff_to_openclaw' } });
                 continue;
@@ -2448,7 +2624,7 @@ app.post(`${basePath}/api/call/:id/event`, async (req, res) => {
 
       if (looksComplexRequest(text)) {
         const title = text.slice(0, 80) || 'Background task';
-        const summary = "That needs Astra. Routing it through OpenClaw.";
+        const summary = buildHandoffSpokenSummary(text, session.agent, roster);
         const started = setCallSessionState(sessionId, 'handing_off', { handoffTitle: title, handoffTaskId: '' });
         broadcastCallHandoff('call:handoff.started', sessionId, { title, summary, agent: session.agent, session: started });
         const task = await createLiveTask({
@@ -2517,13 +2693,21 @@ ${text}`
       const live = liveGeminiSessions.get(sessionId);
       if (live) {
         try {
-          live.sendTextTurn('Screen sharing is now active. Use incoming screen frames as visual context. If Epic asks about the screen, answer based on what you can see. If he asks for changes or actions, hand off to OpenClaw.');
+          live.sendTextTurn('Screen sharing is now active. Use incoming screen frames as visual context. Prioritize meaningful changes: errors, warnings, redirects, enabled actions, blocked flows, modals, completed loads, auth failures, and obvious next steps. Do not narrate every frame. If Epic asks for changes or actions, hand off to OpenClaw.');
         } catch (err) {
           broadcast({ type: 'call:error', data: { sessionId, message: err.message || 'Could not send screen context to Gemini' } });
         }
       }
       broadcast({ type: 'call:screen.enabled', data: { sessionId, session: updated } });
       return res.json({ ok: true, session: updated });
+    }
+
+    if (eventType === 'screen.changed') {
+      const avgDiff = Number(req.body?.avgDiff || 0);
+      const changedRatio = Number(req.body?.changedRatio || 0);
+      broadcast({ type: 'call:screen.changed', data: { sessionId, avgDiff, changedRatio } });
+      maybePromptScreenChange(sessionId, { avgDiff, changedRatio });
+      return res.json({ ok: true, session: getCallSession(sessionId) });
     }
 
     if (eventType === 'screen.stopped') {
@@ -2651,6 +2835,7 @@ app.get(`${basePath}/api/v1/fairy/config`, async (req, res) => {
       thinkingLevel: config.thinkingLevel,
       voiceName: config.voiceName || FAIRY_LIVE_VOICE_NAME,
       personaName: config.personaName || 'Fairy',
+      operatorName: config.operatorName || 'Epic',
       personalityPrompt: config.personalityPrompt || '',
       memoryEnabled: config.memoryEnabled ?? true,
       memoryNotes: config.memoryNotes || '',
@@ -3118,6 +3303,8 @@ function shouldSuppressBroadcast(msg) {
 
 function broadcast(msg) {
   if (shouldSuppressBroadcast(msg)) return;
+  maybeAnnounceLiveTaskProgress(msg);
+  maybeAnnounceLiveTaskResult(msg);
   const payload = JSON.stringify(msg);
   for (const client of wss.clients) {
     if (client.readyState === 1) {
