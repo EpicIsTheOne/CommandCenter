@@ -13,7 +13,7 @@
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=VT323&family=Inter:wght@400;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/styles.css?v=20260517-fairy-search1">
+  <link rel="stylesheet" href="css/styles.css?v=20260518-fairy-image2">
 </head>
 <body>
   <div id="command-center">
@@ -27,6 +27,17 @@
       <div id="fairy-live-camera-preview-wrap" class="fairy-live-camera-preview-wrap status-camera-preview hidden" aria-label="Camera preview">
         <video id="fairy-live-camera-preview" class="fairy-live-camera-preview" muted playsinline></video>
         <span id="fairy-live-camera-preview-label" class="fairy-live-camera-preview-label">BACK CAM</span>
+      </div>
+      <div id="fairy-live-image-card" class="fairy-live-image-card status-camera-preview hidden" aria-label="Fairy image display">
+        <img id="fairy-live-image-card-img" class="fairy-live-image-card-img" alt="">
+        <div class="fairy-live-image-card-meta">
+          <div id="fairy-live-image-card-title" class="fairy-live-image-card-title">IMAGE</div>
+          <div class="fairy-live-image-card-actions">
+            <a id="fairy-live-image-card-open" class="fairy-live-image-card-link" href="#" target="_blank" rel="noopener noreferrer">OPEN</a>
+            <button id="fairy-live-image-card-copy" class="fairy-live-image-card-copy" type="button">COPY LINK</button>
+            <button id="fairy-live-image-card-dismiss" class="fairy-live-image-card-copy" type="button">DISMISS</button>
+          </div>
+        </div>
       </div>
       <div id="mascot-label">IDLE</div>
     </div>

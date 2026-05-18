@@ -2,6 +2,7 @@
 import * as terminal from './terminal.js?v=20260320j';
 import * as voice from './voice.js?v=20260515-voicefix2';
 import * as companions from './companions.js?v=20260515-noflicker2';
+import * as fairyLive from './fairy-live.js?v=20260518-fairy-chatcall1';
 
 const BASE = window.__BASE_PATH__ || '';
 
@@ -50,6 +51,7 @@ export function init() {
   createPanel();
   loadRoster();
   loadFileLibrary();
+  window.addEventListener('commandcenter:fairy-directchat-update', syncFairyLiveAgent);
 }
 
 function createLauncher() {
@@ -228,9 +230,18 @@ async function loadSessionMessages(sessionId) {
   }
 }
 
+function getRosterWithFairy() {
+  const baseAgents = roster.agents?.length ? [...roster.agents] : [{ id: 'main', label: 'Main', color: '#FFD700' }];
+  const fairyAgent = fairyLive.getDirectChatAgent?.();
+  if (fairyAgent && !baseAgents.some((agent) => agent.id === fairyAgent.id)) {
+    baseAgents.unshift(fairyAgent);
+  }
+  return baseAgents;
+}
+
 function renderAgentList() {
   if (!agentListEl) return;
-  const agents = roster.agents?.length ? roster.agents : [{ id: 'main', label: 'Main', color: '#FFD700' }];
+  const agents = getRosterWithFairy();
   agentListEl.innerHTML = agents.map((agent) => `
     <div class="dc-agent-item" data-agent-id="${agent.id}" style="--agent-color: ${agent.color || '#AA66FF'}">
       ${agent.visual?.mode === 'companion'
@@ -272,6 +283,7 @@ async function openChatWithAgent(agentId) {
   activeChatSessionId = null;
   isFileLibraryExpanded = false;
   isSessionMenuOpen = false;
+  if (isFairyAgent(agentId)) activeChatMode = 'agent';
   syncModeToggle();
 
   const agent = getAgent(agentId);
@@ -293,14 +305,21 @@ async function openChatWithAgent(agentId) {
   syncFileLibraryVisibility();
   syncSessionMenuVisibility();
 
-  const sessions = await loadAgentSessions(agentId);
-  if (sessions.length) {
-    await selectSession(sessions[0].id);
-  } else {
-    chatHistory[getActiveHistoryKey()] = [];
-    updateSessionTitle(activeChatMode === 'roleplay' ? 'New roleplay' : 'New session');
+  if (isFairyAgent(agentId)) {
+    syncFairyLiveAgent();
+    updateSessionTitle('Live call');
     renderMessages();
     renderSessionList();
+  } else {
+    const sessions = await loadAgentSessions(agentId);
+    if (sessions.length) {
+      await selectSession(sessions[0].id);
+    } else {
+      chatHistory[getActiveHistoryKey()] = [];
+      updateSessionTitle(activeChatMode === 'roleplay' ? 'New roleplay' : 'New session');
+      renderMessages();
+      renderSessionList();
+    }
   }
 
   renderFileLibrary();
@@ -322,8 +341,14 @@ function showAgentList() {
 }
 
 function getAgent(agentId) {
+  const fairyAgent = fairyLive.getDirectChatAgent?.();
+  if (fairyAgent && fairyAgent.id === agentId) return fairyAgent;
   return roster.agents?.find((a) => a.id === agentId)
     || { id: agentId, label: agentId, color: '#AA66FF', visual: companionVisuals[agentId] || { mode: 'default' } };
+}
+
+function isFairyAgent(agentId = activeChatAgent) {
+  return !!fairyLive.isDirectChatAgent?.(agentId);
 }
 
 function applyAgentTheme(agent = null) {
@@ -335,20 +360,27 @@ function applyAgentTheme(agent = null) {
 }
 
 function getActiveHistoryKey() {
+  if (isFairyAgent()) return `fairy-live:${fairyLive.isLiveCallActive?.() ? 'active' : 'inactive'}`;
   if (activeChatSessionId) return activeChatSessionId;
   if (activeChatAgent) return `${activeChatAgent}:${activeChatMode}`;
   return `main:${activeChatMode}`;
 }
 
 function syncModeToggle() {
+  const fairyMode = isFairyAgent();
   modeToggleEls.forEach((btn) => {
     const active = (btn.dataset.chatMode || 'agent') === activeChatMode;
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-pressed', String(active));
+    btn.disabled = fairyMode;
+    btn.classList.toggle('hidden', fairyMode);
   });
+  if (sessionMenuToggleEl) sessionMenuToggleEl.classList.toggle('hidden', fairyMode);
+  if (newSessionBtnEl) newSessionBtnEl.classList.toggle('hidden', fairyMode);
 }
 
 async function setChatMode(mode = 'agent') {
+  if (isFairyAgent()) return;
   const nextMode = String(mode || 'agent') === 'roleplay' ? 'roleplay' : 'agent';
   if (nextMode === activeChatMode) return;
   activeChatMode = nextMode;
@@ -411,10 +443,24 @@ function removeTypingMessage(key) {
   if (idx !== -1) history.splice(idx, 1);
 }
 
+function getFairyHistory() {
+  const base = (fairyLive.getTranscriptMessages?.() || []).map((msg) => ({
+    id: msg.id,
+    role: msg.role === 'user' ? 'user' : 'agent',
+    kind: msg.role === 'error' ? 'error' : 'text',
+    text: String(msg.text || ''),
+    timestamp: Number(msg.timestamp || Date.now()),
+    meta: msg.meta || '',
+    files: [],
+  }));
+  const local = (chatHistory[getActiveHistoryKey()] || []).filter((msg) => msg.kind === 'typing' || msg.kind === 'error');
+  return [...base, ...local];
+}
+
 function renderMessages() {
   if (!activeChatAgent || !chatAreaEl) return;
   const container = chatAreaEl.querySelector('.dc-messages');
-  const messages = chatHistory[getActiveHistoryKey()] || [];
+  const messages = isFairyAgent() ? getFairyHistory() : (chatHistory[getActiveHistoryKey()] || []);
 
   if (!messages.length) {
     container.innerHTML = '<div class="dc-empty">Send a message to start the conversation</div>';
@@ -652,6 +698,10 @@ function updateSessionTitle(label = '') {
 
 function renderSessionList(query = '') {
   if (!sessionListEl || !activeChatAgent) return;
+  if (isFairyAgent()) {
+    sessionListEl.innerHTML = '<div class="dc-empty dc-session-empty">Fairy Live uses the current call transcript</div>';
+    return;
+  }
   const needle = String(query || '').trim().toLowerCase();
   const sessions = (sessionsByAgent[activeChatAgent] || []).filter((session) => {
     if (!needle) return true;
@@ -687,7 +737,7 @@ async function selectSession(sessionId) {
 }
 
 async function createNewSession() {
-  if (!activeChatAgent) return;
+  if (!activeChatAgent || isFairyAgent()) return;
   try {
     const res = await fetch(`${BASE}/api/chat/sessions`, {
       method: 'POST',
@@ -717,18 +767,27 @@ async function sendMessage() {
   if (!text) return;
 
   const historyKey = getActiveHistoryKey();
+  const fairyMode = isFairyAgent();
   const files = selectedFileIds.map((id) => fileLibrary.find((item) => item.id === id)).filter(Boolean);
-  addMessage(historyKey, { role: 'user', text, kind: 'text', files });
+  if (!fairyMode) addMessage(historyKey, { role: 'user', text, kind: 'text', files });
   addMessage(historyKey, { role: 'agent', kind: 'typing', text: '' });
   pendingByAgent[activeChatAgent] = true;
   messageInputEl.value = '';
   renderMessages();
 
   const agentLabel = getAgent(activeChatAgent).label;
-  const modeLabel = activeChatMode === 'roleplay' ? `roleplay:${ROLEPLAY_MODEL}` : 'agent';
+  const modeLabel = fairyMode ? 'fairy-live' : (activeChatMode === 'roleplay' ? `roleplay:${ROLEPLAY_MODEL}` : 'agent');
   terminal.log(`[you → ${agentLabel} (${modeLabel})] ${text}`, 'agent', true);
 
   try {
+    if (fairyMode) {
+      await fairyLive.sendDirectChatMessage?.(text);
+      pendingByAgent[activeChatAgent] = false;
+      removeTypingMessage(historyKey);
+      renderMessages();
+      return;
+    }
+
     const payload = activeChatSessionId
       ? { message: text, sessionId: activeChatSessionId, fileIds: selectedFileIds, mode: activeChatMode, model: activeChatMode === 'roleplay' ? ROLEPLAY_MODEL : '' }
       : { message: text, agent: activeChatAgent, fileIds: selectedFileIds, mode: activeChatMode, model: activeChatMode === 'roleplay' ? ROLEPLAY_MODEL : '' };
@@ -780,8 +839,42 @@ async function sendMessage() {
   }
 }
 
+function syncFairyLiveAgent() {
+  renderAgentList();
+  if (!activeChatAgent || !isFairyAgent(activeChatAgent)) return;
+  updateSessionTitle('Live call');
+  renderSessionList();
+  renderMessages();
+}
+
 export function handleChatEvent(msg) {
   const { type, data } = msg || {};
+
+  if (isFairyAgent(activeChatAgent)) {
+    const historyKey = getActiveHistoryKey();
+    if (type === 'call:transcript.final' && data?.sessionId) {
+      removeTypingMessage(historyKey);
+      addMessage(historyKey, { role: 'agent', kind: 'typing', text: '' });
+      pendingByAgent[activeChatAgent] = true;
+      renderMessages();
+      return;
+    }
+    if (type === 'call:response.text' && data?.sessionId) {
+      if (data.done) {
+        pendingByAgent[activeChatAgent] = false;
+        removeTypingMessage(historyKey);
+      }
+      renderMessages();
+      return;
+    }
+    if (type === 'call:assistant.interrupted' || type === 'call:error' || type === 'call:session.ended') {
+      pendingByAgent[activeChatAgent] = false;
+      removeTypingMessage(historyKey);
+      renderMessages();
+      return;
+    }
+  }
+
   const agentId = data?.agent;
   if (!agentId || !pendingByAgent[agentId]) return;
   if (agentId !== activeChatAgent) return;

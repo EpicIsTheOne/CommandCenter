@@ -3,16 +3,16 @@ import * as mascot from './mascot.js?v=20260509y';
 import * as office from './office.js?v=20260516-rooms7';
 import * as voice from './voice.js?v=20260515-voicefix2';
 import * as wake from './wake.js?v=20260320l';
-import * as directChat from './direct-chat.js?v=20260516-sessionfix1';
+import * as directChat from './direct-chat.js?v=20260518-fairy-chatcall1';
 import * as companions from './companions.js?v=20260515-voicefix2';
 import * as music from './music.js?v=20260514c';
 import * as intro from './intro.js?v=20260514b';
 import * as appearance from './appearance.js?v=20260514b';
 import * as branding from './branding.js?v=20260514b';
 import * as layoutSettings from './layout-settings.js?v=20260514b';
-import * as fairyLive from './fairy-live.js?v=20260517-fairy-search1';
+import * as fairyLive from './fairy-live.js?v=20260518-fairy-image2';
 
-const APP_BUILD = '20260517-fairy-search1';
+const APP_BUILD = '20260518-fairy-chatcall1';
 console.log('[CommandCenter] app build:', APP_BUILD);
 
 let roster = { agents: [], primaryAgentId: 'main' };
@@ -2361,6 +2361,18 @@ async function main() {
   office.setAgentVisuals(currentCompanionSettings.agentVisuals ? Object.fromEntries(roster.agents.map((agent) => [agent.id, companions.getAgentVisual(agent.id)])) : {}, availableCompanions);
   directChat.init();
   fairyLive.init();
+  window.addEventListener('commandcenter:fairy-status', (event) => {
+    const detail = event?.detail || {};
+    if (!detail.active) {
+      mascot.setEmotion('idle');
+      return;
+    }
+    if (detail.speaking) mascot.setEmotion('happy');
+    else if (detail.thinking) mascot.setEmotion('thinking');
+    else if (detail.listening) mascot.setEmotion('listening');
+    else if (detail.status === 'error') mascot.setEmotion('error');
+    else mascot.setEmotion('idle');
+  });
   initPwaInstall();
   directChat.setRoster(roster);
   directChat.setCompanionData(Object.fromEntries(roster.agents.map((agent) => [agent.id, companions.getAgentVisual(agent.id)])), availableCompanions);

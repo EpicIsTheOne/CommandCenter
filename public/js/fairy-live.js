@@ -52,6 +52,10 @@ const state = {
   interrupting: false,
   lastInterruptAt: 0,
   personaName: 'Fairy',
+  transcriptEntries: [],
+  pendingAssistantText: '',
+  imageCard: null,
+  imageHideTimer: null,
 };
 
 const els = {};
@@ -87,6 +91,20 @@ function emitLog(message, tone = 'info') {
 
 function emitFairyCallAudioEvent(type, detail = {}) {
   window.dispatchEvent(new CustomEvent(type, { detail }));
+}
+
+function emitDirectChatSync(reason = 'update', extra = {}) {
+  window.dispatchEvent(new CustomEvent('commandcenter:fairy-directchat-update', {
+    detail: {
+      reason,
+      active: isSessionActive(),
+      sessionId: state.sessionId,
+      personaName: personaName(),
+      status: state.status,
+      transcriptCount: state.transcriptEntries.length,
+      ...extra,
+    },
+  }));
 }
 
 function renderDiagnostics() {
@@ -131,6 +149,54 @@ async function fetchJson(url, options = {}) {
 function setHidden(el, hidden) {
   if (!el) return;
   el.classList.toggle('hidden', !!hidden);
+}
+
+async function copyTextValue(text) {
+  const value = String(text || '').trim();
+  if (!value) return false;
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function updateImageCardUi() {
+  const active = !!(state.imageCard && state.imageCard.imageUrl);
+  if (els.imageCard) setHidden(els.imageCard, !active);
+  if (!active) return;
+  if (els.imageCardImg) {
+    els.imageCardImg.src = state.imageCard.imageUrl;
+    els.imageCardImg.alt = state.imageCard.title || 'Fairy image';
+  }
+  if (els.imageCardTitle) els.imageCardTitle.textContent = String(state.imageCard.title || 'IMAGE').slice(0, 80).toUpperCase();
+  if (els.imageCardOpen) els.imageCardOpen.href = state.imageCard.sourceUrl || state.imageCard.imageUrl || '#';
+  if (els.imageCardCopy) els.imageCardCopy.disabled = !state.imageCard.imageUrl;
+}
+
+function dismissImageCard() {
+  clearTimeout(state.imageHideTimer);
+  state.imageHideTimer = null;
+  state.imageCard = null;
+  updateImageCardUi();
+}
+
+function showImageCard(card = {}, timeoutMs = 45000) {
+  clearTimeout(state.imageHideTimer);
+  state.imageCard = {
+    title: String(card.title || card.query || 'Image').trim(),
+    imageUrl: String(card.imageUrl || '').trim(),
+    sourceUrl: String(card.sourceUrl || '').trim(),
+    copyText: String(card.copyText || card.imageUrl || '').trim(),
+    why: String(card.why || '').trim(),
+  };
+  updateImageCardUi();
+  if (timeoutMs > 0) {
+    state.imageHideTimer = setTimeout(() => {
+      dismissImageCard();
+    }, timeoutMs);
+  }
 }
 
 
@@ -204,6 +270,44 @@ export function shouldSuppressAgentSpeech() {
   return isSessionActive();
 }
 
+export function getPersonaName() {
+  return personaName();
+}
+
+export function getTranscriptMessages() {
+  return state.transcriptEntries.map((entry) => ({ ...entry }));
+}
+
+export function getDirectChatAgent() {
+  if (!isSessionActive()) return null;
+  return {
+    id: 'fairy-live',
+    label: personaName(),
+    name: personaName(),
+    color: '#d8c4ff',
+    isFairyLive: true,
+    visual: { mode: 'default' },
+  };
+}
+
+export function isDirectChatAgent(agentId = '') {
+  return String(agentId || '').trim() === 'fairy-live';
+}
+
+export async function sendDirectChatMessage(text = '') {
+  const value = String(text || '').trim();
+  if (!value) return { ok: false, error: 'No text provided' };
+  if (!state.sessionId) throw new Error(`Start ${personaName()} Live before sending text.`);
+  appendTranscript('user', value, 'Epic');
+  setStatus('thinking', `${personaName()} is deciding whether to answer or hand this to Astra…`);
+  await fetchJson(`${BASE}/api/call/${encodeURIComponent(state.sessionId)}/event`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'transcript.final', text: value }),
+  });
+  return { ok: true, sessionId: state.sessionId };
+}
+
 function updateMicUi() {
   if (els.mic) {
     els.mic.disabled = !state.sessionId;
@@ -253,6 +357,7 @@ function updateCameraUi() {
   }
   if (els.cameraPreviewWrap) setHidden(els.cameraPreviewWrap, !state.cameraActive);
   if (els.cameraPreviewLabel) els.cameraPreviewLabel.textContent = `${state.cameraFacingMode === 'user' ? 'FRONT' : 'BACK'} CAM`;
+  updateImageCardUi();
   updateHeaderCallControls();
   renderDiagnostics();
 }
@@ -270,18 +375,74 @@ function setStatus(status, message = '') {
   updateHeaderCallControls();
   updateMicUi();
   updateScreenUi();
+  emitDirectChatSync('status', { message });
+  window.dispatchEvent(new CustomEvent('commandcenter:fairy-status', {
+    detail: {
+      sessionId: state.sessionId,
+      active: isSessionActive(),
+      status: state.status,
+      message,
+      personaName: personaName(),
+      speaking: state.status === 'speaking',
+      listening: state.status === 'listening',
+      thinking: state.status === 'thinking' || state.status === 'handing_off' || state.status === 'task_running',
+    },
+  }));
 }
 
 function appendTranscript(role, text, meta = '') {
-  if (!els.transcript || !text) return;
-  const row = document.createElement('div');
-  row.className = `fairy-live-line ${role}`;
-  row.innerHTML = `
-    <div class="fairy-live-line-meta">${escapeHtml(meta || role)}</div>
-    <div class="fairy-live-line-text">${escapeHtml(text)}</div>
-  `;
-  els.transcript.appendChild(row);
-  els.transcript.scrollTop = els.transcript.scrollHeight;
+  if (!text) return;
+  const entry = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    role: String(role || 'system'),
+    text: String(text || ''),
+    meta: String(meta || role || ''),
+    timestamp: Date.now(),
+  };
+  state.transcriptEntries.push(entry);
+  if (state.transcriptEntries.length > 160) state.transcriptEntries.splice(0, state.transcriptEntries.length - 160);
+  if (els.transcript) {
+    const row = document.createElement('div');
+    row.className = `fairy-live-line ${role}`;
+    row.innerHTML = `
+      <div class="fairy-live-line-meta">${escapeHtml(meta || role)}</div>
+      <div class="fairy-live-line-text">${escapeHtml(text)}</div>
+    `;
+    els.transcript.appendChild(row);
+    els.transcript.scrollTop = els.transcript.scrollHeight;
+  }
+  emitDirectChatSync('transcript', { entry });
+}
+
+function mergeAssistantChunk(currentText = '', nextChunk = '') {
+  const current = String(currentText || '');
+  const next = String(nextChunk || '');
+  if (!next.trim()) return current;
+  if (!current.trim()) return next;
+
+  if (next.startsWith(current)) return next;
+  if (current.startsWith(next) && current.length > next.length) return current;
+
+  const maxOverlap = Math.min(current.length, next.length);
+  for (let i = maxOverlap; i > 0; i -= 1) {
+    if (current.slice(-i) === next.slice(0, i)) {
+      return current + next.slice(i);
+    }
+  }
+
+  const currentTrimmed = current.trimEnd();
+  const nextTrimmed = next.trimStart();
+  const glue = /[\s\n]$/.test(current) || /^[,.;:!?)}\]]/.test(nextTrimmed) ? '' : ' ';
+  return `${currentTrimmed}${glue}${nextTrimmed}`;
+}
+
+function commitPendingAssistantText(reason = 'done') {
+  const text = String(state.pendingAssistantText || '').trim();
+  if (!text) return '';
+  appendTranscript('fairy', text, personaName());
+  state.pendingAssistantText = '';
+  emitDirectChatSync('assistant-commit', { reason, text });
+  return text;
 }
 
 function renderHandoff(text = '', tone = '') {
@@ -958,6 +1119,9 @@ async function startCall() {
       body: JSON.stringify({ persona: 'fairy' }),
     });
     state.sessionId = data.session?.id || '';
+    state.transcriptEntries = [];
+    state.pendingAssistantText = '';
+    emitDirectChatSync('session-start');
     setStatus(data.session?.state || 'ready', `${personaName()} is live. Auto-enabling the mic now.`);
     emitFairyCallAudioEvent('commandcenter:fairy-call-start', { sessionId: state.sessionId });
     appendTranscript('system', `${personaName()} session started: ${state.sessionId}`, 'system');
@@ -984,6 +1148,7 @@ async function endCall() {
     state.interrupting = false;
     await fetchJson(`${BASE}/api/call/${encodeURIComponent(id)}/end`, { method: 'POST' });
     state.sessionId = '';
+    emitDirectChatSync('session-end');
     setStatus('ended', `${personaName()} Live ended. The desk is quiet again. Suspiciously quiet.`);
     emitFairyCallAudioEvent('commandcenter:fairy-call-end', { sessionId: id });
     appendTranscript('system', `${personaName()} session ended: ${id}`, 'system');
@@ -1068,6 +1233,12 @@ export function init() {
   els.cameraPreviewWrap = document.getElementById('fairy-live-camera-preview-wrap');
   els.cameraPreview = document.getElementById('fairy-live-camera-preview');
   els.cameraPreviewLabel = document.getElementById('fairy-live-camera-preview-label');
+  els.imageCard = document.getElementById('fairy-live-image-card');
+  els.imageCardImg = document.getElementById('fairy-live-image-card-img');
+  els.imageCardTitle = document.getElementById('fairy-live-image-card-title');
+  els.imageCardOpen = document.getElementById('fairy-live-image-card-open');
+  els.imageCardCopy = document.getElementById('fairy-live-image-card-copy');
+  els.imageCardDismiss = document.getElementById('fairy-live-image-card-dismiss');
   els.text = document.getElementById('fairy-live-text');
   els.send = document.getElementById('fairy-live-send');
 
@@ -1085,6 +1256,16 @@ export function init() {
   els.camera?.addEventListener('click', (event) => { event.stopPropagation(); startCameraShare(); });
   els.cameraFacing?.addEventListener('click', (event) => { event.stopPropagation(); toggleCameraFacingMode(); });
   els.send?.addEventListener('click', (event) => { event.stopPropagation(); sendTextTurn(); });
+  els.imageCardCopy?.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    const ok = await copyTextValue(state.imageCard?.copyText || state.imageCard?.imageUrl || '');
+    showOverlay(ok ? 'Image link copied.' : 'Could not copy image link.', ok ? 'tool' : 'error', 2800);
+  });
+  els.imageCardDismiss?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    dismissImageCard();
+    showOverlay('Image dismissed.', 'tool', 1800);
+  });
   els.text?.addEventListener('keydown', (event) => {
     event.stopPropagation();
     if (event.key === 'Enter') {
@@ -1096,6 +1277,7 @@ export function init() {
   updateMicUi();
   updateScreenUi();
   updateCameraUi();
+  updateImageCardUi();
   updateLaunchUi();
   updateHeaderCallControls();
   renderDiagnostics();
@@ -1123,6 +1305,7 @@ export function handleEvent(msg = {}) {
       stopScreenShare().catch(() => {});
       stopCameraShare().catch(() => {});
       stopPlayback();
+      commitPendingAssistantText('session-ended');
       state.interrupting = false;
       state.sessionId = '';
       setStatus('ended', `${personaName()} Live ended.`);
@@ -1145,18 +1328,21 @@ export function handleEvent(msg = {}) {
   }
 
   if (type === 'call:transcript.final' && data.sessionId === state.sessionId) {
+    state.pendingAssistantText = '';
     setStatus(data.state || 'thinking', `${personaName()} is thinking…`);
     return;
   }
 
   if (type === 'call:response.text' && data.sessionId === state.sessionId) {
-    appendTranscript('fairy', data.text || '', personaName());
-    const rawText = String(data.text || '');
-    const tone = /confirmed from the web|web check says|checked the web/i.test(rawText) ? 'tool' : 'fairy';
-    showOverlay(escapeHtml(rawText), tone, 8500);
+    const rawText = String(data.text || '').trim();
+    if (rawText) state.pendingAssistantText = mergeAssistantChunk(state.pendingAssistantText, rawText);
+    const displayText = String(state.pendingAssistantText || rawText || '').trim();
+    const tone = /confirmed from the web|web check says|checked the web/i.test(displayText) ? 'tool' : 'fairy';
+    showOverlay(escapeHtml(displayText), tone, 8500);
     markEvent('response text');
-    setStatus(data.state || (data.done ? 'speaking' : 'thinking'), data.text || `${personaName()} responded.`);
+    setStatus(data.state || (data.done ? 'speaking' : 'thinking'), displayText || `${personaName()} responded.`);
     if (data.taskId) state.lastTaskId = data.taskId;
+    if (data.done) commitPendingAssistantText('done');
     return;
   }
 
@@ -1206,6 +1392,34 @@ export function handleEvent(msg = {}) {
     const text = String(data.entry?.text || 'Memory saved.').trim();
     showOverlay(`Memory saved: ${escapeHtml(text.slice(0, 180))}`, 'tool', 6500);
     markEvent('memory saved');
+    return;
+  }
+
+  if (type === 'call:settings.updated' && data.sessionId === state.sessionId) {
+    const section = String(data.section || 'settings').trim();
+    const changed = Array.isArray(data.changedKeys) ? data.changedKeys.filter(Boolean).slice(0, 6) : [];
+    showOverlay(`Saved ${escapeHtml(section)} settings${changed.length ? `<br>${escapeHtml(changed.join(', '))}` : ''}`, 'tool', 7000);
+    markEvent('settings updated');
+    return;
+  }
+
+  if (type === 'call:image.search.started' && data.sessionId === state.sessionId) {
+    showOverlay(`Finding image${data.query ? `: ${escapeHtml(String(data.query))}` : '…'}`, 'tool', 8000);
+    markEvent('image search started');
+    return;
+  }
+
+  if (type === 'call:image.search.result' && data.sessionId === state.sessionId && !data.ok) {
+    showOverlay(`Image lookup failed${data.error ? `: ${escapeHtml(String(data.error))}` : ''}`, 'error', 9000);
+    markEvent('image search failed');
+    return;
+  }
+
+  if (type === 'call:image.display' && data.sessionId === state.sessionId && data.ok) {
+    showImageCard(data, 45000);
+    const why = String(data.why || '').trim();
+    showOverlay(`Image ready: ${escapeHtml(String(data.title || data.query || 'Image'))}${why ? `<br>${escapeHtml(why)}` : ''}<br>Link is copyable.`, 'tool', 10000);
+    markEvent('image display ready');
     return;
   }
 
@@ -1273,6 +1487,7 @@ export function handleEvent(msg = {}) {
 
   if (type === 'call:assistant.interrupted' && data.sessionId === state.sessionId) {
     stopPlayback();
+    commitPendingAssistantText('interrupted');
     showOverlay('Interrupted.', 'tool', 1200);
     setStatus('listening', `Go on. ${personaName()} is listening.`);
     markEvent('interrupt ack');

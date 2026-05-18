@@ -36,10 +36,12 @@ Behavior rules:
 - If Epic asks for current events, facts that may have changed, or confirmation from the internet, use the search_web tool before answering confidently.
 - After using search_web successfully, make it obvious that the answer was confirmed from the web. Phrases like "Confirmed from the web:" or "Web check says:" are good.
 - If search_web fails or is unavailable, say that plainly instead of pretending you verified anything.
-- If Epic asks for real work, use the handoff_to_openclaw tool instead of pretending completion.
+- If Epic asks to change your live-call settings, or other safe Command Center settings, use update_command_center_settings.
+- If Epic asks you to find and show a picture or reference image, use request_image_for_display.
+- If Epic asks for other real work, use the handoff_to_openclaw tool instead of pretending completion.
 - If Epic explicitly asks you to remember something durable for future live calls, use update_live_memory with a concise note. Do not store secrets, API keys, passwords, tokens, or private credentials.
 
-Real work includes code edits, repo operations, deployments, browser or device actions, OpenClaw tasks, scheduling, config changes, investigations, messaging/contacting other people, or anything needing tools, persistence, or long-running execution.
+Real work includes code edits, repo operations, deployments, browser or device actions, OpenClaw tasks, scheduling, config changes, investigations, messaging/contacting other people, or anything needing tools, persistence, or long-running execution. Supported settings changes are not a handoff; use update_command_center_settings. If Epic wants a picture surfaced in Command Center, use request_image_for_display instead of handoff_to_openclaw.
 
 When handing off, say it clearly: "That needs Astra. Routing now." or "Handing this to OpenClaw." Do not over-explain. Do not say the work is complete until the tool or task result says so.
 
@@ -125,6 +127,37 @@ const FAIRY_LIVE_TOOLS = [{
         pinned: { type: 'BOOLEAN', description: 'Set true for especially durable memory that should survive recency cutoffs.' },
       },
       required: ['text'],
+    },
+  }, {
+    name: 'update_command_center_settings',
+    description: 'Change and save supported Command Center settings when Epic explicitly asks. Supports Fairy live settings and other safe JSON settings sections. Never set or reveal API keys, tokens, passwords, cookies, secrets, or upload/file fields.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        section: { type: 'STRING', description: 'Settings section to modify. Supported examples: gemini, appearance, branding, layout, companions, intro, music, wake, voice, workspace_rooms.' },
+        patch: { type: 'OBJECT', description: 'Partial settings object to save for the chosen section.' },
+        model: { type: 'STRING', description: 'Optional Gemini Live model id.' },
+        responseModalities: { type: 'ARRAY', items: { type: 'STRING' }, description: 'Optional response modalities, usually AUDIO or TEXT.' },
+        thinkingLevel: { type: 'STRING', description: 'Optional thinking level such as minimal, low, medium, or high.' },
+        voiceName: { type: 'STRING', description: 'Optional Gemini Live voice name.' },
+        personaName: { type: 'STRING', description: 'Optional Fairy display/persona name.' },
+        operatorName: { type: 'STRING', description: 'Optional operator name Fairy should use.' },
+        personalityPrompt: { type: 'STRING', description: 'Optional additional personality instructions.' },
+        memoryEnabled: { type: 'BOOLEAN', description: 'Whether Fairy live memory is enabled.' },
+        memoryNotes: { type: 'STRING', description: 'Optional operator-provided memory notes.' },
+      },
+    },
+  }, {
+    name: 'request_image_for_display',
+    description: 'Ask OpenClaw to find a suitable web image for a topic, then show it temporarily in Command Center near the camera preview. Use when Epic wants Fairy to pull up a picture, reference image, meme, character art, diagram, or visual example. Return publicly reachable image and source URLs only.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        query: { type: 'STRING', description: 'What image to find.' },
+        title: { type: 'STRING', description: 'Short title for the image card.' },
+        agent: { type: 'STRING', description: 'Optional preferred OpenClaw agent to do the search.' },
+      },
+      required: ['query'],
     },
   }, {
     name: 'search_web',

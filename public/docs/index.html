@@ -263,6 +263,46 @@ with httpx.stream("POST", f"{BASE}/sessions/{session_id}/messages/stream", heade
     for line in r.iter_lines():
         if line:
             print(line)</pre></div></div>
+          <div class="card"><h3>Roleplay quick examples</h3><div class="code-block"><button class="copy-btn" type="button">Copy</button><pre>import requests
+BASE = "https://your-domain.example/commandcenter/api/v1"
+HEADERS = {"Authorization": "Bearer YOUR_COMMANDCENTER_API_KEY", "Content-Type": "application/json"}
+
+# 1) Create roleplay session for a specific agent
+created = requests.post(
+    f"{BASE}/sessions",
+    headers=HEADERS,
+    json={"agent": "ui", "title": "Jane RP", "mode": "roleplay", "model": "z-ai/glm-5"},
+    timeout=30,
+).json()
+session_id = created["session"]["id"]
+
+# 2) List only roleplay sessions for that agent
+sessions = requests.get(
+    f"{BASE}/sessions",
+    headers={"Authorization": "Bearer YOUR_COMMANDCENTER_API_KEY"},
+    params={"agent": "ui", "mode": "roleplay", "limit": 20},
+    timeout=30,
+).json()
+
+# 3) Send a roleplay message
+reply = requests.post(
+    f"{BASE}/sessions/{session_id}/messages",
+    headers=HEADERS,
+    json={"message": "Introduce yourself to Epic in character."},
+    timeout=120,
+).json()
+
+# 4) Search roleplay sessions for this agent
+search = requests.get(
+    f"{BASE}/sessions/search",
+    headers={"Authorization": "Bearer YOUR_COMMANDCENTER_API_KEY"},
+    params={"agent": "ui", "mode": "roleplay", "q": "Introduce", "limit": 10},
+    timeout=30,
+).json()
+
+print(created["session"]["id"])
+print(reply["response"]["text"])
+print(len(sessions.get("sessions", [])), len(search.get("results", [])))</pre></div></div>
         </div>
 
         
@@ -270,7 +310,7 @@ with httpx.stream("POST", f"{BASE}/sessions/{session_id}/messages/stream", heade
         <div class="grid two-col">
           <div class="card">
             <h3>Standard API CLI (no Fairy live calls)</h3>
-            <p>This script covers the normal CommandCenter API flow: list agents, optionally tweak voices, start or reuse a session, and chat over the auth-protected <code>/api/v1</code> surface.</p>
+            <p>This script covers the normal CommandCenter API flow: list agents, optionally tweak voices, choose <code>agent</code> or <code>roleplay</code> mode, start or reuse a session, and chat over the auth-protected <code>/api/v1</code> surface.</p>
 <div class="code-block"><button class="copy-btn" type="button">Copy</button><pre># Standard library imports
 import base64
 import json
@@ -381,11 +421,16 @@ def search_sessions(agent_id: Optional[str] = None):
         print(&quot;Invalid choice. Try again.&quot;)
 
 
-def choose_session(agent_id: str):
+def choose_mode():
+    raw = input(&quot;Mode (agent/roleplay) [agent]: &quot;).strip().lower()
+    return &quot;roleplay&quot; if raw in {&quot;roleplay&quot;, &quot;rp&quot;} else &quot;agent&quot;
+
+
+def choose_session(agent_id: str, mode: str):
     if not ask_yes_no(&quot;Use an existing session?&quot;, default=False):
         title = input(&quot;Optional title for the new session (press Enter to skip): &quot;).strip()
-        session = post_json(&quot;/sessions&quot;, {&quot;agent&quot;: agent_id, &quot;title&quot;: title})[&quot;session&quot;]
-        print(f&quot;Created new session: {session[&#x27;id&#x27;]}&quot;)
+        session = post_json(&quot;/sessions&quot;, {&quot;agent&quot;: agent_id, &quot;title&quot;: title, &quot;mode&quot;: mode})[&quot;session&quot;]
+        print(f&quot;Created new session: {session[&#x27;id&#x27;]} ({mode})&quot;)
         return session[&quot;id&quot;]
     if ask_yes_no(&quot;Do you already know the session ID?&quot;, default=True):
         session_id = input(&quot;Enter the session ID: &quot;).strip()
@@ -397,8 +442,8 @@ def choose_session(agent_id: str):
         print(f&quot;Using session: {found}&quot;)
         return found
     print(&quot;No existing session selected. Creating a new one instead.&quot;)
-    session = post_json(&quot;/sessions&quot;, {&quot;agent&quot;: agent_id})[&quot;session&quot;]
-    print(f&quot;Created new session: {session[&#x27;id&#x27;]}&quot;)
+    session = post_json(&quot;/sessions&quot;, {&quot;agent&quot;: agent_id, &quot;mode&quot;: mode})[&quot;session&quot;]
+    print(f&quot;Created new session: {session[&#x27;id&#x27;]} ({mode})&quot;)
     return session[&quot;id&quot;]
 
 
@@ -564,12 +609,14 @@ def main():
     if API_KEY == &quot;YOUR_COMMANDCENTER_API_KEY&quot;:
         print(&quot;Warning: replace YOUR_COMMANDCENTER_API_KEY or set COMMANDCENTER_API_KEY in your environment.&quot;)
     agent = choose_agent()
+    mode = choose_mode()
     streaming = choose_streaming()
     want_audio = choose_audio()
     update_agent_voice(agent[&quot;id&quot;])
-    session_id = choose_session(agent[&quot;id&quot;])
+    session_id = choose_session(agent[&quot;id&quot;], mode)
     agent_name = agent.get(&quot;name&quot;) or agent.get(&quot;label&quot;) or agent.get(&quot;id&quot;)
     print(f&quot;\nAgent: {agent_name}&quot;)
+    print(f&quot;Mode: {mode}&quot;)
     print(f&quot;Streaming: {&#x27;enabled&#x27; if streaming else &#x27;disabled&#x27;}&quot;)
     print(f&quot;Audio: {&#x27;enabled&#x27; if want_audio else &#x27;disabled&#x27;}&quot;)
     print(f&quot;Session: {session_id}&quot;)
@@ -649,9 +696,17 @@ def fairy_config():
     return get_json(f&quot;{BASE_V1}/fairy/config&quot;)
 
 
+def fairy_settings():
+    return get_json(f&quot;{BASE_V1}/fairy/settings&quot;)
+
+
+def update_fairy_settings(patch):
+    return post_json(f&quot;{BASE_V1}/fairy/settings&quot;, patch)
+
+
 def start_fairy_call(agent=None):
     payload = {&quot;agent&quot;: agent} if agent else {}
-    return post_json(f&quot;{BASE_ROOT}/api/call/start&quot;, payload)
+    return post_json(f&quot;{BASE_V1}/fairy/calls/start&quot;, payload)
 
 
 def get_fairy_session(session_id):
@@ -659,7 +714,19 @@ def get_fairy_session(session_id):
 
 
 def send_fairy_text(session_id, text):
-    return post_json(f&quot;{BASE_ROOT}/api/call/{session_id}/event&quot;, {&quot;type&quot;: &quot;transcript.final&quot;, &quot;text&quot;: text})
+    return post_json(f&quot;{BASE_V1}/fairy/calls/{session_id}/text&quot;, {&quot;text&quot;: text})
+
+
+def send_fairy_audio_chunk(session_id, pcm16_base64, mime_type=&quot;audio/pcm;rate=16000&quot;):
+    return post_json(f&quot;{BASE_V1}/fairy/calls/{session_id}/audio&quot;, {&quot;pcm16Base64&quot;: pcm16_base64, &quot;mimeType&quot;: mime_type})
+
+
+def send_fairy_screen_frame(session_id, jpeg_base64, mime_type=&quot;image/jpeg&quot;):
+    return post_json(f&quot;{BASE_V1}/fairy/calls/{session_id}/screen&quot;, {&quot;jpegBase64&quot;: jpeg_base64, &quot;mimeType&quot;: mime_type})
+
+
+def send_fairy_camera_frame(session_id, jpeg_base64, mime_type=&quot;image/jpeg&quot;):
+    return post_json(f&quot;{BASE_V1}/fairy/calls/{session_id}/camera&quot;, {&quot;jpegBase64&quot;: jpeg_base64, &quot;mimeType&quot;: mime_type})
 
 
 def mark_playback_finished(session_id):
@@ -667,7 +734,7 @@ def mark_playback_finished(session_id):
 
 
 def end_fairy_call(session_id):
-    return post_json(f&quot;{BASE_ROOT}/api/call/{session_id}/end&quot;, {})
+    return post_json(f&quot;{BASE_V1}/fairy/calls/{session_id}/end&quot;, {})
 
 
 def wait_until_ready(session_id, timeout=30):
@@ -730,8 +797,8 @@ def print_fairy_memory(query=&quot;&quot;, scope=&quot;all&quot;):
 
 
 def fairy_chat_loop(session_id):
-    print(&quot;\nFairy text mode ready.&quot;)
-    print(&quot;Commands: /status, /ready, /end, /save, /fairy-config, /fairy-memory &lt;query&gt;, /fairy-memory-scope &lt;scope&gt; &lt;query&gt;, /fairy-sessions, /fairy-session &lt;id&gt;, /exit&quot;)
+    print(&quot;\nFairy API call mode ready (text + audio + video frame uplink).&quot;)
+    print(&quot;Commands: /status, /ready, /end, /save, /audio-file &lt;pcm16.b64.txt&gt;, /screen-file &lt;jpeg.b64.txt&gt;, /camera-file &lt;jpeg.b64.txt&gt;, /fairy-config, /fairy-settings, /set-setting &lt;key&gt; &lt;json-value&gt;, /fairy-memory &lt;query&gt;, /fairy-memory-scope &lt;scope&gt; &lt;query&gt;, /fairy-sessions, /fairy-session &lt;id&gt;, /exit&quot;)
     while True:
         message = input(&quot;You → Fairy: &quot;).strip()
         if not message:
@@ -749,8 +816,38 @@ def fairy_chat_loop(session_id):
         if message.lower() == &quot;/save&quot;:
             save_session_log(session_id)
             continue
+        if message.lower().startswith(&#x27;/audio-file &#x27;):
+            path = message.split(&#x27; &#x27;, 1)[1].strip()
+            pcm_b64 = Path(path).read_text(encoding=&quot;utf-8&quot;).strip()
+            print(json.dumps(send_fairy_audio_chunk(session_id, pcm_b64), indent=2))
+            continue
+        if message.lower().startswith(&#x27;/screen-file &#x27;):
+            path = message.split(&#x27; &#x27;, 1)[1].strip()
+            jpg_b64 = Path(path).read_text(encoding=&quot;utf-8&quot;).strip()
+            print(json.dumps(send_fairy_screen_frame(session_id, jpg_b64), indent=2))
+            continue
+        if message.lower().startswith(&#x27;/camera-file &#x27;):
+            path = message.split(&#x27; &#x27;, 1)[1].strip()
+            jpg_b64 = Path(path).read_text(encoding=&quot;utf-8&quot;).strip()
+            print(json.dumps(send_fairy_camera_frame(session_id, jpg_b64), indent=2))
+            continue
         if message.lower() == &quot;/fairy-config&quot;:
             print(json.dumps(fairy_config(), indent=2))
+            continue
+        if message.lower() == &quot;/fairy-settings&quot;:
+            print(json.dumps(fairy_settings(), indent=2))
+            continue
+        if message.lower().startswith(&#x27;/set-setting &#x27;):
+            rest = message.split(&#x27; &#x27;, 1)[1].strip()
+            key, _, raw_value = rest.partition(&#x27; &#x27;)
+            if not key or not raw_value:
+                print(&quot;Usage: /set-setting &lt;key&gt; &lt;json-value&gt;&quot;)
+                continue
+            try:
+                value = json.loads(raw_value)
+            except Exception:
+                value = raw_value
+            print(json.dumps(update_fairy_settings({key: value}), indent=2))
             continue
         if message.lower().startswith(&#x27;/fairy-memory-scope &#x27;):
             rest = message.split(&#x27; &#x27;, 1)[1].strip()
