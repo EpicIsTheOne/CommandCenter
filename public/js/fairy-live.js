@@ -70,6 +70,15 @@ const state = {
   personaName: 'Fairy',
   speechOutputMode: 'gemini',
   fishVoiceId: '',
+  callMode: 'universal',
+  intensityLevel: 'low',
+  speechSuppressedReason: '',
+  lastModeDecision: '',
+  lastModeReason: '',
+  lastCalloutTier: '',
+  handoffPolicy: 'normal',
+  modeProactivity: '',
+  modeResponseStyle: '',
   transcriptEntries: [],
   pendingAssistantText: '',
   imageCard: null,
@@ -122,6 +131,25 @@ function callButtonLabel() {
 
 function livePanelLabel() {
   return `${personaUpper()} LIVE`;
+}
+
+function describeCallMode(mode = 'universal') {
+  const value = String(mode || 'universal').trim().toLowerCase();
+  if (value === 'gaming') return 'Gaming mode trims chatter during intense gameplay and favors short copilot callouts.';
+  if (value === 'observe') return 'Observe mode stays quiet unless something meaningful changes.';
+  if (value === 'assist') return 'Assist mode stays helpful and brief, then backs off when the moment gets busy.';
+  if (value === 'guide') return 'Guide mode is more proactive and step-by-step.';
+  if (value === 'operator') return 'Operator mode routes real work more aggressively.';
+  if (value === 'record') return 'Record mode favors concise review-friendly notes and cleaner transition-focused commentary.';
+  return 'Universal mode keeps normal Fairy behavior.';
+}
+
+function applyCallModeUi() {
+  if (els.callModeSelect) {
+    els.callModeSelect.value = state.callMode || 'universal';
+    els.callModeSelect.disabled = !state.sessionId;
+  }
+  if (els.callModeStatus) els.callModeStatus.textContent = describeCallMode(state.callMode || 'universal');
 }
 
 function applyPersonaUi() {
@@ -197,6 +225,17 @@ function renderDebugPanel() {
       ['playback', state.playbackActive],
       ['interrupting', state.interrupting],
       ['last interrupt', state.lastInterruptAt ? new Date(state.lastInterruptAt).toISOString() : '—'],
+    ]),
+    renderDebugSection('MODE', [
+      ['mode', state.callMode || 'universal'],
+      ['intensity', state.intensityLevel || 'low'],
+      ['suppressed', state.speechSuppressedReason || 'none'],
+      ['callout tier', state.lastCalloutTier || '—'],
+      ['handoff policy', state.handoffPolicy || 'normal'],
+      ['proactivity', state.modeProactivity || '—'],
+      ['response style', state.modeResponseStyle || '—'],
+      ['decision', state.lastModeDecision || '—'],
+      ['reason', state.lastModeReason || '—'],
     ]),
     renderDebugSection('AUDIO / VAD', [
       ['mic active', state.micActive],
@@ -1811,10 +1850,12 @@ export async function refreshConfig() {
     state.personaName = String(config.personaName || 'Fairy').trim() || 'Fairy';
     state.speechOutputMode = String(config.speechOutputMode || 'gemini').trim().toLowerCase() === 'fish' ? 'fish' : 'gemini';
     state.fishVoiceId = String(config.fishVoiceId || '').trim();
+    state.callMode = String(config.callMode || 'universal').trim().toLowerCase() || 'universal';
     applyPersonaUi();
+    applyCallModeUi();
     if (els.model) {
       els.model.textContent = state.hasApiKey
-        ? `${state.model} · ${Array.isArray(config.responseModalities) ? config.responseModalities.join('+') : 'LIVE'} · voice:${state.speechOutputMode === 'fish' ? 'fish' : 'gemini'}`
+        ? `${state.model} · mode:${state.callMode} · ${Array.isArray(config.responseModalities) ? config.responseModalities.join('+') : 'LIVE'} · voice:${state.speechOutputMode === 'fish' ? 'fish' : 'gemini'}`
         : 'Gemini key missing in Command Center settings';
     }
     markEvent('config refreshed');
@@ -1953,6 +1994,8 @@ export function init() {
   els.end = document.getElementById('fairy-live-end');
   els.stopAudio = document.getElementById('fairy-live-stop-audio');
   els.diagnostics = document.getElementById('fairy-live-diagnostics');
+  els.callModeSelect = document.getElementById('fairy-live-call-mode');
+  els.callModeStatus = document.getElementById('fairy-live-call-mode-status');
   els.debugToggle = document.getElementById('fairy-live-debug-toggle');
   els.debugPanel = document.getElementById('fairy-live-debug-panel');
   els.debugContent = document.getElementById('fairy-live-debug-content');
@@ -1983,6 +2026,26 @@ export function init() {
   els.start?.addEventListener('click', (event) => { event.stopPropagation(); startCall(); });
   els.end?.addEventListener('click', (event) => { event.stopPropagation(); endCall(); });
   els.stopAudio?.addEventListener('click', (event) => { event.stopPropagation(); stopFairyAudio(); });
+  els.callModeSelect?.addEventListener('change', async (event) => {
+    const nextMode = String(event.target?.value || 'universal').trim().toLowerCase() || 'universal';
+    if (!state.sessionId) { applyCallModeUi(); return; }
+    try {
+      const data = await fetchJson(`${BASE}/api/call/${encodeURIComponent(state.sessionId)}/mode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callMode: nextMode }),
+      });
+      state.callMode = String(data.callMode || nextMode).trim().toLowerCase() || 'universal';
+      state.serverSessionMeta = data.session || state.serverSessionMeta;
+      markEvent(`mode ${state.callMode}`);
+      applyCallModeUi();
+      renderDiagnostics();
+    } catch (err) {
+      markError(err.message || 'Could not update call mode');
+      applyCallModeUi();
+    }
+  });
+
   els.debugToggle?.addEventListener('click', (event) => {
     event.stopPropagation();
     state.debugPanelOpen = !state.debugPanelOpen;
@@ -2031,6 +2094,8 @@ export function handleEvent(msg = {}) {
   if (type === 'call:session.started') {
     state.sessionId = data.id || data.sessionId || state.sessionId;
     if (data.session) state.serverSessionMeta = data.session;
+    state.callMode = String(data.callMode || data.session?.callMode || state.callMode || 'universal').trim().toLowerCase() || 'universal';
+    applyCallModeUi();
     setStatus(data.state || 'ready', `${personaName()} is live.`);
     appendTranscript('system', `Session ready: ${state.sessionId}`, 'system');
     emitLog(`${personaName()} session ready: ${state.sessionId}`, 'info');
@@ -2053,6 +2118,12 @@ export function handleEvent(msg = {}) {
       state.sessionId = '';
       state.serverSessionMeta = null;
       state.visualMemory = null;
+      state.intensityLevel = 'low';
+      state.speechSuppressedReason = '';
+      state.lastModeDecision = '';
+      state.lastModeReason = '';
+      state.lastCalloutTier = '';
+      applyCallModeUi();
       setStatus('ended', `${personaName()} Live ended.`);
       emitFairyCallAudioEvent('commandcenter:fairy-call-end', { sessionId: data.id || data.sessionId || state.sessionId });
       emitLog(`${personaName()} Live ended`, 'info');
@@ -2076,9 +2147,27 @@ export function handleEvent(msg = {}) {
     state.lastGeminiHintAt = String(debug.lastGeminiHintAt || '').trim();
     state.lastVisualAssumption = String(debug.lastVisualAssumption || '').trim();
     state.lastVisualConfidence = String(debug.lastVisualConfidence || '').trim();
+    state.callMode = String(debug.callMode || state.callMode || 'universal').trim().toLowerCase() || 'universal';
+    state.intensityLevel = String(debug.intensityLevel || state.intensityLevel || 'low').trim() || 'low';
+    state.speechSuppressedReason = String(debug.speechSuppressedReason || '').trim();
+    state.lastModeDecision = String(debug.modeDecision || '').trim();
+    state.lastModeReason = String(debug.modeReason || '').trim();
+    state.lastCalloutTier = String(debug.lastCalloutTier || '').trim();
+    state.handoffPolicy = String(debug.handoffPolicy || '').trim() || state.handoffPolicy;
+    state.modeProactivity = String(debug.proactivity || '').trim();
+    state.modeResponseStyle = String(debug.responseStyle || '').trim();
     state.lastRoutingDecision = String(debug.lastRoutingDecision || '').trim();
     state.lastTaskSummary = String(debug.lastTaskSummary || state.lastTaskSummary || '').trim();
     state.visualMemory = debug.visualMemory || null;
+    applyCallModeUi();
+    renderDiagnostics();
+    return;
+  }
+
+  if (type === 'call:mode.updated' && data.sessionId === state.sessionId) {
+    state.callMode = String(data.callMode || data.session?.callMode || state.callMode || 'universal').trim().toLowerCase() || 'universal';
+    if (data.session) state.serverSessionMeta = data.session;
+    applyCallModeUi();
     renderDiagnostics();
     return;
   }
@@ -2102,10 +2191,12 @@ export function handleEvent(msg = {}) {
       state.pendingAssistantText = shouldReplaceOnDone ? rawText : mergeAssistantChunk(state.pendingAssistantText, rawText);
     }
     const displayText = String(state.pendingAssistantText || rawText || '').trim();
-    const tone = /confirmed from the web|web check says|checked the web/i.test(displayText) ? 'tool' : 'fairy';
-    showOverlay(escapeHtml(displayText), tone, 8500);
-    markEvent('response text');
-    setStatus(data.state || (data.done ? 'speaking' : 'thinking'), displayText || `${personaName()} responded.`);
+    const tier = String(state.lastCalloutTier || '').trim();
+    const suppressed = String(state.speechSuppressedReason || '').trim();
+    const tone = /confirmed from the web|web check says|checked the web/i.test(displayText) ? 'tool' : tier === '1' ? 'error' : 'fairy';
+    showOverlay(escapeHtml(displayText), tone, tier === '1' ? 9500 : 8500);
+    markEvent(`response text${tier ? ` tier ${tier}` : ''}`);
+    setStatus(data.state || (data.done ? 'speaking' : 'thinking'), suppressed ? `${personaName()} timed this for a calmer window.` : (displayText || `${personaName()} responded.`));
     if (data.taskId) state.lastTaskId = data.taskId;
     if (state.speechOutputMode === 'fish' && displayText) {
       scheduleFishSpeak(displayText, data.done ? 'response-text-done' : 'response-text-stream', fishSpeakDelayForText(displayText, !!data.done));

@@ -26,7 +26,7 @@ import { loadWakeSettings, saveWakeSettings, maskAccessKey } from './wake-settin
 import { transcribeWakeAudio, warmWakeTranscriber } from './wake-transcriber.js';
 import { detectWakeKeyword, warmWakeKeywordDetector } from './wake-keyword-detector.js';
 import { startSessionMonitor } from './session-monitor.js';
-import { GEMINI_LIVE_VOICE_OPTIONS, loadGeminiRuntimeConfig, loadGeminiSettings, saveGeminiSettings } from './gemini-config.js';
+import { FAIRY_CALL_MODE_OPTIONS, GEMINI_LIVE_VOICE_OPTIONS, loadGeminiRuntimeConfig, loadGeminiSettings, saveGeminiSettings, normalizeCallMode } from './gemini-config.js';
 import { createLiveTask, getLiveTask, listLiveTasks, looksComplexRequest, runLiveTask } from './live-tasks.js';
 import { createCallSession, endCallSession, getCallSession, listCallSessions, updateCallSession } from './call-session-store.js';
 import { cleanupFairyRecordingIndex, getFairyRecording, getFairyRecordingPath, listFairyRecordings, saveFairyRecording } from './fairy-recordings.js';
@@ -820,6 +820,169 @@ function summarizeVisualMemory(visualMemory = {}) {
   };
 }
 
+function buildCallModePolicy(callMode = 'universal', intensityLevel = 'low') {
+  const mode = normalizeCallMode(callMode || 'universal');
+  if (mode === 'gaming') {
+    const isHigh = intensityLevel === 'high';
+    const isMedium = intensityLevel === 'medium';
+    return {
+      handoffPolicy: 'conservative',
+      responseStyle: 'short',
+      interruptStrictness: 'high',
+      proactivity: isHigh ? 'low' : isMedium ? 'medium-low' : 'medium',
+      suppressScreenCommentary: isHigh,
+      deferNonCriticalCommentary: isHigh || isMedium,
+      screenChangeDebounceMs: isHigh ? 5200 : isMedium ? 4200 : 3200,
+      modeDecision: isHigh
+        ? 'gaming:high-intensity-suppress-noncritical'
+        : isMedium
+          ? 'gaming:medium-intensity-defer-fyi'
+          : 'gaming:normal-copilot',
+      modeReason: isHigh
+        ? 'Rapid screen motion suggests active gameplay; suppressing non-critical chatter.'
+        : isMedium
+          ? 'Moderate gameplay activity detected; defer FYI commentary until a calmer gap.'
+          : 'Gaming mode favors short copilot-style commentary.',
+    };
+  }
+  if (mode === 'observe') {
+    return {
+      handoffPolicy: 'normal',
+      responseStyle: 'minimal',
+      interruptStrictness: 'high',
+      proactivity: 'low',
+      suppressScreenCommentary: false,
+      deferNonCriticalCommentary: true,
+      screenChangeDebounceMs: 5200,
+      modeDecision: 'observe:quiet-monitoring',
+      modeReason: 'Observe mode stays quiet unless something clearly useful changes.',
+    };
+  }
+  if (mode === 'guide') {
+    return {
+      handoffPolicy: 'normal',
+      responseStyle: 'guided',
+      interruptStrictness: 'normal',
+      proactivity: 'high',
+      suppressScreenCommentary: false,
+      deferNonCriticalCommentary: false,
+      screenChangeDebounceMs: 2400,
+      modeDecision: 'guide:step-by-step',
+      modeReason: 'Guide mode is more proactive and step-oriented.',
+    };
+  }
+  if (mode === 'operator') {
+    return {
+      handoffPolicy: 'aggressive',
+      responseStyle: 'directive',
+      interruptStrictness: 'normal',
+      proactivity: 'high',
+      suppressScreenCommentary: false,
+      deferNonCriticalCommentary: false,
+      screenChangeDebounceMs: 2600,
+      modeDecision: 'operator:action-biased',
+      modeReason: 'Operator mode favors routing real work quickly and speaking in action-biased summaries.',
+    };
+  }
+  if (mode === 'record') {
+    const isHigh = intensityLevel === 'high';
+    const isMedium = intensityLevel === 'medium';
+    return {
+      handoffPolicy: 'normal',
+      responseStyle: 'concise-review',
+      interruptStrictness: 'high',
+      proactivity: isHigh ? 'low' : 'medium-low',
+      suppressScreenCommentary: false,
+      deferNonCriticalCommentary: true,
+      screenChangeDebounceMs: isHigh ? 5600 : isMedium ? 4600 : 4000,
+      modeDecision: isHigh
+        ? 'record:hold-for-cleaner-transition'
+        : isMedium
+          ? 'record:defer-noncritical'
+          : 'record:review-friendly',
+      modeReason: isHigh
+        ? 'Record mode is holding commentary during busy visual churn to keep output cleaner for later review.'
+        : isMedium
+          ? 'Record mode is deferring non-critical commentary until the visual state settles.'
+          : 'Record mode favors concise, review-friendly commentary.',
+    };
+  }
+  if (mode === 'assist') {
+    const isHigh = intensityLevel === 'high';
+    return {
+      handoffPolicy: 'normal',
+      responseStyle: 'helpful-brief',
+      interruptStrictness: isHigh ? 'high' : 'normal',
+      proactivity: isHigh ? 'medium-low' : 'medium',
+      suppressScreenCommentary: false,
+      deferNonCriticalCommentary: isHigh,
+      screenChangeDebounceMs: isHigh ? 3600 : 3000,
+      modeDecision: isHigh ? 'assist:back-off-during-busy-state' : 'assist:balanced-help',
+      modeReason: isHigh
+        ? 'Assist mode is easing back during a busy moment to avoid piling on.'
+        : 'Assist mode keeps Fairy helpful, brief, and supportive without overdriving.',
+    };
+  }
+  return {
+    handoffPolicy: 'normal',
+    responseStyle: 'normal',
+    interruptStrictness: 'normal',
+    proactivity: 'medium',
+    suppressScreenCommentary: false,
+    deferNonCriticalCommentary: false,
+    screenChangeDebounceMs: 3500,
+    modeDecision: `${mode}:baseline`,
+    modeReason: 'Universal mode keeps normal Fairy behavior enabled.',
+  };
+}
+
+function inferGamingIntensity(payload = {}, session = {}) {
+  const avgDiff = Number(payload.avgDiff || session?.lastScreenChange?.avgDiff || 0);
+  const changedRatio = Number(payload.changedRatio || session?.lastScreenChange?.changedRatio || 0);
+  if (avgDiff >= 24 || changedRatio >= 0.34) return 'high';
+  if (avgDiff >= 14 || changedRatio >= 0.18) return 'medium';
+  return 'low';
+}
+
+function classifyScreenChangeCallout(payload = {}, frameMeta = {}, session = {}) {
+  const avgDiff = Number(payload.avgDiff || 0);
+  const changedRatio = Number(payload.changedRatio || 0);
+  const reason = String(frameMeta.reason || '').toLowerCase();
+  const label = String(frameMeta.trackLabel || '').toLowerCase();
+  const visualSummary = String(session?.visualMemory?.current?.summary || '').toLowerCase();
+  const intense = session.callMode === 'gaming' ? inferGamingIntensity(payload, session) : 'low';
+  const hay = `${reason} ${label} ${visualSummary}`;
+
+  const has = (re) => re.test(hay);
+  const menuLike = has(/inventory|menu|pause|settings|loadout|quest|journal|craft|store|shop|vendor|talent|skill|character|party|backpack|arsenal|equipment/);
+  const mapLike = has(/map|world map|minimap|objective|quest path|waypoint|marker|fast travel|region/);
+  const scoreboardLike = has(/scoreboard|score board|leaderboard|round over|victory|defeat|match results|placement|rank up|ranked/);
+  const respawnLike = has(/respawn|spectat|eliminat|you died|death|knocked|revive|wipe|game over/);
+  const hudLike = has(/hud|crosshair|ammo|health|shield|mana|stamina|cooldown|ability|ultimate|objective timer/);
+  const combatLike = has(/combat|fight|battle|gunfire|explosion|firefight|boss|enemy|wave|damage/) || (intense === 'high' && !menuLike && !mapLike && !scoreboardLike && !respawnLike);
+  const transitionLike = /screen-change/.test(reason) && (avgDiff >= 24 || changedRatio >= 0.34);
+
+  if (respawnLike || scoreboardLike) {
+    return { tier: '1', kind: 'critical', summary: respawnLike ? 'death/respawn or spectator-state transition' : 'scoreboard or round-result transition', semantic: respawnLike ? 'respawn' : 'scoreboard' };
+  }
+  if (transitionLike && !menuLike && !mapLike && !hudLike) {
+    return { tier: '1', kind: 'critical', summary: 'major gameplay/state transition', semantic: 'transition' };
+  }
+  if (mapLike || menuLike) {
+    return { tier: '2', kind: 'important', summary: mapLike ? 'map/objective navigation state change' : 'menu or inventory state change', semantic: mapLike ? 'map' : 'menu' };
+  }
+  if (combatLike && intense === 'high') {
+    return { tier: '3', kind: 'fyi', summary: 'high-motion combat churn without a clear semantic UI shift', semantic: 'combat' };
+  }
+  if (hudLike) {
+    return { tier: intense === 'high' ? '3' : '2', kind: intense === 'high' ? 'fyi' : 'important', summary: 'HUD or status-state update', semantic: 'hud' };
+  }
+  if (avgDiff >= 18 || changedRatio >= 0.22) {
+    return { tier: '2', kind: 'important', summary: 'notable visual state change', semantic: 'state' };
+  }
+  return { tier: '3', kind: 'fyi', summary: 'minor visual update', semantic: 'minor' };
+}
+
 function buildCallDebugState(session = {}) {
   return {
     sessionId: session.id || '',
@@ -832,6 +995,15 @@ function buildCallDebugState(session = {}) {
     lastGeminiHintAt: session.lastGeminiHintAt || null,
     lastVisualAssumption: session.lastVisualAssumption || '',
     lastVisualConfidence: session.lastVisualConfidence || '',
+    callMode: session.callMode || 'universal',
+    modeDecision: session.modeDecision || '',
+    modeReason: session.modeReason || '',
+    intensityLevel: session.intensityLevel || 'low',
+    lastCalloutTier: session.lastCalloutTier || '',
+    speechSuppressedReason: session.speechSuppressedReason || '',
+    handoffPolicy: session.handoffPolicy || '',
+    proactivity: session.proactivity || '',
+    responseStyle: session.responseStyle || '',
     lastRoutingDecision: session.lastRoutingDecision || '',
     lastTaskSummary: session.lastTaskSummary || '',
     visualMemory: summarizeVisualMemory(session.visualMemory || {}),
@@ -958,6 +1130,28 @@ function summarizeStableVisualDelta(previousMeta = {}, nextMeta = {}, session = 
   };
 }
 
+function flushDeferredScreenCommentary(sessionId, reason = 'calm-gap') {
+  const pending = liveScreenChangePrompts.get(sessionId) || {};
+  if (!pending.pendingPayload) return false;
+  const session = getCallSession(sessionId);
+  if (!session || !session.active || !session.screenShareActive) return false;
+  const live = liveGeminiSessions.get(sessionId);
+  if (!live) return false;
+  const payload = pending.pendingPayload;
+  const intensityLevel = session.callMode === 'gaming' ? inferGamingIntensity(payload, session) : (session.intensityLevel || 'low');
+  if (session.callMode === 'gaming' && intensityLevel !== 'low') return false;
+  liveScreenChangePrompts.set(sessionId, { ...pending, pendingPayload: null, lastFlushAt: Date.now(), flushReason: reason });
+  updateCallSession(sessionId, {
+    intensityLevel,
+    speechSuppressedReason: '',
+    modeDecision: session.callMode === 'gaming' ? 'gaming:calm-gap-release' : (session.modeDecision || ''),
+    modeReason: session.callMode === 'gaming' ? 'Queued FYI commentary was released after intensity dropped.' : (session.modeReason || ''),
+  });
+  broadcast({ type: 'call:debug', data: { sessionId, message: `Releasing deferred screen commentary after ${reason}.` } });
+  maybePromptScreenChange(sessionId, { ...payload, forceFlush: true, releaseReason: reason });
+  return true;
+}
+
 function maybePromptScreenChange(sessionId, payload = {}) {
   const session = getCallSession(sessionId);
   if (!session || !session.active || !session.screenShareActive) return;
@@ -965,42 +1159,107 @@ function maybePromptScreenChange(sessionId, payload = {}) {
   if (!live) return;
   const now = Date.now();
   const existingPrompt = liveScreenChangePrompts.get(sessionId) || {};
-  if (existingPrompt.lastAt && now - existingPrompt.lastAt < 3500) {
-    liveScreenChangePrompts.set(sessionId, { ...existingPrompt, pendingPayload: payload, lastSkippedAt: now });
-    return;
-  }
+  const forceFlush = payload.forceFlush === true;
+  const releaseReason = String(payload.releaseReason || '').trim();
   const avgDiff = Number(payload.avgDiff || 0);
   const changedRatio = Number(payload.changedRatio || 0);
   const frameMeta = sanitizeFrameMeta(payload.frameMeta || session.lastScreenFrameMeta || {});
+  const intensityLevel = session.callMode === 'gaming' ? inferGamingIntensity(payload, session) : (session.intensityLevel || 'low');
+  const modePolicy = buildCallModePolicy(session.callMode || 'universal', intensityLevel);
+  const callout = classifyScreenChangeCallout(payload, frameMeta, session);
+  const effectivePayload = existingPrompt.pendingPayload && intensityLevel === 'low'
+    ? {
+        ...existingPrompt.pendingPayload,
+        avgDiff: Math.max(Number(existingPrompt.pendingPayload.avgDiff || 0), avgDiff),
+        changedRatio: Math.max(Number(existingPrompt.pendingPayload.changedRatio || 0), changedRatio),
+        frameMeta,
+      }
+    : payload;
+
+  updateCallSession(sessionId, {
+    intensityLevel,
+    handoffPolicy: modePolicy.handoffPolicy,
+    modeDecision: modePolicy.modeDecision,
+    modeReason: modePolicy.modeReason,
+    speechSuppressedReason: modePolicy.suppressScreenCommentary ? 'combat' : modePolicy.deferNonCriticalCommentary && (callout.tier === '3' || ((session.callMode === 'record' || session.callMode === 'observe') && callout.tier !== '1')) ? 'cooldown' : '',
+    lastCalloutTier: callout.tier,
+  });
+
+  if (!forceFlush && existingPrompt.lastAt && now - existingPrompt.lastAt < modePolicy.screenChangeDebounceMs) {
+    liveScreenChangePrompts.set(sessionId, { ...existingPrompt, pendingPayload: effectivePayload, lastSkippedAt: now, lastTier: callout.tier });
+    broadcastCallDebugState(sessionId);
+    return;
+  }
+
+  if (!forceFlush && modePolicy.suppressScreenCommentary && callout.tier !== '1') {
+    liveScreenChangePrompts.set(sessionId, { ...existingPrompt, pendingPayload: effectivePayload, lastSkippedAt: now, lastTier: callout.tier });
+    broadcast({ type: 'call:debug', data: { sessionId, message: `Gaming mode suppressed ${callout.semantic || callout.kind} screen commentary at intensity=${intensityLevel} (${avgDiff}/${changedRatio}).` } });
+    broadcastCallDebugState(sessionId);
+    return;
+  }
+
+  if (!forceFlush && modePolicy.deferNonCriticalCommentary && (callout.tier === '3' || ((session.callMode === 'record' || session.callMode === 'observe') && callout.tier !== '1'))) {
+    liveScreenChangePrompts.set(sessionId, { ...existingPrompt, pendingPayload: effectivePayload, lastSkippedAt: now, lastTier: callout.tier });
+    broadcast({ type: 'call:debug', data: { sessionId, message: `Gaming mode deferred ${callout.semantic || 'fyi'} commentary until a calmer gap (${avgDiff}/${changedRatio}).` } });
+    broadcastCallDebugState(sessionId);
+    return;
+  }
+
+  const promptAvgDiff = Number(effectivePayload.avgDiff || avgDiff || 0);
+  const promptChangedRatio = Number(effectivePayload.changedRatio || changedRatio || 0);
   const metaLine = describeFrameMeta(frameMeta);
   const currentVisual = session.visualMemory?.current || null;
   const previousVisual = Array.isArray(session.visualMemory?.recent) ? session.visualMemory.recent[0] : null;
+  const modeLine = session.callMode === 'gaming'
+    ? `Gaming callout policy: tier ${callout.tier} (${callout.kind}); intensity=${intensityLevel}; use short copilot phrasing${releaseReason ? `; this was deferred until a calm gap after ${releaseReason}` : ''}.`
+    : session.callMode === 'record'
+      ? `Record callout policy: tier ${callout.tier} (${callout.kind}); intensity=${intensityLevel}; prefer concise review-friendly notes, not live narration${releaseReason ? `; this was deferred until the state settled after ${releaseReason}` : ''}.`
+      : session.callMode === 'assist'
+        ? `Assist callout policy: tier ${callout.tier} (${callout.kind}); intensity=${intensityLevel}; be helpful and brief, and avoid piling on during busy moments${releaseReason ? `; this was deferred until a better moment after ${releaseReason}` : ''}.`
+        : '';
   const prompt = [
     'SYSTEM EVENT FOR LIVE CALL:',
     'The shared screen changed noticeably after a stabilized post-change frame was uploaded.',
     `Current call state: ${String(session.state || 'unknown')}`,
-    `Change strength: avgDiff=${avgDiff || 0}, changedRatio=${changedRatio || 0}`,
+    `Change strength: avgDiff=${promptAvgDiff || 0}, changedRatio=${promptChangedRatio || 0}`,
+    `Callout tier: ${callout.tier} (${callout.kind})`,
+    `Semantic class: ${callout.semantic || 'general'}`,
+    `Change interpretation: ${callout.summary}`,
     metaLine ? `Newest frame metadata: ${metaLine}` : '',
     currentVisual?.summary ? `Current visual memory: ${currentVisual.summary}` : '',
     previousVisual?.summary ? `Recent prior visual summary: ${previousVisual.summary}` : '',
+    modeLine,
     'Use the newest stable screen frame as visual context. Prefer the newest stable state over older assumptions. Do not identify a website, app, tab, or route unless visible text/UI clearly supports it. If the frame looks blank, partially loaded, or transitional, say it appears to still be loading instead of guessing.',
-    'If this is a meaningful user-visible state change, briefly comment on it now without waiting for Epic to ask. Keep it short. If it is merely animation/noise or you genuinely cannot tell what changed, stay quiet rather than guessing.',
+    callout.tier === '1'
+      ? 'If this looks critical or obvious, comment immediately in one short game-copilot line. Prefer fragments like "Respawn screen." or "Objective changed."'
+      : callout.tier === '2'
+        ? 'If this is useful and user-visible, comment briefly now in one short copilot line. Avoid explanation unless Epic asks.'
+        : session.callMode === 'record'
+          ? 'Only comment if it creates a useful review note. Keep it short, neutral, and recap-friendly. Otherwise stay quiet.'
+          : session.callMode === 'assist'
+            ? 'Only comment if it helps Epic in the moment. Keep it brief and practical. Otherwise stay quiet.'
+            : 'Only comment if there is a genuinely useful short FYI. One brief line max. Otherwise stay quiet.',
   ].filter(Boolean).join('\n');
+
   updateCallSession(sessionId, {
     lastGeminiHint: prompt,
     lastGeminiHintAt: new Date().toISOString(),
     lastVisualAssumption: 'Recent major screen change; favor the newest stable frame and avoid stale app/page guesses until visible UI confirms them.',
     lastVisualConfidence: frameMeta?.stable ? 'medium' : 'low',
+    speechSuppressedReason: '',
+    lastCalloutTier: callout.tier,
+    modeDecision: releaseReason ? 'gaming:calm-gap-release' : modePolicy.modeDecision,
+    modeReason: releaseReason ? `Released deferred ${callout.kind} commentary after ${releaseReason}.` : modePolicy.modeReason,
     visualMemory: {
       ...(session.visualMemory || {}),
       lastChangeAt: new Date().toISOString(),
-      lastChangeSummary: `Major screen change detected (${avgDiff || 0}/${changedRatio || 0}).`,
+      lastChangeSummary: `${callout.semantic || 'general'} · ${callout.summary} (${promptAvgDiff || 0}/${promptChangedRatio || 0}).`,
     },
   });
-  broadcast({ type: 'call:debug', data: { sessionId, message: `Prompting Fairy with meaningful screen change (${avgDiff}/${changedRatio}) while state=${session.state || 'unknown'}.` } });
+  broadcast({ type: 'call:debug', data: { sessionId, message: `Prompting Fairy with screen change tier=${callout.tier} (${promptAvgDiff}/${promptChangedRatio}) while state=${session.state || 'unknown'}.` } });
   broadcastCallDebugState(sessionId);
   try {
-    liveScreenChangePrompts.set(sessionId, { lastAt: Date.now(), pendingPayload: null });
+    liveScreenChangePrompts.set(sessionId, { lastAt: Date.now(), pendingPayload: null, lastTier: callout.tier });
     live.sendTextTurn(prompt);
   } catch (err) {
     broadcast({ type: 'call:error', data: { sessionId, message: err.message || 'Could not send screen-change hint to Gemini' } });
@@ -1290,6 +1549,8 @@ app.get(`${basePath}/api/settings/gemini`, async (req, res) => {
       personalityPrompt: settings.personalityPrompt || runtime.personalityPrompt || '',
       memoryEnabled: settings.memoryEnabled ?? runtime.memoryEnabled ?? true,
       memoryNotes: settings.memoryNotes || runtime.memoryNotes || '',
+      callMode: settings.callMode || runtime.callMode || 'universal',
+      availableCallModes: FAIRY_CALL_MODE_OPTIONS,
       availableVoiceNames: GEMINI_LIVE_VOICE_OPTIONS,
       source: runtime.source || 'command-center-local',
       usingEnvKey: String(runtime.source || '').startsWith('env:'),
@@ -1314,6 +1575,7 @@ app.post(`${basePath}/api/settings/gemini`, async (req, res) => {
       personalityPrompt: body.personalityPrompt !== undefined ? String(body.personalityPrompt || '') : existing.personalityPrompt,
       memoryEnabled: body.memoryEnabled !== undefined ? body.memoryEnabled !== false : existing.memoryEnabled,
       memoryNotes: body.memoryNotes !== undefined ? String(body.memoryNotes || '') : existing.memoryNotes,
+      callMode: body.callMode !== undefined ? String(body.callMode || '').trim() : existing.callMode,
     };
     const saved = await saveGeminiSettings(next);
     const runtime = await loadGeminiRuntimeConfig();
@@ -1334,6 +1596,8 @@ app.post(`${basePath}/api/settings/gemini`, async (req, res) => {
         personalityPrompt: saved.personalityPrompt || runtime.personalityPrompt || '',
         memoryEnabled: saved.memoryEnabled ?? runtime.memoryEnabled ?? true,
         memoryNotes: saved.memoryNotes || runtime.memoryNotes || '',
+        callMode: saved.callMode || runtime.callMode || 'universal',
+        availableCallModes: FAIRY_CALL_MODE_OPTIONS,
         availableVoiceNames: GEMINI_LIVE_VOICE_OPTIONS,
         source: runtime.source || 'command-center-local',
         usingEnvKey: String(runtime.source || '').startsWith('env:'),
@@ -2700,6 +2964,8 @@ app.get(`${basePath}/api/live/config`, async (req, res) => {
       personalityPrompt: config.personalityPrompt || '',
       memoryEnabled: config.memoryEnabled ?? true,
       memoryNotes: config.memoryNotes || '',
+      callMode: config.callMode || 'universal',
+      availableCallModes: FAIRY_CALL_MODE_OPTIONS,
       availableVoiceNames: GEMINI_LIVE_VOICE_OPTIONS,
       source: config.source,
       transport: 'server-websocket',
@@ -2843,10 +3109,23 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
     const sessionAgent = currentRoster.agents.some((agent) => agent.id === requestedAgent)
       ? requestedAgent
       : String(currentRoster.primaryAgentId || 'orchestrator').trim();
+    const activeCallMode = normalizeCallMode(runtime.callMode || 'universal');
+    const initialModePolicy = buildCallModePolicy(activeCallMode, 'low');
     const session = createCallSession({
       agent: sessionAgent,
       mode: 'gemini-live',
       persona: 'fairy',
+      callMode: activeCallMode,
+    });
+    updateCallSession(session.id, {
+      callMode: activeCallMode,
+      intensityLevel: 'low',
+      handoffPolicy: initialModePolicy.handoffPolicy,
+      proactivity: initialModePolicy.proactivity,
+      responseStyle: initialModePolicy.responseStyle,
+      modeDecision: initialModePolicy.modeDecision,
+      modeReason: initialModePolicy.modeReason,
+      speechSuppressedReason: '',
     });
 
     const memoryStore = runtime.memoryEnabled ? await loadFairyMemory() : { entries: [] };
@@ -2872,6 +3151,7 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
         operatorName: runtime.operatorName || 'Epic',
         personalityPrompt: runtime.personalityPrompt || '',
         memoryContext,
+        callMode: activeCallMode,
       }),
       onEvent: (event) => {
         const current = getCallSession(session.id);
@@ -2979,10 +3259,11 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
                   personalityPrompt: args.personalityPrompt !== undefined ? String(args.personalityPrompt || '') : existing.personalityPrompt,
                   memoryEnabled: args.memoryEnabled !== undefined ? args.memoryEnabled !== false : existing.memoryEnabled,
                   memoryNotes: args.memoryNotes !== undefined ? String(args.memoryNotes || '') : existing.memoryNotes,
+                  callMode: args.callMode !== undefined ? String(args.callMode || '').trim() : existing.callMode,
                 };
                 const saved = await saveGeminiSettings(next);
                 const runtimeNow = await loadGeminiRuntimeConfig();
-                const changedKeys = ['model','responseModalities','thinkingLevel','voiceName','speechOutputMode','fishVoiceId','personaName','operatorName','personalityPrompt','memoryEnabled','memoryNotes']
+                const changedKeys = ['model','responseModalities','thinkingLevel','voiceName','speechOutputMode','fishVoiceId','personaName','operatorName','personalityPrompt','memoryEnabled','memoryNotes','callMode']
                   .filter((key) => args[key] !== undefined);
                 const settings = {
                   model: saved.model || runtimeNow.model,
@@ -2995,6 +3276,7 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
                   operatorName: saved.operatorName || runtimeNow.operatorName || 'Epic',
                   memoryEnabled: saved.memoryEnabled ?? runtimeNow.memoryEnabled ?? true,
                   memoryNotes: saved.memoryNotes || runtimeNow.memoryNotes || '',
+                  callMode: saved.callMode || runtimeNow.callMode || 'universal',
                 };
                 broadcast({ type: 'call:settings.updated', data: { sessionId: session.id, section: 'gemini', changedKeys, settings } });
                 functionResponses.push({ name, id, response: { ok: true, section: 'gemini', changedKeys, settings } });
@@ -3276,6 +3558,31 @@ Tell Epic briefly that you put the image on screen and that he can copy the link
   }
 });
 
+app.post(`${basePath}/api/call/:id/mode`, async (req, res) => {
+  try {
+    const sessionId = String(req.params.id || '').trim();
+    const session = getCallSession(sessionId);
+    if (!session) return res.status(404).json({ ok: false, error: 'Call session not found' });
+    const callMode = normalizeCallMode(req.body?.callMode || session.callMode || 'universal');
+    const intensityLevel = String(session.intensityLevel || 'low').trim() || 'low';
+    const policy = buildCallModePolicy(callMode, intensityLevel);
+    const updated = updateCallSession(sessionId, {
+      callMode,
+      handoffPolicy: policy.handoffPolicy,
+      proactivity: policy.proactivity,
+      responseStyle: policy.responseStyle,
+      modeDecision: policy.modeDecision,
+      modeReason: policy.modeReason,
+      speechSuppressedReason: policy.suppressScreenCommentary ? 'combat' : '',
+    });
+    broadcast({ type: 'call:mode.updated', data: { sessionId, callMode, session: updated } });
+    broadcastCallDebugState(sessionId);
+    return res.json({ ok: true, session: updated, callMode });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message || 'Could not update call mode' });
+  }
+});
+
 app.post(`${basePath}/api/call/:id/end`, async (req, res) => {
   const sessionId = String(req.params.id || '');
   clearLiveWatchdog(sessionId);
@@ -3430,6 +3737,7 @@ app.post(`${basePath}/api/call/:id/event`, async (req, res) => {
     const text = String(req.body?.text || '').trim();
 
     if (eventType === 'transcript.partial') {
+      liveScreenChangePrompts.set(sessionId, { lastAt: 0, pendingPayload: null, lastTier: '', lastSkippedAt: 0 });
       const updated = updateCallSession(sessionId, { partialTranscript: text, state: 'listening' });
       broadcast({ type: 'call:transcript.partial', data: { sessionId, text, state: updated?.state || 'listening' } });
       return res.json({ ok: true, session: updated });
@@ -3515,6 +3823,7 @@ ${text}`
       clearLiveWatchdog(sessionId);
       const updated = updateCallSession(sessionId, { state: 'ready', currentTurnAudioChunks: 0 });
       broadcast({ type: 'call:session.state', data: { sessionId, state: updated?.state || 'ready' } });
+      flushDeferredScreenCommentary(sessionId, 'assistant-finished');
       return res.json({ ok: true, session: updated });
     }
 
@@ -3614,12 +3923,23 @@ ${text}`
         confidence: frameMeta?.stable ? 'medium' : 'low',
       });
       broadcast({ type: 'call:screen.changed', data: { sessionId, avgDiff, changedRatio, frameMeta } });
-      maybePromptScreenChange(sessionId, { avgDiff, changedRatio, frameMeta });
+      const queueState = liveScreenChangePrompts.get(sessionId) || {};
+      if ((session.callMode === 'gaming' || updated?.callMode === 'gaming') && queueState.pendingPayload) {
+        const newIntensity = inferGamingIntensity({ avgDiff, changedRatio }, updated || session);
+        if (newIntensity === 'low') {
+          flushDeferredScreenCommentary(sessionId, 'screen-settled');
+        } else {
+          maybePromptScreenChange(sessionId, { avgDiff, changedRatio, frameMeta });
+        }
+      } else {
+        maybePromptScreenChange(sessionId, { avgDiff, changedRatio, frameMeta });
+      }
       broadcastCallDebugState(sessionId);
       return res.json({ ok: true, session: updated || getCallSession(sessionId) });
     }
 
     if (eventType === 'screen.stopped') {
+      liveScreenChangePrompts.delete(sessionId);
       const updated = updateCallSession(sessionId, {
         screenShareActive: false,
         lastVisualAssumption: 'Screen sharing stopped; no current screen visibility.',
@@ -3793,6 +4113,8 @@ app.get(`${basePath}/api/v1/fairy/config`, async (req, res) => {
       personalityPrompt: config.personalityPrompt || '',
       memoryEnabled: config.memoryEnabled ?? true,
       memoryNotes: config.memoryNotes || '',
+      callMode: config.callMode || 'universal',
+      availableCallModes: FAIRY_CALL_MODE_OPTIONS,
       availableVoiceNames: GEMINI_LIVE_VOICE_OPTIONS,
       source: config.source,
       transport: 'server-websocket',
@@ -3819,6 +4141,8 @@ app.get(`${basePath}/api/v1/fairy/settings`, async (req, res) => {
       personalityPrompt: settings.personalityPrompt || runtime.personalityPrompt || '',
       memoryEnabled: settings.memoryEnabled ?? runtime.memoryEnabled ?? true,
       memoryNotes: settings.memoryNotes || runtime.memoryNotes || '',
+      callMode: settings.callMode || runtime.callMode || 'universal',
+      availableCallModes: FAIRY_CALL_MODE_OPTIONS,
       availableVoiceNames: GEMINI_LIVE_VOICE_OPTIONS,
       source: runtime.source || 'command-center-local',
     },
@@ -3842,6 +4166,7 @@ app.post(`${basePath}/api/v1/fairy/settings`, async (req, res) => {
       personalityPrompt: body.personalityPrompt !== undefined ? String(body.personalityPrompt || '') : existing.personalityPrompt,
       memoryEnabled: body.memoryEnabled !== undefined ? body.memoryEnabled !== false : existing.memoryEnabled,
       memoryNotes: body.memoryNotes !== undefined ? String(body.memoryNotes || '') : existing.memoryNotes,
+      callMode: body.callMode !== undefined ? String(body.callMode || '').trim() : existing.callMode,
     };
     const saved = await saveGeminiSettings(next);
     const runtime = await loadGeminiRuntimeConfig();
@@ -3861,6 +4186,8 @@ app.post(`${basePath}/api/v1/fairy/settings`, async (req, res) => {
         personalityPrompt: saved.personalityPrompt || runtime.personalityPrompt || '',
         memoryEnabled: saved.memoryEnabled ?? runtime.memoryEnabled ?? true,
         memoryNotes: saved.memoryNotes || runtime.memoryNotes || '',
+        callMode: saved.callMode || runtime.callMode || 'universal',
+        availableCallModes: FAIRY_CALL_MODE_OPTIONS,
         availableVoiceNames: GEMINI_LIVE_VOICE_OPTIONS,
         source: runtime.source || 'command-center-local',
       },

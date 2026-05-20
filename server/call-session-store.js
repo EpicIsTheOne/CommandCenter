@@ -6,7 +6,7 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-export function createCallSession({ agent = 'orchestrator', mode = 'gemini-live', persona = 'fairy' } = {}) {
+export function createCallSession({ agent = 'orchestrator', mode = 'gemini-live', persona = 'fairy', callMode = 'universal' } = {}) {
   const id = `call-${randomUUID()}`;
   const session = {
     id,
@@ -39,6 +39,13 @@ export function createCallSession({ agent = 'orchestrator', mode = 'gemini-live'
     lastVisualConfidence: '',
     lastRoutingDecision: '',
     lastTaskSummary: '',
+    callMode,
+    modeDecision: '',
+    modeReason: '',
+    intensityLevel: 'low',
+    lastCalloutTier: '',
+    speechSuppressedReason: '',
+    handoffPolicy: callMode === 'gaming' ? 'conservative' : 'normal',
     visualMemory: {
       current: null,
       recent: [],

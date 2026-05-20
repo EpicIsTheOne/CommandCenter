@@ -10,7 +10,7 @@ import * as intro from './intro.js?v=20260514b';
 import * as appearance from './appearance.js?v=20260514b';
 import * as branding from './branding.js?v=20260514b';
 import * as layoutSettings from './layout-settings.js?v=20260514b';
-import * as fairyLive from './fairy-live.js?v=20260520-fairy-recording4';
+import * as fairyLive from './fairy-live.js?v=20260520-fairy-callmode1';
 
 const APP_BUILD = '20260518-fairy-chatcall1';
 console.log('[CommandCenter] app build:', APP_BUILD);
@@ -1683,6 +1683,7 @@ function populateGeminiSettingsForm(geminiSettings = {}) {
   const modelInput = document.getElementById('gemini-live-model');
   const modalitiesSelect = document.getElementById('gemini-response-modalities');
   const thinkingSelect = document.getElementById('gemini-thinking-level');
+  const callModeSelect = document.getElementById('gemini-call-mode');
   const speechOutputModeSelect = document.getElementById('gemini-speech-output-mode');
   const fishVoiceIdInput = document.getElementById('gemini-fish-voice-id');
   const liveVoiceSelect = document.getElementById('gemini-live-voice');
@@ -1707,6 +1708,7 @@ function populateGeminiSettingsForm(geminiSettings = {}) {
     modalitiesSelect.value = ['AUDIO', 'TEXT', 'AUDIO,TEXT'].includes(modalities) ? modalities : 'AUDIO';
   }
   if (thinkingSelect) thinkingSelect.value = geminiSettings.thinkingLevel || 'minimal';
+  if (callModeSelect) callModeSelect.value = geminiSettings.callMode || 'universal';
   if (speechOutputModeSelect) speechOutputModeSelect.value = geminiSettings.speechOutputMode || 'gemini';
   if (fishVoiceIdInput) fishVoiceIdInput.value = geminiSettings.fishVoiceId || '';
   if (liveVoiceSelect) {
@@ -1819,6 +1821,7 @@ function renderFairySettingsDiagnostics(config = {}, sessions = []) {
     <div><strong>Operator:</strong> ${escapeHtml(config.operatorName || 'Epic')}</div>
     <div><strong>Model:</strong> ${escapeHtml(config.model || 'unknown')}</div>
     <div><strong>Source:</strong> ${escapeHtml(config.source || 'unknown')}</div>
+    <div><strong>Call mode:</strong> ${escapeHtml(config.callMode || 'universal')}</div>
     <div><strong>Speech mode:</strong> ${escapeHtml(config.speechOutputMode === 'fish' ? 'Fish Audio from Gemini text' : 'Gemini native voice')}</div>
     <div><strong>Live voice:</strong> ${escapeHtml(config.voiceName || config.liveVoiceName || 'Sulafat')}</div>
     <div><strong>Fish voice id:</strong> ${escapeHtml(config.fishVoiceId || '—')}</div>
@@ -1851,6 +1854,7 @@ async function saveGeminiSettingsOnly() {
   const model = document.getElementById('gemini-live-model')?.value?.trim() || 'gemini-3.1-flash-live-preview';
   const responseModalities = (document.getElementById('gemini-response-modalities')?.value || 'AUDIO').split(',').map((item) => item.trim()).filter(Boolean);
   const thinkingLevel = document.getElementById('gemini-thinking-level')?.value?.trim() || 'minimal';
+  const callMode = document.getElementById('gemini-call-mode')?.value?.trim() || 'universal';
   const speechOutputMode = document.getElementById('gemini-speech-output-mode')?.value?.trim() || 'gemini';
   const fishVoiceId = document.getElementById('gemini-fish-voice-id')?.value?.trim() || '';
   const voiceName = document.getElementById('gemini-live-voice')?.value?.trim() || 'Sulafat';
@@ -1859,7 +1863,7 @@ async function saveGeminiSettingsOnly() {
     const data = await fetchJson(`${BASE}/api/settings/gemini`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey, personaName, operatorName, personalityPrompt, memoryEnabled, memoryNotes, model, responseModalities, thinkingLevel, speechOutputMode, fishVoiceId, voiceName }),
+      body: JSON.stringify({ apiKey, personaName, operatorName, personalityPrompt, memoryEnabled, memoryNotes, model, responseModalities, thinkingLevel, callMode, speechOutputMode, fishVoiceId, voiceName }),
     });
     populateGeminiSettingsForm(data.settings || {});
     await fairyLive.refreshConfig?.();
@@ -2260,6 +2264,7 @@ async function saveSettings() {
   const geminiModel = document.getElementById('gemini-live-model')?.value?.trim() || 'gemini-3.1-flash-live-preview';
   const geminiResponseModalities = (document.getElementById('gemini-response-modalities')?.value || 'AUDIO').split(',').map((item) => item.trim()).filter(Boolean);
   const geminiThinkingLevel = document.getElementById('gemini-thinking-level')?.value?.trim() || 'minimal';
+  const geminiCallMode = document.getElementById('gemini-call-mode')?.value?.trim() || 'universal';
   const geminiSpeechOutputMode = document.getElementById('gemini-speech-output-mode')?.value?.trim() || 'gemini';
   const geminiFishVoiceId = document.getElementById('gemini-fish-voice-id')?.value?.trim() || '';
   const geminiVoiceName = document.getElementById('gemini-live-voice')?.value?.trim() || 'Sulafat';
@@ -2319,7 +2324,7 @@ async function saveSettings() {
     await fetchJson(`${BASE}/api/settings/gemini`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: geminiApiKey, personaName: geminiPersonaName, operatorName: geminiOperatorName, personalityPrompt: geminiPersonalityPrompt, memoryEnabled: geminiMemoryEnabled, memoryNotes: geminiMemoryNotes, model: geminiModel, responseModalities: geminiResponseModalities, thinkingLevel: geminiThinkingLevel, speechOutputMode: geminiSpeechOutputMode, fishVoiceId: geminiFishVoiceId, voiceName: geminiVoiceName }),
+      body: JSON.stringify({ apiKey: geminiApiKey, personaName: geminiPersonaName, operatorName: geminiOperatorName, personalityPrompt: geminiPersonalityPrompt, memoryEnabled: geminiMemoryEnabled, memoryNotes: geminiMemoryNotes, model: geminiModel, responseModalities: geminiResponseModalities, thinkingLevel: geminiThinkingLevel, callMode: geminiCallMode, speechOutputMode: geminiSpeechOutputMode, fishVoiceId: geminiFishVoiceId, voiceName: geminiVoiceName }),
     });
 
     await fetchJson(`${BASE}/api/settings/companions`, {

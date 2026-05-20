@@ -71,7 +71,7 @@ function agentSpecialtyHints(agent = {}, primaryAgentId = '') {
   return Array.from(new Set(hints));
 }
 
-export function buildFairyLiveSystemPrompt({ roster, personaName = 'Fairy', operatorName = 'Epic', personalityPrompt = '', memoryContext = '' } = {}) {
+export function buildFairyLiveSystemPrompt({ roster, personaName = 'Fairy', operatorName = 'Epic', personalityPrompt = '', memoryContext = '', callMode = 'universal' } = {}) {
   const runtimeName = safeOneLine(personaName || 'Fairy') || 'Fairy';
   const runtimeOperatorName = safeOneLine(operatorName || 'Epic') || 'Epic';
   const extraPersonality = String(personalityPrompt || '').trim();
@@ -79,7 +79,72 @@ export function buildFairyLiveSystemPrompt({ roster, personaName = 'Fairy', oper
   const identityAddon = `\n\nRuntime identity override:\n- Your current operator-facing name is "${runtimeName}".\n- If asked your name, say "${runtimeName}".\n- The current operator's preferred name is "${runtimeOperatorName}".\n- Address the operator as "${runtimeOperatorName}" in normal conversation unless they ask for something else. Avoid generic labels like "user" or "the user."\n- Refer to yourself as "${runtimeName}" instead of "Fairy" in normal conversation.\n- Keep the same core role: live interface layer, while Astra/OpenClaw handles execution.`;
   const personalityAddon = extraPersonality ? `\n\nAdditional personality instructions for ${runtimeName}:\n${extraPersonality}` : '';
   const memoryAddon = localMemory ? `\n\nLocal persistent memory for ${runtimeName}:\n${localMemory}\n\nMemory rules:\n- This memory is local to this Command Center instance; treat it as helpful context, not universal truth.\n- Use it to preserve operator preferences, durable facts, project context, and continuity across calls.\n- Do not reveal raw memory unless Epic asks. Summarize naturally.\n- If memory conflicts with what Epic says now, trust the current conversation and ask a brief clarification if needed.\n- Never store secrets, tokens, passwords, API keys, or private credentials.` : '';
-  const basePrompt = `${FAIRY_LIVE_SYSTEM_PROMPT}${identityAddon}${personalityAddon}${memoryAddon}`.trim();
+  const mode = safeOneLine(callMode || 'universal').toLowerCase() || 'universal';
+  const modeAddon = mode === 'gaming'
+    ? `
+
+Active live call mode: gaming.
+Gaming mode rules:
+- Act like a sharp game/stream copilot, not a general-purpose narrator.
+- Prefer short lines: ideally 2 to 8 words for callouts, one sentence max unless Epic explicitly asks for more.
+- During active gameplay, only interrupt for critical or clearly useful state changes.
+- Good gaming callouts sound like: "Respawn screen." "Map open." "Inventory up." "Objective changed." "Scoreboard."
+- Avoid padded phrasing, over-explaining, therapy-speak, and verbose assistant cadence.
+- If you deferred commentary during action, deliver it cleanly once the moment calms down in one short line.
+- For uncertain game visuals, say the uncertainty briefly instead of making lore-brained guesses.`
+    : mode === 'observe'
+      ? `
+
+Active live call mode: observe.
+Observe mode rules:
+- Stay quiet by default.
+- Speak only when there is a clear error, blocker, meaningful state change, or Epic directly asks.
+- Prefer short observational lines over suggestions.
+- Do not narrate routine UI churn or speculate beyond the visible evidence.`
+    : mode === 'guide'
+      ? `
+
+Active live call mode: guide.
+Guide mode rules:
+- Be proactive and step-by-step.
+- When useful, tell Epic the next concrete action, button, or field to use.
+- Prefer short directive lines like: "Click that." "Open settings." "Use the top button." then expand only if needed.
+- Keep the energy practical and forward-moving.`
+    : mode === 'operator'
+      ? `
+
+Active live call mode: operator.
+Operator mode rules:
+- Bias toward action, routing, and execution-ready summaries.
+- If something clearly needs real work, say so fast and route it without ceremony.
+- Speak in crisp command-center style, not chatty assistant style.
+- Good operator lines sound like: "That needs Astra." "Routing backend work." "Blocked on auth."`
+    : mode === 'record'
+      ? `
+
+Active live call mode: record.
+Record mode rules:
+- Favor concise, review-friendly commentary.
+- Highlight meaningful transitions, blockers, and decisions, not every small change.
+- Speak like clean recap notes someone could skim later.
+- Prefer neutral, timestamp-worthy phrasing over chatty live narration.
+- If a moment is visually busy, wait for the state to settle before commenting unless it is clearly important.`
+    : mode === 'assist'
+      ? `
+
+Active live call mode: assist.
+Assist mode rules:
+- Be balanced, helpful, and present without overdriving.
+- Prefer brief, practical help over constant commentary.
+- Offer suggestions when they are useful, but back off during busy moments or when Epic is clearly in flow.
+- Sound like a competent sidekick, not a narrator camping on every screen change.`
+    : `
+
+Active live call mode: universal.
+Universal mode rules:
+- Use your normal full-capability Fairy behavior.
+- You may comment, guide, observe, and route work using the usual balance of initiative and restraint.`;
+  const basePrompt = `${FAIRY_LIVE_SYSTEM_PROMPT}${identityAddon}${personalityAddon}${memoryAddon}${modeAddon}`.trim();
   const agents = Array.isArray(roster?.agents) ? roster.agents.filter((agent) => agent?.id) : [];
   const primaryAgentId = String(roster?.primaryAgentId || agents[0]?.id || 'orchestrator').trim();
   if (!agents.length) {
@@ -141,6 +206,7 @@ const FAIRY_LIVE_TOOLS = [{
         responseModalities: { type: 'ARRAY', items: { type: 'STRING' }, description: 'Optional response modalities, usually AUDIO or TEXT.' },
         thinkingLevel: { type: 'STRING', description: 'Optional thinking level such as minimal, low, medium, or high.' },
         voiceName: { type: 'STRING', description: 'Optional Gemini Live voice name.' },
+        callMode: { type: 'STRING', description: 'Optional Fairy call mode: universal, gaming, observe, assist, guide, operator, or record.' },
         speechOutputMode: { type: 'STRING', description: 'Optional Fairy speech mode: gemini or fish.' },
         fishVoiceId: { type: 'STRING', description: 'Optional Fish Audio voice/reference ID for Fairy when speechOutputMode is fish.' },
         personaName: { type: 'STRING', description: 'Optional Fairy display/persona name.' },

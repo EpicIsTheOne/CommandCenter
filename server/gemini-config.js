@@ -6,6 +6,8 @@ const ROOT = process.cwd();
 const DATA_DIR = join(ROOT, 'data');
 const SETTINGS_FILE = join(DATA_DIR, 'gemini-settings.json');
 
+export const FAIRY_CALL_MODE_OPTIONS = ['universal', 'gaming', 'observe', 'assist', 'guide', 'operator', 'record'];
+
 export const GEMINI_LIVE_VOICE_OPTIONS = [
   'Zephyr', 'Kore', 'Orus', 'Autonoe', 'Umbriel', 'Erinome', 'Laomedeia', 'Schedar', 'Achird', 'Sadachbia',
   'Puck', 'Fenrir', 'Aoede', 'Enceladus', 'Algieba', 'Algenib', 'Achernar', 'Gacrux', 'Zubenelgenubi', 'Sadaltager',
@@ -25,6 +27,7 @@ const DEFAULT_GEMINI_SETTINGS = {
   personalityPrompt: '',
   memoryEnabled: true,
   memoryNotes: '',
+  callMode: 'universal',
 };
 
 function normalizeModalities(value) {
@@ -83,6 +86,11 @@ function normalizeMemoryNotes(value = '') {
   return String(value || '').trim().slice(0, 12000);
 }
 
+function normalizeCallMode(value = '') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return FAIRY_CALL_MODE_OPTIONS.includes(normalized) ? normalized : 'universal';
+}
+
 function normalizeGeminiSettings(input = {}) {
   return {
     apiKey: String(input.apiKey || '').trim(),
@@ -97,6 +105,7 @@ function normalizeGeminiSettings(input = {}) {
     personalityPrompt: normalizePersonalityPrompt(input.personalityPrompt || DEFAULT_GEMINI_SETTINGS.personalityPrompt),
     memoryEnabled: normalizeMemoryEnabled(input.memoryEnabled ?? DEFAULT_GEMINI_SETTINGS.memoryEnabled),
     memoryNotes: normalizeMemoryNotes(input.memoryNotes || DEFAULT_GEMINI_SETTINGS.memoryNotes),
+    callMode: normalizeCallMode(input.callMode || DEFAULT_GEMINI_SETTINGS.callMode),
   };
 }
 
@@ -135,6 +144,7 @@ export async function loadGeminiRuntimeConfig() {
       personalityPrompt: local.personalityPrompt,
       memoryEnabled: local.memoryEnabled,
       memoryNotes: local.memoryNotes,
+      callMode: local.callMode,
       source: 'command-center-local',
     };
   }
@@ -156,6 +166,7 @@ export async function loadGeminiRuntimeConfig() {
       personalityPrompt: normalizePersonalityPrompt(process.env.GEMINI_LIVE_PERSONALITY_PROMPT || local.personalityPrompt),
       memoryEnabled: normalizeMemoryEnabled(process.env.GEMINI_LIVE_MEMORY_ENABLED ?? local.memoryEnabled),
       memoryNotes: normalizeMemoryNotes(process.env.GEMINI_LIVE_MEMORY_NOTES || local.memoryNotes),
+      callMode: normalizeCallMode(process.env.GEMINI_LIVE_CALL_MODE || local.callMode),
       source: process.env.GEMINI_API_KEY ? 'env:GEMINI_API_KEY' : 'env:GOOGLE_API_KEY',
     };
   }
@@ -175,7 +186,10 @@ export async function loadGeminiRuntimeConfig() {
     personalityPrompt: local.personalityPrompt || DEFAULT_GEMINI_SETTINGS.personalityPrompt,
     memoryEnabled: local.memoryEnabled,
     memoryNotes: local.memoryNotes || DEFAULT_GEMINI_SETTINGS.memoryNotes,
+    callMode: local.callMode || DEFAULT_GEMINI_SETTINGS.callMode,
     source: 'command-center-local',
     error: 'Gemini API key is not configured in Command Center settings',
   };
 }
+
+export { normalizeCallMode };

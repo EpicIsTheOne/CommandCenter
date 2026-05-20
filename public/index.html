@@ -100,6 +100,19 @@
         <span id="fairy-live-audio-status" class="fairy-live-audio-status">Mic off. Text test mode still works.</span>
       </div>
       <div class="fairy-live-audio-row">
+        <label for="fairy-live-call-mode" class="setting-hint" style="min-width:92px;">CALL MODE</label>
+        <select id="fairy-live-call-mode" class="secondary-button" disabled>
+          <option value="universal">Universal</option>
+          <option value="gaming">Gaming</option>
+          <option value="observe">Observe</option>
+          <option value="assist">Assist</option>
+          <option value="guide">Guide</option>
+          <option value="operator">Operator</option>
+          <option value="record">Record / Review</option>
+        </select>
+        <span id="fairy-live-call-mode-status" class="fairy-live-audio-status">Universal mode keeps normal Fairy behavior.</span>
+      </div>
+      <div class="fairy-live-audio-row">
         <button id="fairy-live-screen" class="secondary-button fairy-live-screen" type="button" disabled>SHARE SCREEN</button>
         <span id="fairy-live-screen-status" class="fairy-live-audio-status">Screen sharing off.</span>
       </div>
@@ -546,6 +559,20 @@
             </div>
 
             <div class="setting-group nested-setting-group">
+              <label for="gemini-call-mode">Default call mode</label>
+              <select id="gemini-call-mode">
+                <option value="universal">Universal (default)</option>
+                <option value="gaming">Gaming</option>
+                <option value="observe">Observe</option>
+                <option value="assist">Assist</option>
+                <option value="guide">Guide</option>
+                <option value="operator">Operator</option>
+                <option value="record">Record / Review</option>
+              </select>
+              <div class="setting-hint">Universal keeps current Fairy behavior. Gaming trims chatter during intense gameplay and favors short copilot-style callouts.</div>
+            </div>
+
+            <div class="setting-item">
               <label for="gemini-speech-output-mode">Speech output mode</label>
               <select id="gemini-speech-output-mode">
                 <option value="gemini">Gemini native voice</option>
@@ -994,6 +1021,6 @@
 
   <script src="vendor/picovoice/web-voice-processor.js"></script>
   <script src="vendor/picovoice/porcupine-web.js"></script>
-  <script type="module" src="js/app.js?v=20260520-fairy-recording4"></script>
+  <script type="module" src="js/app.js?v=20260520-fairy-callmode1"></script>
 </body>
 </html>
