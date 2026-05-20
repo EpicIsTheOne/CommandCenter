@@ -18,6 +18,8 @@ const DEFAULT_GEMINI_SETTINGS = {
   responseModalities: ['AUDIO'],
   thinkingLevel: 'minimal',
   voiceName: 'Sulafat',
+  speechOutputMode: 'gemini',
+  fishVoiceId: '',
   personaName: 'Fairy',
   operatorName: 'Epic',
   personalityPrompt: '',
@@ -46,6 +48,15 @@ function normalizeVoiceName(value = '') {
   if (!raw) return DEFAULT_GEMINI_SETTINGS.voiceName;
   const matched = GEMINI_LIVE_VOICE_OPTIONS.find((item) => item.toLowerCase() == raw.toLowerCase());
   return matched || DEFAULT_GEMINI_SETTINGS.voiceName;
+}
+
+function normalizeSpeechOutputMode(value = '') {
+  const normalized = String(value || '').trim().toLowerCase();
+  return normalized === 'fish' ? 'fish' : 'gemini';
+}
+
+function normalizeFishVoiceId(value = '') {
+  return String(value || '').trim().slice(0, 200);
 }
 
 function normalizePersonaName(value = '') {
@@ -79,6 +90,8 @@ function normalizeGeminiSettings(input = {}) {
     responseModalities: normalizeModalities(input.responseModalities || DEFAULT_GEMINI_SETTINGS.responseModalities),
     thinkingLevel: normalizeThinkingLevel(input.thinkingLevel || DEFAULT_GEMINI_SETTINGS.thinkingLevel),
     voiceName: normalizeVoiceName(input.voiceName || DEFAULT_GEMINI_SETTINGS.voiceName),
+    speechOutputMode: normalizeSpeechOutputMode(input.speechOutputMode || DEFAULT_GEMINI_SETTINGS.speechOutputMode),
+    fishVoiceId: normalizeFishVoiceId(input.fishVoiceId || DEFAULT_GEMINI_SETTINGS.fishVoiceId),
     personaName: normalizePersonaName(input.personaName || DEFAULT_GEMINI_SETTINGS.personaName),
     operatorName: normalizeOperatorName(input.operatorName || DEFAULT_GEMINI_SETTINGS.operatorName),
     personalityPrompt: normalizePersonalityPrompt(input.personalityPrompt || DEFAULT_GEMINI_SETTINGS.personalityPrompt),
@@ -115,6 +128,8 @@ export async function loadGeminiRuntimeConfig() {
       responseModalities: local.responseModalities,
       thinkingLevel: local.thinkingLevel,
       voiceName: local.voiceName,
+      speechOutputMode: local.speechOutputMode,
+      fishVoiceId: local.fishVoiceId,
       personaName: local.personaName,
       operatorName: local.operatorName,
       personalityPrompt: local.personalityPrompt,
@@ -134,6 +149,8 @@ export async function loadGeminiRuntimeConfig() {
       responseModalities: normalizeModalities(process.env.GEMINI_LIVE_RESPONSE_MODALITIES || local.responseModalities),
       thinkingLevel: normalizeThinkingLevel(process.env.GEMINI_LIVE_THINKING_LEVEL || local.thinkingLevel),
       voiceName: normalizeVoiceName(process.env.GEMINI_LIVE_VOICE_NAME || local.voiceName),
+      speechOutputMode: normalizeSpeechOutputMode(process.env.GEMINI_LIVE_SPEECH_OUTPUT_MODE || local.speechOutputMode),
+      fishVoiceId: normalizeFishVoiceId(process.env.GEMINI_LIVE_FISH_VOICE_ID || local.fishVoiceId),
       personaName: normalizePersonaName(process.env.GEMINI_LIVE_PERSONA_NAME || local.personaName),
       operatorName: normalizeOperatorName(process.env.GEMINI_LIVE_OPERATOR_NAME || local.operatorName),
       personalityPrompt: normalizePersonalityPrompt(process.env.GEMINI_LIVE_PERSONALITY_PROMPT || local.personalityPrompt),
@@ -151,6 +168,8 @@ export async function loadGeminiRuntimeConfig() {
     responseModalities: local.responseModalities || ['AUDIO'],
     thinkingLevel: local.thinkingLevel || 'minimal',
     voiceName: local.voiceName || DEFAULT_GEMINI_SETTINGS.voiceName,
+    speechOutputMode: local.speechOutputMode || DEFAULT_GEMINI_SETTINGS.speechOutputMode,
+    fishVoiceId: local.fishVoiceId || DEFAULT_GEMINI_SETTINGS.fishVoiceId,
     personaName: local.personaName || DEFAULT_GEMINI_SETTINGS.personaName,
     operatorName: local.operatorName || DEFAULT_GEMINI_SETTINGS.operatorName,
     personalityPrompt: local.personalityPrompt || DEFAULT_GEMINI_SETTINGS.personalityPrompt,

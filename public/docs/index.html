@@ -101,6 +101,19 @@
           </div>
         </section>
 
+        <h2 id="api-settings">API Settings</h2>
+        <div class="card">
+          <p>Manage your Command Center API key directly from docs (requires being logged into Command Center UI auth).</p>
+          <p><strong>Current key:</strong> <code id="api-key-masked">(loading...)</code></p>
+          <div class="hero-actions" style="margin-top:0.8rem;">
+            <button id="api-key-refresh" class="btn btn-secondary" type="button">Refresh</button>
+            <button id="api-key-reveal" class="btn btn-secondary" type="button">View key</button>
+            <button id="api-key-copy" class="btn btn-secondary" type="button">Copy key</button>
+            <button id="api-key-rotate" class="btn btn-primary" type="button">Rotate key</button>
+          </div>
+          <p id="api-key-status" class="muted" style="margin-top:0.7rem;">Tip: rotating key invalidates old bearer tokens immediately.</p>
+        </div>
+
         <h2 id="quickstart">Quick Start</h2>
         <div class="card"><div class="code-block"><button class="copy-btn" type="button">Copy</button><pre># set your auth header once
 export COMMANDCENTER_API_KEY="YOUR_COMMANDCENTER_API_KEY"
@@ -328,6 +341,13 @@ try:
 except ImportError:
     httpx = None
 
+try:
+    import sounddevice as sd
+    import numpy as np
+except ImportError:
+    sd = None
+    np = None
+
 BASE = os.environ.get(&quot;COMMANDCENTER_BASE&quot;, &quot;https://your-domain.example/commandcenter/api/v1&quot;)
 API_KEY = os.environ.get(&quot;COMMANDCENTER_API_KEY&quot;, &quot;YOUR_COMMANDCENTER_API_KEY&quot;)
 API_KEY = API_KEY.removeprefix(&quot;Bearer &quot;).strip()
@@ -497,12 +517,19 @@ def playable_suffix_from_content_type(content_type: str) -&gt; str:
     return &quot;.bin&quot;
 
 
+def safe_filename_fragment(value: str) -&gt; str:
+    cleaned = &quot;&quot;.join(ch if ch.isalnum() or ch in {&quot;-&quot;, &quot;_&quot;} else &quot;-&quot; for ch in (value or &quot;&quot;).lower())
+    cleaned = &quot;-&quot;.join(part for part in cleaned.split(&quot;-&quot;) if part)
+    return cleaned or &quot;agent&quot;
+
+
 def play_audio_blob(audio: dict, agent_name: str):
     if not audio or not audio.get(&quot;base64&quot;):
         return
     content_type = audio.get(&quot;contentType&quot;, &quot;audio/mpeg&quot;)
     suffix = playable_suffix_from_content_type(content_type)
-    path = Path(tempfile.gettempdir()) / f&quot;commandcenter-{agent_name.lower().replace(&#x27; &#x27;, &#x27;-&#x27;)}{suffix}&quot;
+    safe_agent = safe_filename_fragment(agent_name)
+    path = Path(tempfile.gettempdir()) / f&quot;commandcenter-{safe_agent}{suffix}&quot;
     path.write_bytes(base64.b64decode(audio[&quot;base64&quot;]))
     print(f&quot;[audio] saved {path}&quot;)
     try:
@@ -717,8 +744,45 @@ def send_fairy_text(session_id, text):
     return post_json(f&quot;{BASE_V1}/fairy/calls/{session_id}/text&quot;, {&quot;text&quot;: text})
 
 
+def synthesize_and_play_fairy_text(text, agent_id=&quot;ui&quot;):
+    if not text:
+        return
+    r = requests.post(
+        f&quot;{BASE_ROOT}/api/voice/speak&quot;,
+        headers=headers({&quot;Content-Type&quot;: &quot;application/json&quot;}),
+        json={&quot;text&quot;: text, &quot;agent&quot;: agent_id},
+        timeout=180,
+    )
+    r.raise_for_status()
+    content_type = r.headers.get(&quot;content-type&quot;, &quot;audio/mpeg&quot;)
+    suffix = playable_suffix_from_content_type(content_type)
+    path = Path(tempfile.gettempdir()) / f&quot;fairy-live-reply{suffix}&quot;
+    path.write_bytes(r.content)
+    print(f&quot;[audio] saved {path}&quot;)
+    try:
+        if sys.platform.startswith(&quot;win&quot;):
+            os.startfile(str(path))
+        elif sys.platform == &quot;darwin&quot;:
+            subprocess.Popen([&quot;open&quot;, str(path)])
+        else:
+            subprocess.Popen([&quot;xdg-open&quot;, str(path)])
+    except Exception as err:
+        print(f&quot;[audio] Could not auto-play Fairy reply: {err}&quot;)
+
+
 def send_fairy_audio_chunk(session_id, pcm16_base64, mime_type=&quot;audio/pcm;rate=16000&quot;):
     return post_json(f&quot;{BASE_V1}/fairy/calls/{session_id}/audio&quot;, {&quot;pcm16Base64&quot;: pcm16_base64, &quot;mimeType&quot;: mime_type})
+
+
+def capture_mic_pcm16_base64(seconds=4, sample_rate=16000):
+    if sd is None or np is None:
+        raise RuntimeError(&quot;Mic capture requires sounddevice + numpy (pip install sounddevice numpy)&quot;)
+    seconds = max(1, int(seconds))
+    print(f&quot;[mic] recording {seconds}s at {sample_rate} Hz...&quot;)
+    audio = sd.rec(int(seconds * sample_rate), samplerate=sample_rate, channels=1, dtype=&quot;int16&quot;)
+    sd.wait()
+    pcm_bytes = np.asarray(audio, dtype=np.int16).tobytes()
+    return base64.b64encode(pcm_bytes).decode(&quot;ascii&quot;)
 
 
 def send_fairy_screen_frame(session_id, jpeg_base64, mime_type=&quot;image/jpeg&quot;):
@@ -796,16 +860,32 @@ def print_fairy_memory(query=&quot;&quot;, scope=&quot;all&quot;):
     print(json.dumps(get_json(f&quot;{BASE_V1}/fairy/memory&quot;, params=params or None), indent=2))
 
 
-def fairy_chat_loop(session_id):
+def fairy_chat_loop(session_id, agent_id):
+    auto_mic = False
+    auto_mic_seconds = 4
     print(&quot;\nFairy API call mode ready (text + audio + video frame uplink).&quot;)
-    print(&quot;Commands: /status, /ready, /end, /save, /audio-file &lt;pcm16.b64.txt&gt;, /screen-file &lt;jpeg.b64.txt&gt;, /camera-file &lt;jpeg.b64.txt&gt;, /fairy-config, /fairy-settings, /set-setting &lt;key&gt; &lt;json-value&gt;, /fairy-memory &lt;query&gt;, /fairy-memory-scope &lt;scope&gt; &lt;query&gt;, /fairy-sessions, /fairy-session &lt;id&gt;, /exit&quot;)
+    print(&quot;Commands: /status, /ready, /end, /save, /audio-file &lt;pcm16.b64.txt&gt;, /mic &lt;seconds&gt;, /auto-mic on|off [&lt;seconds&gt;], /screen-file &lt;jpeg.b64.txt&gt;, /camera-file &lt;jpeg.b64.txt&gt;, /fairy-config, /fairy-settings, /set-setting &lt;key&gt; &lt;json-value&gt;, /fairy-memory &lt;query&gt;, /fairy-memory-scope &lt;scope&gt; &lt;query&gt;, /fairy-sessions, /fairy-session &lt;id&gt;, /exit&quot;)
     while True:
         message = input(&quot;You → Fairy: &quot;).strip()
+        if not message and auto_mic:
+            message = f&quot;/mic {auto_mic_seconds}&quot;
         if not message:
             continue
         if message.lower() in {&quot;/exit&quot;, &quot;exit&quot;, &quot;quit&quot;}:
             print(&quot;Leaving Fairy chat. Session is still live unless you used /end.&quot;)
             return
+        if message.lower().startswith(&#x27;/auto-mic &#x27;):
+            parts = message.split()
+            mode = parts[1].lower() if len(parts) &gt;= 2 else &quot;on&quot;
+            if mode in {&quot;on&quot;, &quot;start&quot;}:
+                auto_mic = True
+                if len(parts) &gt;= 3 and parts[2].isdigit():
+                    auto_mic_seconds = max(1, int(parts[2]))
+                print(f&quot;Auto mic enabled ({auto_mic_seconds}s chunks). Press Enter to capture/send each turn.&quot;)
+            else:
+                auto_mic = False
+                print(&quot;Auto mic disabled.&quot;)
+            continue
         if message.lower() == &quot;/status&quot;:
             print_fairy_status(session_id)
             continue
@@ -820,6 +900,23 @@ def fairy_chat_loop(session_id):
             path = message.split(&#x27; &#x27;, 1)[1].strip()
             pcm_b64 = Path(path).read_text(encoding=&quot;utf-8&quot;).strip()
             print(json.dumps(send_fairy_audio_chunk(session_id, pcm_b64), indent=2))
+            continue
+        if message.lower().startswith(&#x27;/mic&#x27;):
+            try:
+                raw = message.split(&#x27; &#x27;, 1)[1].strip() if &#x27; &#x27; in message else &quot;4&quot;
+                seconds = int(raw)
+                before = get_fairy_session(session_id).get(&quot;session&quot;, {})
+                previous_text = (before.get(&quot;lastAssistantText&quot;) or &quot;&quot;).strip()
+                pcm_b64 = capture_mic_pcm16_base64(seconds=seconds)
+                send_fairy_audio_chunk(session_id, pcm_b64)
+                reply_session = wait_for_reply(session_id, previous_text=previous_text)
+                assistant = (reply_session.get(&quot;lastAssistantText&quot;) or &quot;&quot;).strip()
+                print(f&quot;\nFairy: {assistant}\n&quot;)
+                synthesize_and_play_fairy_text(assistant, agent_id=agent_id)
+                if reply_session.get(&quot;state&quot;) == &quot;speaking&quot;:
+                    mark_playback_finished(session_id)
+            except Exception as err:
+                print(f&quot;Mic uplink failed: {err}&quot;)
             continue
         if message.lower().startswith(&#x27;/screen-file &#x27;):
             path = message.split(&#x27; &#x27;, 1)[1].strip()
@@ -883,6 +980,7 @@ def fairy_chat_loop(session_id):
             reply_session = wait_for_reply(session_id, previous_text=previous_text)
             assistant = (reply_session.get(&quot;lastAssistantText&quot;) or &quot;&quot;).strip()
             print(f&quot;\nFairy: {assistant}\n&quot;)
+            synthesize_and_play_fairy_text(assistant, agent_id=agent_id)
             if reply_session.get(&quot;state&quot;) == &quot;speaking&quot;:
                 mark_playback_finished(session_id)
         except requests.HTTPError as err:
@@ -915,7 +1013,7 @@ def main():
     print(f&quot;\nStarted Fairy call: {session_id}&quot;)
     wait_until_ready(session_id)
     print(&quot;Fairy session is ready.&quot;)
-    fairy_chat_loop(session_id)
+    fairy_chat_loop(session_id, agent)
 
 
 if __name__ == &quot;__main__&quot;:
@@ -982,6 +1080,81 @@ if __name__ == &quot;__main__&quot;:
         }
       });
     });
+
+    const apiEls = {
+      masked: document.getElementById('api-key-masked'),
+      status: document.getElementById('api-key-status'),
+      refresh: document.getElementById('api-key-refresh'),
+      reveal: document.getElementById('api-key-reveal'),
+      copy: document.getElementById('api-key-copy'),
+      rotate: document.getElementById('api-key-rotate'),
+    };
+    let revealedApiKey = '';
+
+    function apiStatus(msg) {
+      if (apiEls.status) apiEls.status.textContent = msg;
+    }
+
+    async function loadApiKeyMasked() {
+      try {
+        const r = await fetch('/commandcenter/api/settings/api-key', { credentials: 'include' });
+        const data = await r.json();
+        if (!r.ok || !data?.ok) throw new Error(data?.error || 'Failed to load API key info');
+        if (apiEls.masked) apiEls.masked.textContent = data.apiKeyMasked || '(not set)';
+        apiStatus(data.hasApiKey ? 'API key loaded.' : 'No API key is currently set.');
+      } catch (err) {
+        apiStatus(`Could not load key info: ${err.message || err}`);
+      }
+    }
+
+    async function revealApiKey() {
+      try {
+        const r = await fetch('/commandcenter/api/settings/api-key/reveal', { credentials: 'include' });
+        const data = await r.json();
+        if (!r.ok || !data?.ok) throw new Error(data?.error || 'Reveal failed');
+        revealedApiKey = String(data.apiKey || '');
+        if (apiEls.masked) apiEls.masked.textContent = revealedApiKey || '(not set)';
+        apiStatus(revealedApiKey ? 'Key revealed in page. Keep this private.' : 'No API key set.');
+      } catch (err) {
+        apiStatus(`Reveal failed: ${err.message || err}`);
+      }
+    }
+
+    async function copyApiKey() {
+      try {
+        if (!revealedApiKey) await revealApiKey();
+        if (!revealedApiKey) throw new Error('No API key set');
+        await navigator.clipboard.writeText(revealedApiKey);
+        apiStatus('API key copied to clipboard.');
+      } catch (err) {
+        apiStatus(`Copy failed: ${err.message || err}`);
+      }
+    }
+
+    async function rotateApiKey() {
+      if (!confirm('Rotate Command Center API key now? Existing bearer tokens will stop working immediately.')) return;
+      try {
+        const r = await fetch('/commandcenter/api/settings/api-key/rotate', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        const data = await r.json();
+        if (!r.ok || !data?.ok) throw new Error(data?.error || 'Rotation failed');
+        revealedApiKey = String(data.apiKey || '');
+        if (apiEls.masked) apiEls.masked.textContent = data.apiKeyMasked || '(rotated)';
+        apiStatus('API key rotated. Copy the new key now.');
+      } catch (err) {
+        apiStatus(`Rotation failed: ${err.message || err}`);
+      }
+    }
+
+    apiEls.refresh?.addEventListener('click', loadApiKeyMasked);
+    apiEls.reveal?.addEventListener('click', revealApiKey);
+    apiEls.copy?.addEventListener('click', copyApiKey);
+    apiEls.rotate?.addEventListener('click', rotateApiKey);
+    loadApiKeyMasked();
   </script>
 </body>
 </html>

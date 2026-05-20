@@ -29,6 +29,7 @@ Behavior rules:
 - When routing work to specialist agents, sound intentional and informed. Briefly signal the category and why the pick makes sense. Short lines like "UI issue. Routing Vela." or "Backend task. Builder gets it." are excellent when the roster supports them.
 - When screen sharing is active, comment like a perceptive operator noticing what matters, not like a chatbot describing every pixel.
 - During screen share, prioritize what helps Epic act: errors, warnings, failed auth, modals, forms, buttons, routes, diffs, logs, suspicious settings, blocked states, obvious next actions, and meaningful state changes such as redirects, newly enabled actions, finished loading, or errors disappearing.
+- Screen frames can arrive during tab/window transitions. Do not identify a website, browser tab, app, route, IDE, or document unless visible text/UI clearly supports it in the latest frame. If the frame looks blank, partially painted, or loading, say it appears to still be loading instead of guessing.
 - Avoid narrating every visible element. Surface the important thing first, then the next useful move.
 - When you do not know something, say so cleanly and ask the next useful question.
 - Avoid therapy-speak, generic customer-service politeness, fake overfriendliness, or flirt-heavy wording.
@@ -140,6 +141,8 @@ const FAIRY_LIVE_TOOLS = [{
         responseModalities: { type: 'ARRAY', items: { type: 'STRING' }, description: 'Optional response modalities, usually AUDIO or TEXT.' },
         thinkingLevel: { type: 'STRING', description: 'Optional thinking level such as minimal, low, medium, or high.' },
         voiceName: { type: 'STRING', description: 'Optional Gemini Live voice name.' },
+        speechOutputMode: { type: 'STRING', description: 'Optional Fairy speech mode: gemini or fish.' },
+        fishVoiceId: { type: 'STRING', description: 'Optional Fish Audio voice/reference ID for Fairy when speechOutputMode is fish.' },
         personaName: { type: 'STRING', description: 'Optional Fairy display/persona name.' },
         operatorName: { type: 'STRING', description: 'Optional operator name Fairy should use.' },
         personalityPrompt: { type: 'STRING', description: 'Optional additional personality instructions.' },
@@ -211,19 +214,22 @@ export class GeminiLiveSession {
       ws.on('open', () => {
         this.connected = true;
         this.lastActivityMs = nowMs();
+        const generationConfig = {
+          responseModalities: this.responseModalities,
+        };
+        if (this.responseModalities.includes('AUDIO')) {
+          generationConfig.speechConfig = {
+            voiceConfig: {
+              prebuiltVoiceConfig: {
+                voiceName: this.voiceName,
+              },
+            },
+          };
+        }
         const setup = {
           setup: {
             model: `models/${this.model}`,
-            generationConfig: {
-              responseModalities: this.responseModalities,
-              speechConfig: {
-                voiceConfig: {
-                  prebuiltVoiceConfig: {
-                    voiceName: this.voiceName,
-                  },
-                },
-              },
-            },
+            generationConfig,
             outputAudioTranscription: {},
             inputAudioTranscription: {},
             systemInstruction: {

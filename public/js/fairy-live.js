@@ -1,14 +1,18 @@
 const BASE = window.__BASE_PATH__ || '';
 const INPUT_SAMPLE_RATE = 16000;
 const AUDIO_CHUNK_SAMPLES = 3200; // 200ms at 16kHz
-const VAD_HANGOVER_MS = 520;
-const VAD_MIN_SPEECH_MS = 110;
-const VAD_NOISE_LEARN_MS = 1400;
-const VAD_MIN_RMS_START = 0.013;
-const VAD_MIN_RMS_END = 0.007;
-const VAD_MIN_PEAK_START = 0.045;
-const VAD_INTERRUPT_RMS = 0.02;
-const VAD_INTERRUPT_PEAK = 0.08;
+const VAD_HANGOVER_MS = 640;
+const VAD_MIN_SPEECH_MS = 140;
+const VAD_NOISE_LEARN_MS = 1700;
+const VAD_MIN_RMS_START = 0.014;
+const VAD_MIN_RMS_END = 0.0075;
+const VAD_MIN_PEAK_START = 0.048;
+const VAD_START_CONFIRM_MS = 90;
+const VAD_NOISE_UPDATE_MAX = 0.028;
+const VAD_INTERRUPT_RMS = 0.034;
+const VAD_INTERRUPT_PEAK = 0.12;
+const VAD_INTERRUPT_CONFIRM_MS = 260;
+const VAD_INTERRUPT_MIN_SPEECH_MS = 220;
 
 const state = {
   sessionId: '',
@@ -31,6 +35,12 @@ const state = {
   playbackSources: new Set(),
   playbackGeneration: 0,
   playbackActive: false,
+  fishPlaybackAudio: null,
+  fishPlaybackUrl: '',
+  fishSpeakController: null,
+  fishSpeakTimer: null,
+  lastFishSpeakSignature: '',
+  lastFishSpeakAt: 0,
   screenActive: false,
   screenStream: null,
   screenVideo: null,
@@ -39,12 +49,17 @@ const state = {
   screenPostChain: Promise.resolve(),
   screenChangeLastSample: null,
   screenChangeLastAt: 0,
+  screenFrameId: 0,
+  screenStabilizeTimer: null,
+  screenBurstTimers: [],
   cameraActive: false,
   cameraStream: null,
   cameraVideo: null,
   cameraPreview: null,
   cameraCanvas: null,
   cameraTimer: null,
+  cameraPostChain: Promise.resolve(),
+  cameraFrameId: 0,
   cameraFacingMode: 'environment',
   lastEvent: 'none',
   lastError: '',
@@ -52,10 +67,24 @@ const state = {
   interrupting: false,
   lastInterruptAt: 0,
   personaName: 'Fairy',
+  speechOutputMode: 'gemini',
+  fishVoiceId: '',
   transcriptEntries: [],
   pendingAssistantText: '',
   imageCard: null,
   imageHideTimer: null,
+  debugPanelOpen: false,
+  lastScreenChange: null,
+  lastGeminiHint: '',
+  lastGeminiHintAt: '',
+  lastVisualAssumption: '',
+  lastVisualConfidence: '',
+  lastRoutingDecision: '',
+  lastTaskSummary: '',
+  serverSessionMeta: null,
+  visualMemory: null,
+  screenUploadFailures: 0,
+  cameraUploadFailures: 0,
 };
 
 const els = {};
@@ -86,6 +115,7 @@ function applyPersonaUi() {
 }
 
 function emitLog(message, tone = 'info') {
+  try { console.log(`[FairyLive:${tone}] ${message}`); } catch (_) {}
   window.dispatchEvent(new CustomEvent('fairy-live-log', { detail: { message, tone } }));
 }
 
@@ -107,6 +137,102 @@ function emitDirectChatSync(reason = 'update', extra = {}) {
   }));
 }
 
+function formatDebugValue(value, fallback = '—') {
+  if (value === null || value === undefined || value === '') return fallback;
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : fallback;
+  return String(value);
+}
+
+function renderDebugSection(title, rows = []) {
+  const body = rows.map(([key, value]) => `
+    <div class="fairy-live-debug-key">${escapeHtml(key)}</div>
+    <div class="fairy-live-debug-value">${escapeHtml(formatDebugValue(value))}</div>
+  `).join('');
+  return `
+    <div class="fairy-live-debug-section">
+      <div class="fairy-live-debug-title">${escapeHtml(title)}</div>
+      <div class="fairy-live-debug-grid">${body}</div>
+    </div>
+  `;
+}
+
+function renderDebugPanel() {
+  if (!els.debugPanel || !els.debugContent || !els.debugToggle) return;
+  setHidden(els.debugPanel, !state.debugPanelOpen);
+  els.debugToggle.setAttribute('aria-expanded', state.debugPanelOpen ? 'true' : 'false');
+  els.debugToggle.textContent = state.debugPanelOpen ? 'DEBUG ON' : 'DEBUG';
+  if (!state.debugPanelOpen) return;
+
+  const screenMeta = state.serverSessionMeta?.lastScreenFrameMeta || {};
+  const cameraMeta = state.serverSessionMeta?.lastCameraFrameMeta || {};
+  const screenChange = state.lastScreenChange || state.serverSessionMeta?.lastScreenChange || {};
+  const visualMemory = state.visualMemory || state.serverSessionMeta?.visualMemory || {};
+  const recentVisual = Array.isArray(visualMemory?.recent) && visualMemory.recent[0] ? visualMemory.recent[0] : null;
+
+  els.debugContent.innerHTML = [
+    renderDebugSection('SESSION', [
+      ['session', state.sessionId || 'none'],
+      ['status', state.status || 'idle'],
+      ['model', state.model || 'unknown'],
+      ['persona', personaName()],
+      ['playback', state.playbackActive],
+      ['interrupting', state.interrupting],
+      ['last interrupt', state.lastInterruptAt ? new Date(state.lastInterruptAt).toISOString() : '—'],
+    ]),
+    renderDebugSection('AUDIO / VAD', [
+      ['mic active', state.micActive],
+      ['mic muted', state.micMuted],
+      ['vad speaking', !!state.vad?.speaking],
+      ['rms', state.vad ? state.vad.lastRms.toFixed(3) : '—'],
+      ['peak', state.vad ? state.vad.lastPeak.toFixed(3) : '—'],
+      ['noise floor', state.vad ? state.vad.noiseFloor.toFixed(3) : '—'],
+      ['speech ms', state.vad?.speechMs ?? '—'],
+      ['silence ms', state.vad?.silenceMs ?? '—'],
+      ['speech candidate', state.vad?.speechCandidateMs ?? '—'],
+      ['interrupt candidate', state.vad?.interruptCandidateMs ?? '—'],
+    ]),
+    renderDebugSection('SCREEN', [
+      ['active', state.screenActive],
+      ['frame id', state.screenFrameId || screenMeta.frameId || '—'],
+      ['last frame at', state.serverSessionMeta?.lastScreenFrameAt || '—'],
+      ['reason', screenMeta.reason || '—'],
+      ['stable', screenMeta.stable === true ? 'true' : 'false'],
+      ['size', screenMeta.videoWidth && screenMeta.videoHeight ? `${screenMeta.videoWidth}x${screenMeta.videoHeight}` : '—'],
+      ['surface', screenMeta.displaySurface || '—'],
+      ['track', screenMeta.trackLabel || '—'],
+      ['change diff', screenChange.avgDiff ?? '—'],
+      ['change ratio', screenChange.changedRatio ?? '—'],
+    ]),
+    renderDebugSection('CAMERA', [
+      ['active', state.cameraActive],
+      ['frame id', state.cameraFrameId || cameraMeta.frameId || '—'],
+      ['last frame at', state.serverSessionMeta?.lastCameraFrameAt || '—'],
+      ['reason', cameraMeta.reason || '—'],
+      ['size', cameraMeta.videoWidth && cameraMeta.videoHeight ? `${cameraMeta.videoWidth}x${cameraMeta.videoHeight}` : '—'],
+      ['track', cameraMeta.trackLabel || '—'],
+    ]),
+    renderDebugSection('VISUAL / HINTS', [
+      ['last hint at', state.lastGeminiHintAt || '—'],
+      ['last hint', state.lastGeminiHint ? state.lastGeminiHint.slice(0, 180) : '—'],
+      ['assumption', state.lastVisualAssumption || '—'],
+      ['confidence', state.lastVisualConfidence || '—'],
+      ['vm current', visualMemory?.current?.summary || '—'],
+      ['vm current confidence', visualMemory?.current?.confidence || '—'],
+      ['vm recent', recentVisual?.summary || '—'],
+      ['vm recent confidence', recentVisual?.confidence || '—'],
+      ['vm stable at', visualMemory?.lastStableScreenFrameAt || '—'],
+      ['vm change', visualMemory?.lastChangeSummary || '—'],
+    ]),
+    renderDebugSection('TASK / ROUTING', [
+      ['last task', state.lastTaskId || '—'],
+      ['routing', state.lastRoutingDecision || '—'],
+      ['task summary', state.lastTaskSummary || '—'],
+      ['transcript entries', state.transcriptEntries.length],
+    ]),
+  ].join('');
+}
+
 function renderDiagnostics() {
   const html = `
     <div><strong>Key:</strong> ${state.hasApiKey ? 'configured' : 'missing'}</div>
@@ -117,6 +243,7 @@ function renderDiagnostics() {
     ${state.lastError ? `<div class="fairy-diag-error"><strong>Error:</strong> ${escapeHtml(state.lastError)}</div>` : ''}
   `;
   if (els.diagnostics) els.diagnostics.innerHTML = html;
+  renderDebugPanel();
 }
 
 function markEvent(label) {
@@ -445,6 +572,23 @@ function commitPendingAssistantText(reason = 'done') {
   return text;
 }
 
+function scheduleFishSpeak(text, reason = 'done', delayMs = 280) {
+  const message = String(text || '').trim();
+  emitLog(`scheduleFishSpeak called (${reason}) len=${message.length} mode=${state.speechOutputMode} delay=${delayMs}`, 'info');
+  if (!message || state.speechOutputMode !== 'fish') return;
+  if (state.fishSpeakTimer) clearTimeout(state.fishSpeakTimer);
+  state.fishSpeakTimer = setTimeout(() => {
+    state.fishSpeakTimer = null;
+    const latest = String(state.pendingAssistantText || message).trim();
+    const committed = commitPendingAssistantText(`fish-${reason}`) || latest;
+    emitLog(`scheduleFishSpeak firing (${reason}) committed=${committed.length}`, 'info');
+    playFairyFishResponse(committed).catch((err) => {
+      markError(err.message || `${personaName()} Fish voice playback failed`);
+      setStatus('error', err.message || `${personaName()} Fish voice playback failed`);
+    });
+  }, Math.max(0, Number(delayMs) || 0));
+}
+
 function renderHandoff(text = '', tone = '') {
   if (!els.handoff) return;
   if (!text) {
@@ -516,6 +660,8 @@ function createVadState() {
     preroll: [],
     lastRms: 0,
     lastPeak: 0,
+    speechCandidateMs: 0,
+    interruptCandidateMs: 0,
   };
 }
 
@@ -562,13 +708,14 @@ function observeVadSamples(samples) {
 
   const learningNoise = !vad.speaking && (Date.now() - vad.startedAt) < VAD_NOISE_LEARN_MS;
   const endThreshold = Math.max(VAD_MIN_RMS_END, vad.noiseFloor * 2.0);
-  const startThreshold = Math.max(VAD_MIN_RMS_START, vad.noiseFloor * 3.2);
+  const startThreshold = Math.max(VAD_MIN_RMS_START, vad.noiseFloor * 3.25);
   const speechCandidate = rms >= startThreshold || (rms >= endThreshold && peak >= VAD_MIN_PEAK_START);
   const continuingSpeech = rms >= endThreshold || peak >= VAD_MIN_PEAK_START;
 
   if (!vad.speaking && !speechCandidate) {
-    if (learningNoise || rms < Math.max(VAD_MIN_RMS_START, vad.noiseFloor * 2.6)) {
-      vad.noiseFloor = (vad.noiseFloor * 0.94) + (rms * 0.06);
+    vad.speechCandidateMs = 0;
+    if ((learningNoise || rms < Math.max(VAD_MIN_RMS_START, vad.noiseFloor * 2.5)) && rms <= VAD_NOISE_UPDATE_MAX) {
+      vad.noiseFloor = (vad.noiseFloor * 0.95) + (rms * 0.05);
     }
     rememberVadPreroll(vad, samples, durationMs);
     renderDiagnostics();
@@ -576,9 +723,15 @@ function observeVadSamples(samples) {
   }
 
   if (!vad.speaking && speechCandidate) {
+    vad.speechCandidateMs += durationMs;
+    if (vad.speechCandidateMs < VAD_START_CONFIRM_MS) {
+      renderDiagnostics();
+      return;
+    }
     vad.speaking = true;
     vad.speechMs = 0;
     vad.silenceMs = 0;
+    vad.speechCandidateMs = 0;
     vad.preroll = [];
   }
 
@@ -606,9 +759,19 @@ function shouldInterruptForSamples(samples) {
   const now = Date.now();
   if (state.interrupting || (now - state.lastInterruptAt) < 900) return false;
   const { rms, peak } = measureSamples(samples);
-  const floor = state.vad?.noiseFloor || 0.006;
-  const rmsThreshold = Math.max(VAD_INTERRUPT_RMS, floor * 4.0);
-  return rms >= rmsThreshold && peak >= VAD_INTERRUPT_PEAK;
+  const vad = state.vad || (state.vad = createVadState());
+  const floor = vad.noiseFloor || 0.006;
+  const rmsThreshold = Math.max(VAD_INTERRUPT_RMS, floor * 6.2);
+  const candidate = rms >= rmsThreshold
+    && peak >= VAD_INTERRUPT_PEAK
+    && vad.speaking
+    && Number(vad.speechMs || 0) >= VAD_INTERRUPT_MIN_SPEECH_MS;
+  if (!candidate) {
+    vad.interruptCandidateMs = 0;
+    return false;
+  }
+  vad.interruptCandidateMs += samplesDurationMs(samples);
+  return vad.interruptCandidateMs >= VAD_INTERRUPT_CONFIRM_MS;
 }
 
 function interruptFairy(reason = 'user_speaking') {
@@ -663,6 +826,119 @@ function postAudioChunk(samples) {
         stopMic().catch(() => {});
       }
     });
+}
+
+function supportsStreamingAudioMime(mime = '') {
+  const value = String(mime || '').toLowerCase();
+  return value.includes('mpeg') || value.includes('mp3') || value.includes('aac') || value.includes('mp4') || value.includes('webm') || value.includes('ogg');
+}
+
+async function playStreamedFetchAudioResponse(res, { controller } = {}) {
+  const mime = (res.headers.get('content-type') || 'audio/mpeg').split(';')[0] || 'audio/mpeg';
+  if (!res.body || !supportsStreamingAudioMime(mime) || typeof MediaSource === 'undefined') return null;
+
+  const mediaSource = new MediaSource();
+  const audioUrl = URL.createObjectURL(mediaSource);
+  const audio = new Audio(audioUrl);
+  state.fishPlaybackAudio = audio;
+  state.fishPlaybackUrl = audioUrl;
+  state.playbackActive = true;
+
+  return await new Promise((resolve, reject) => {
+    let finished = false;
+    let reader = null;
+    const chunks = [];
+    let appending = false;
+    let sourceBuffer = null;
+    let startedPlayback = false;
+
+    const detachAudio = () => {
+      audio.onended = null;
+      audio.onerror = null;
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load?.();
+      if (state.fishPlaybackAudio === audio) state.fishPlaybackAudio = null;
+      if (state.fishPlaybackUrl === audioUrl) state.fishPlaybackUrl = '';
+      if (state.fishSpeakController === controller) state.fishSpeakController = null;
+      try { if (mediaSource.readyState === 'open') mediaSource.endOfStream(); } catch (_) {}
+      URL.revokeObjectURL(audioUrl);
+    };
+
+    const cleanup = (completed) => {
+      if (finished) return;
+      finished = true;
+      reader?.cancel?.().catch(() => {});
+      detachAudio();
+      state.playbackActive = false;
+      emitFairyCallAudioEvent('commandcenter:voice-playback-stop', { source: 'fairy-live', sessionId: state.sessionId, fairy: true, completed });
+      resolve(completed);
+    };
+
+    const fail = (err) => {
+      if (finished) return;
+      finished = true;
+      reader?.cancel?.().catch(() => {});
+      detachAudio();
+      state.playbackActive = false;
+      reject(err);
+    };
+
+    const pumpAppend = () => {
+      if (!sourceBuffer || sourceBuffer.updating || appending || !chunks.length || finished) return;
+      appending = true;
+      const chunk = chunks.shift();
+      try {
+        sourceBuffer.appendBuffer(chunk);
+      } catch (err) {
+        fail(err);
+      } finally {
+        appending = false;
+      }
+    };
+
+    mediaSource.addEventListener('sourceopen', async () => {
+      try {
+        sourceBuffer = mediaSource.addSourceBuffer(mime);
+        sourceBuffer.mode = 'sequence';
+        sourceBuffer.addEventListener('updateend', () => {
+          pumpAppend();
+          if (!startedPlayback && audio.readyState >= 2) {
+            startedPlayback = true;
+            audio.play().catch(fail);
+          }
+          if (reader === null && !chunks.length && !sourceBuffer.updating && mediaSource.readyState === 'open') {
+            try { mediaSource.endOfStream(); } catch (_) {}
+          }
+        });
+
+        reader = res.body.getReader();
+        emitFairyCallAudioEvent('commandcenter:voice-playback-start', { source: 'fairy-live', sessionId: state.sessionId, fairy: true, fish: true });
+        while (!controller?.signal?.aborted) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value?.length) {
+            chunks.push(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+            pumpAppend();
+            if (!startedPlayback && audio.paused && chunks.length >= 1) {
+              startedPlayback = true;
+              audio.play().catch(() => {});
+            }
+          }
+        }
+        reader = null;
+        if (!chunks.length && !sourceBuffer.updating && mediaSource.readyState === 'open') {
+          try { mediaSource.endOfStream(); } catch (_) {}
+        }
+      } catch (err) {
+        fail(err);
+      }
+    }, { once: true });
+
+    audio.onended = () => cleanup(true);
+    audio.onerror = () => fail(new Error('Streaming audio playback failed'));
+    controller?.signal?.addEventListener('abort', () => cleanup(false), { once: true });
+  });
 }
 
 async function ensurePlaybackContext() {
@@ -727,6 +1003,29 @@ function stopPlayback() {
   state.playbackActive = false;
   if (playbackFinishedTimer) clearTimeout(playbackFinishedTimer);
   playbackFinishedTimer = null;
+  if (state.fishSpeakTimer) {
+    clearTimeout(state.fishSpeakTimer);
+    state.fishSpeakTimer = null;
+  }
+  if (state.fishSpeakController) {
+    try { state.fishSpeakController.abort(); } catch (_) {}
+    state.fishSpeakController = null;
+  }
+  if (state.fishPlaybackAudio) {
+    try {
+      state.fishPlaybackAudio.onended = null;
+      state.fishPlaybackAudio.onerror = null;
+      state.fishPlaybackAudio.pause();
+      state.fishPlaybackAudio.currentTime = 0;
+      state.fishPlaybackAudio.src = '';
+      state.fishPlaybackAudio.load?.();
+    } catch (_) {}
+    state.fishPlaybackAudio = null;
+  }
+  if (state.fishPlaybackUrl) {
+    try { URL.revokeObjectURL(state.fishPlaybackUrl); } catch (_) {}
+    state.fishPlaybackUrl = '';
+  }
   for (const source of state.playbackSources) {
     try { source.stop(); } catch (_) {}
   }
@@ -741,6 +1040,98 @@ function stopFairyAudio() {
   emitLog('Fairy audio stopped', 'info');
   showOverlay('Fairy silenced.', 'info', 2200);
   markEvent('audio stopped');
+}
+
+async function playFairyFishResponse(text) {
+  const message = String(text || '').trim();
+  if (!state.sessionId || !message) return false;
+  const signature = `${state.sessionId}::${message}`;
+  const now = Date.now();
+  if (signature === state.lastFishSpeakSignature && (now - state.lastFishSpeakAt) < 5000) {
+    emitLog('Skipping duplicate Fish voice request', 'info');
+    return false;
+  }
+  state.lastFishSpeakSignature = signature;
+  state.lastFishSpeakAt = now;
+  stopPlayback();
+  emitLog(`Requesting Fish voice for ${message.length} chars`, 'info');
+  markEvent('fish voice requested');
+  const controller = new AbortController();
+  state.fishSpeakController = controller;
+  try {
+    const res = await fetch(`${BASE}/api/call/${encodeURIComponent(state.sessionId)}/fairy-speak`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: message }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      let errorText = 'Fairy Fish voice playback failed';
+      try {
+        const payload = await res.json();
+        errorText = payload.error || errorText;
+      } catch (_) {}
+      throw new Error(errorText);
+    }
+
+    const ttsMode = (res.headers.get('x-tts-mode') || 'full').toLowerCase();
+    emitLog(`Fish voice response received (${ttsMode})`, 'info');
+    markEvent(`fish audio response (${ttsMode})`);
+
+    // Fairy Fish playback prefers the simpler full-buffer path for reliability.
+    // The streaming MediaSource path works for some browsers/codecs but is easier to fail silently.
+    const audioBlob = await res.blob();
+    emitLog(`Fish audio buffered (${Math.round(Number(audioBlob.size || 0) / 1024)} KB)`, 'info');
+    if (controller.signal.aborted) return false;
+    const audioUrl = URL.createObjectURL(audioBlob);
+    const audio = new Audio(audioUrl);
+    audio.volume = 1.0;
+    state.fishPlaybackAudio = audio;
+    state.fishPlaybackUrl = audioUrl;
+    state.playbackActive = true;
+
+    return await new Promise((resolve) => {
+      let finished = false;
+      const cleanup = (completed) => {
+        if (finished) return;
+        finished = true;
+        audio.onended = null;
+        audio.onerror = null;
+        audio.pause();
+        audio.src = '';
+        audio.load?.();
+        if (state.fishPlaybackAudio === audio) state.fishPlaybackAudio = null;
+        if (state.fishPlaybackUrl === audioUrl) state.fishPlaybackUrl = '';
+        if (state.fishSpeakController === controller) state.fishSpeakController = null;
+        try { URL.revokeObjectURL(audioUrl); } catch (_) {}
+        state.playbackActive = false;
+        emitFairyCallAudioEvent('commandcenter:voice-playback-stop', { source: 'fairy-live', sessionId: state.sessionId, fairy: true, fish: true, completed });
+        notifyPlaybackFinishedSoon();
+        resolve(completed);
+      };
+
+      audio.onended = () => {
+        emitLog('Fish audio playback ended', 'info');
+        cleanup(true);
+      };
+      audio.onerror = () => {
+        emitLog('Fish audio playback error', 'error');
+        cleanup(false);
+      };
+      controller.signal.addEventListener('abort', () => cleanup(false), { once: true });
+      audio.play().then(() => {
+        emitLog('Fish audio playback started', 'info');
+        markEvent('fish audio playback started');
+        emitFairyCallAudioEvent('commandcenter:voice-playback-start', { source: 'fairy-live', sessionId: state.sessionId, fairy: true, fish: true });
+      }).catch((err) => {
+        emitLog(`Fish audio play() failed: ${err?.message || 'unknown error'}`, 'error');
+        markError(err?.message || 'Fish audio play failed');
+        cleanup(false);
+      });
+    });
+  } finally {
+    if (state.fishSpeakController === controller && controller.signal.aborted) state.fishSpeakController = null;
+  }
 }
 
 async function startMic() {
@@ -815,22 +1206,108 @@ async function stopMic() {
   }
 }
 
-function postScreenFrame(jpegBase64) {
-  if (!state.sessionId || !jpegBase64) return;
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function nextAnimationFrame(timeoutMs = 120) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      resolve();
+    };
+    const timer = setTimeout(finish, Math.max(16, Number(timeoutMs) || 120));
+    try {
+      requestAnimationFrame(() => {
+        clearTimeout(timer);
+        finish();
+      });
+    } catch (_) {
+      clearTimeout(timer);
+      setTimeout(finish, 16);
+    }
+  });
+}
+
+async function waitForVideoReady(video, timeoutMs = 2500) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (video?.readyState >= 2 && video.videoWidth && video.videoHeight) return true;
+    await wait(80);
+  }
+  return !!(video?.videoWidth && video?.videoHeight);
+}
+
+function getTrackMeta(stream) {
+  const track = stream?.getVideoTracks?.()[0] || null;
+  const settings = typeof track?.getSettings === 'function' ? track.getSettings() : {};
+  return {
+    displaySurface: settings?.displaySurface || '',
+    logicalSurface: settings?.logicalSurface ?? null,
+    cursor: settings?.cursor || '',
+    trackLabel: track?.label || '',
+  };
+}
+
+function compactFrameMeta(kind, video, extra = {}) {
+  const stream = kind === 'camera' ? state.cameraStream : state.screenStream;
+  const frameId = kind === 'camera' ? (state.cameraFrameId += 1) : (state.screenFrameId += 1);
+  return {
+    source: kind,
+    frameId,
+    capturedAt: new Date().toISOString(),
+    videoWidth: video?.videoWidth || 0,
+    videoHeight: video?.videoHeight || 0,
+    ...getTrackMeta(stream),
+    ...extra,
+  };
+}
+
+function postVisualFrame(kind, jpegBase64, frameMeta = {}) {
+  if (!state.sessionId || !jpegBase64) return Promise.resolve(null);
   const sessionId = state.sessionId;
-  state.screenPostChain = state.screenPostChain
+  const endpoint = kind === 'camera' ? 'camera' : 'screen';
+  const chainKey = kind === 'camera' ? 'cameraPostChain' : 'screenPostChain';
+  const failureKey = kind === 'camera' ? 'cameraUploadFailures' : 'screenUploadFailures';
+  state[chainKey] = state[chainKey]
     .catch(() => {})
-    .then(() => fetchJson(`${BASE}/api/call/${encodeURIComponent(sessionId)}/screen`, {
+    .then(() => fetchJson(`${BASE}/api/call/${encodeURIComponent(sessionId)}/${endpoint}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jpegBase64, mimeType: 'image/jpeg' }),
+      body: JSON.stringify({ jpegBase64, mimeType: 'image/jpeg', frameMeta }),
     }))
+    .then((result) => {
+      state[failureKey] = 0;
+      return result;
+    })
     .catch((err) => {
-      if (state.sessionId === sessionId && state.screenActive) {
-        setStatus('error', err.message || 'Screen frame upload failed');
-        stopScreenShare().catch(() => {});
+      const stillActive = kind === 'camera' ? state.cameraActive : state.screenActive;
+      if (state.sessionId === sessionId && stillActive) {
+        state[failureKey] = Number(state[failureKey] || 0) + 1;
+        const label = kind === 'camera' ? 'Camera' : 'Screen';
+        const count = state[failureKey];
+        const message = err.message || `${label} frame upload failed`;
+        markEvent(`${label.toLowerCase()} upload hiccup #${count}`);
+        if (count <= 2) {
+          setStatus(state.playbackActive ? 'speaking' : (state.status === 'thinking' ? 'thinking' : 'ready'), `${label} share hit a brief upload hiccup. Retrying automatically.`);
+        } else if (count <= 5) {
+          setStatus('error', `${label} frame uplink is unstable (${count} failed attempts). Retrying without stopping the share.`);
+        }
+        console.warn(`[fairy-live] ${label} frame upload failed (#${count})`, message, frameMeta);
       }
+      return null;
     });
+  return state[chainKey];
+}
+
+function postScreenFrame(jpegBase64, frameMeta = {}) {
+  return postVisualFrame('screen', jpegBase64, frameMeta);
+}
+
+function postCameraFrame(jpegBase64, frameMeta = {}) {
+  return postVisualFrame('camera', jpegBase64, frameMeta);
 }
 
 function sampleVisualSignature(video, canvas) {
@@ -853,12 +1330,12 @@ function sampleVisualSignature(video, canvas) {
 }
 
 function detectMeaningfulScreenChange(video) {
-  if (!video || !state.screenCanvas) return;
+  if (!video || !state.screenCanvas) return null;
   const signature = sampleVisualSignature(video, state.screenCanvas);
-  if (!signature) return;
+  if (!signature) return null;
   const previous = state.screenChangeLastSample;
   state.screenChangeLastSample = signature;
-  if (!previous) return;
+  if (!previous) return null;
 
   let diffTotal = 0;
   let changedCells = 0;
@@ -871,34 +1348,85 @@ function detectMeaningfulScreenChange(video) {
   const changedRatio = changedCells / signature.sample.length;
   const now = Date.now();
   const significant = avgDiff >= 16 || changedRatio >= 0.22;
-  if (!significant) return;
-  if (now - state.screenChangeLastAt < 8000) return;
+  if (!significant) return null;
+  if (now - state.screenChangeLastAt < 8000) return null;
   state.screenChangeLastAt = now;
-  markEvent(`screen changed (${Math.round(avgDiff)} / ${Math.round(changedRatio * 100)}%)`);
+  return {
+    avgDiff: Number(avgDiff.toFixed(1)),
+    changedRatio: Number(changedRatio.toFixed(3)),
+  };
+}
+
+function sendScreenChangedEvent(change, frameMeta = {}) {
+  if (!state.sessionId || !change) return;
   fetchJson(`${BASE}/api/call/${encodeURIComponent(state.sessionId)}/event`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       type: 'screen.changed',
-      avgDiff: Number(avgDiff.toFixed(1)),
-      changedRatio: Number(changedRatio.toFixed(3)),
+      avgDiff: change.avgDiff,
+      changedRatio: change.changedRatio,
+      frameMeta,
     }),
   }).catch(() => {});
 }
 
-function captureScreenFrame() {
+function clearScreenStabilizers() {
+  if (state.screenStabilizeTimer) clearTimeout(state.screenStabilizeTimer);
+  state.screenStabilizeTimer = null;
+  state.screenBurstTimers.forEach((timer) => clearTimeout(timer));
+  state.screenBurstTimers = [];
+}
+
+function scheduleScreenBurst(reason = 'post-change-burst') {
+  state.screenBurstTimers.forEach((timer) => clearTimeout(timer));
+  state.screenBurstTimers = [1700, 2800].map((delayMs) => setTimeout(() => {
+    if (state.screenActive) captureScreenFrame({ reason, stable: true, notifyChange: false });
+  }, delayMs));
+}
+
+function scheduleStableScreenChange(change) {
+  if (!change) return;
+  if (state.screenStabilizeTimer) clearTimeout(state.screenStabilizeTimer);
+  markEvent(`screen changed (${Math.round(change.avgDiff)} / ${Math.round(change.changedRatio * 100)}%)`);
+  state.screenStabilizeTimer = setTimeout(async () => {
+    state.screenStabilizeTimer = null;
+    if (!state.screenActive || !state.sessionId || !state.screenVideo || !state.screenCanvas) return;
+    await waitForVideoReady(state.screenVideo, 1200);
+    await nextAnimationFrame(90);
+    await wait(60);
+    const jpegBase64 = captureVisualFrame(state.screenVideo, state.screenCanvas, { quality: 0.68 });
+    if (!jpegBase64) return;
+    const frameMeta = compactFrameMeta('screen', state.screenVideo, {
+      reason: 'screen-change-stable',
+      stable: true,
+      avgDiff: change.avgDiff,
+      changedRatio: change.changedRatio,
+    });
+    postScreenFrame(jpegBase64, frameMeta)
+      .then((result) => { if (result) sendScreenChangedEvent(change, frameMeta); })
+      .catch(() => {});
+    scheduleScreenBurst();
+  }, 950);
+}
+
+function captureScreenFrame({ reason = 'interval', stable = true, notifyChange = true } = {}) {
   if (!state.screenActive || !state.sessionId || !state.screenVideo || !state.screenCanvas) return;
-  detectMeaningfulScreenChange(state.screenVideo);
+  const change = notifyChange ? detectMeaningfulScreenChange(state.screenVideo) : null;
+  if (change) {
+    scheduleStableScreenChange(change);
+    return;
+  }
   const jpegBase64 = captureVisualFrame(state.screenVideo, state.screenCanvas, { quality: 0.68 });
   if (!jpegBase64) return;
-  postScreenFrame(jpegBase64);
+  postScreenFrame(jpegBase64, compactFrameMeta('screen', state.screenVideo, { reason, stable }));
 }
 
 function captureCameraFrame() {
   if (!state.cameraActive || !state.sessionId || !state.cameraVideo || !state.cameraCanvas) return;
   const jpegBase64 = captureVisualFrame(state.cameraVideo, state.cameraCanvas, { quality: 0.72 });
   if (!jpegBase64) return;
-  postScreenFrame(jpegBase64);
+  postCameraFrame(jpegBase64, compactFrameMeta('camera', state.cameraVideo, { reason: 'interval', stable: true }));
 }
 
 function captureVisualFrame(video, canvas, { quality = 0.68 } = {}) {
@@ -948,17 +1476,25 @@ async function startScreenShare() {
     state.screenCanvas = document.createElement('canvas');
     state.screenChangeLastSample = null;
     state.screenChangeLastAt = 0;
+    state.screenFrameId = 0;
+    state.screenUploadFailures = 0;
+    clearScreenStabilizers();
     state.screenActive = true;
     stream.getVideoTracks().forEach((track) => {
       track.onended = () => stopScreenShare().catch(() => {});
     });
-    captureScreenFrame();
+    await waitForVideoReady(video, 2500);
+    await nextAnimationFrame(90);
+    await wait(120);
+    await wait(700);
+    if (!state.screenActive || state.screenVideo !== video) return;
+    captureScreenFrame({ reason: 'initial-stable', stable: true, notifyChange: false });
     fetchJson(`${BASE}/api/call/${encodeURIComponent(state.sessionId)}/event`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: 'screen.started' }),
+      body: JSON.stringify({ type: 'screen.started', frameMeta: compactFrameMeta('screen', video, { reason: 'screen-started', stable: true }) }),
     }).catch(() => {});
-    state.screenTimer = setInterval(captureScreenFrame, 1500);
+    state.screenTimer = setInterval(() => captureScreenFrame({ reason: 'interval', stable: true }), 1500);
     updateScreenUi();
     setStatus('ready', 'Screen sharing is live. Fairy can see snapshots now. Behave accordingly.');
     appendTranscript('system', 'Screen sharing started.', 'screen');
@@ -972,6 +1508,7 @@ async function startScreenShare() {
 async function stopScreenShare() {
   if (state.screenTimer) clearInterval(state.screenTimer);
   state.screenTimer = null;
+  clearScreenStabilizers();
   state.screenActive = false;
   try { state.screenStream?.getTracks?.().forEach((track) => track.stop()); } catch (_) {}
   try { if (state.screenVideo) state.screenVideo.srcObject = null; } catch (_) {}
@@ -982,6 +1519,8 @@ async function stopScreenShare() {
   state.screenCanvas = null;
   state.screenChangeLastSample = null;
   state.screenChangeLastAt = 0;
+  state.screenFrameId = 0;
+  state.screenUploadFailures = 0;
   updateScreenUi();
   if (hadSession) {
     emitLog('Screen sharing stopped', 'info');
@@ -1029,6 +1568,8 @@ async function startCameraShare() {
       await state.cameraPreview.play().catch(() => {});
     }
     state.cameraCanvas = document.createElement('canvas');
+    state.cameraFrameId = 0;
+    state.cameraUploadFailures = 0;
     state.cameraActive = true;
     stream.getVideoTracks().forEach((track) => {
       track.onended = () => stopCameraShare().catch(() => {});
@@ -1063,6 +1604,8 @@ async function stopCameraShare({ silent = false } = {}) {
   state.cameraVideo = null;
   state.cameraPreview = null;
   state.cameraCanvas = null;
+  state.cameraFrameId = 0;
+  state.cameraUploadFailures = 0;
   updateCameraUi();
   if (hadSession && !silent) {
     emitLog('Camera sharing stopped', 'info');
@@ -1093,10 +1636,12 @@ export async function refreshConfig() {
     state.model = config.model || 'unknown';
     state.hasApiKey = !!config.hasApiKey;
     state.personaName = String(config.personaName || 'Fairy').trim() || 'Fairy';
+    state.speechOutputMode = String(config.speechOutputMode || 'gemini').trim().toLowerCase() === 'fish' ? 'fish' : 'gemini';
+    state.fishVoiceId = String(config.fishVoiceId || '').trim();
     applyPersonaUi();
     if (els.model) {
       els.model.textContent = state.hasApiKey
-        ? `${state.model} · ${Array.isArray(config.responseModalities) ? config.responseModalities.join('+') : 'LIVE'}`
+        ? `${state.model} · ${Array.isArray(config.responseModalities) ? config.responseModalities.join('+') : 'LIVE'} · voice:${state.speechOutputMode === 'fish' ? 'fish' : 'gemini'}`
         : 'Gemini key missing in Command Center settings';
     }
     markEvent('config refreshed');
@@ -1184,6 +1729,7 @@ async function sendTextTurn() {
 function handleTaskUpdate(task) {
   if (!task?.id) return;
   state.tasks.set(task.id, task);
+  state.lastTaskSummary = String(task.summary || task.result || task.error || '').trim();
   if (state.lastTaskId && state.lastTaskId === task.id) {
     renderHandoff(`
       <strong>Handed to Astra/OpenClaw:</strong> ${escapeHtml(task.title || task.id)}<br>
@@ -1203,6 +1749,7 @@ function handleTaskUpdate(task) {
       if (state.status === 'task_running') setStatus('ready', `Task update received. ${personaName()} is ready for the next bit of chaos.`);
     }
   }
+  renderDiagnostics();
 }
 
 export function init() {
@@ -1224,6 +1771,9 @@ export function init() {
   els.end = document.getElementById('fairy-live-end');
   els.stopAudio = document.getElementById('fairy-live-stop-audio');
   els.diagnostics = document.getElementById('fairy-live-diagnostics');
+  els.debugToggle = document.getElementById('fairy-live-debug-toggle');
+  els.debugPanel = document.getElementById('fairy-live-debug-panel');
+  els.debugContent = document.getElementById('fairy-live-debug-content');
   els.mic = document.getElementById('fairy-live-mic');
   els.screen = document.getElementById('fairy-live-screen');
   els.screenStatus = document.getElementById('fairy-live-screen-status');
@@ -1251,6 +1801,12 @@ export function init() {
   els.start?.addEventListener('click', (event) => { event.stopPropagation(); startCall(); });
   els.end?.addEventListener('click', (event) => { event.stopPropagation(); endCall(); });
   els.stopAudio?.addEventListener('click', (event) => { event.stopPropagation(); stopFairyAudio(); });
+  els.debugToggle?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    state.debugPanelOpen = !state.debugPanelOpen;
+    try { localStorage.setItem('fairyDebugPanelOpen', state.debugPanelOpen ? '1' : '0'); } catch (_) {}
+    renderDebugPanel();
+  });
   els.mic?.addEventListener('click', (event) => { event.stopPropagation(); startMic(); });
   els.screen?.addEventListener('click', (event) => { event.stopPropagation(); startScreenShare(); });
   els.camera?.addEventListener('click', (event) => { event.stopPropagation(); startCameraShare(); });
@@ -1274,6 +1830,7 @@ export function init() {
     }
   });
 
+  try { state.debugPanelOpen = localStorage.getItem('fairyDebugPanelOpen') === '1'; } catch (_) {}
   updateMicUi();
   updateScreenUi();
   updateCameraUi();
@@ -1291,6 +1848,7 @@ export function handleEvent(msg = {}) {
 
   if (type === 'call:session.started') {
     state.sessionId = data.id || data.sessionId || state.sessionId;
+    if (data.session) state.serverSessionMeta = data.session;
     setStatus(data.state || 'ready', `${personaName()} is live.`);
     appendTranscript('system', `Session ready: ${state.sessionId}`, 'system');
     emitLog(`${personaName()} session ready: ${state.sessionId}`, 'info');
@@ -1308,6 +1866,8 @@ export function handleEvent(msg = {}) {
       commitPendingAssistantText('session-ended');
       state.interrupting = false;
       state.sessionId = '';
+      state.serverSessionMeta = null;
+      state.visualMemory = null;
       setStatus('ended', `${personaName()} Live ended.`);
       emitFairyCallAudioEvent('commandcenter:fairy-call-end', { sessionId: data.id || data.sessionId || state.sessionId });
       emitLog(`${personaName()} Live ended`, 'info');
@@ -1318,7 +1878,23 @@ export function handleEvent(msg = {}) {
   }
 
   if (type === 'call:session.state' && (!state.sessionId || data.sessionId === state.sessionId)) {
+    if (data.session) state.serverSessionMeta = data.session;
     setStatus(data.state || 'ready');
+    return;
+  }
+
+  if (type === 'call:debug.state' && data.sessionId === state.sessionId) {
+    const debug = data.debug || {};
+    state.serverSessionMeta = debug;
+    state.lastScreenChange = debug.lastScreenChange || state.lastScreenChange;
+    state.lastGeminiHint = String(debug.lastGeminiHint || '').trim();
+    state.lastGeminiHintAt = String(debug.lastGeminiHintAt || '').trim();
+    state.lastVisualAssumption = String(debug.lastVisualAssumption || '').trim();
+    state.lastVisualConfidence = String(debug.lastVisualConfidence || '').trim();
+    state.lastRoutingDecision = String(debug.lastRoutingDecision || '').trim();
+    state.lastTaskSummary = String(debug.lastTaskSummary || state.lastTaskSummary || '').trim();
+    state.visualMemory = debug.visualMemory || null;
+    renderDiagnostics();
     return;
   }
 
@@ -1335,18 +1911,40 @@ export function handleEvent(msg = {}) {
 
   if (type === 'call:response.text' && data.sessionId === state.sessionId) {
     const rawText = String(data.text || '').trim();
-    if (rawText) state.pendingAssistantText = mergeAssistantChunk(state.pendingAssistantText, rawText);
+    if (rawText) {
+      const currentTrimmed = String(state.pendingAssistantText || '').trim();
+      const shouldReplaceOnDone = !!data.done && currentTrimmed && rawText === currentTrimmed;
+      state.pendingAssistantText = shouldReplaceOnDone ? rawText : mergeAssistantChunk(state.pendingAssistantText, rawText);
+    }
     const displayText = String(state.pendingAssistantText || rawText || '').trim();
     const tone = /confirmed from the web|web check says|checked the web/i.test(displayText) ? 'tool' : 'fairy';
     showOverlay(escapeHtml(displayText), tone, 8500);
     markEvent('response text');
     setStatus(data.state || (data.done ? 'speaking' : 'thinking'), displayText || `${personaName()} responded.`);
     if (data.taskId) state.lastTaskId = data.taskId;
-    if (data.done) commitPendingAssistantText('done');
+    if (state.speechOutputMode === 'fish' && displayText) {
+      scheduleFishSpeak(displayText, data.done ? 'response-text-done' : 'response-text-stream', data.done ? 70 : 280);
+    } else if (data.done) {
+      commitPendingAssistantText('done');
+    }
     return;
   }
 
   if (type === 'call:response.audio' && data.sessionId === state.sessionId) {
+    if (state.speechOutputMode === 'fish') {
+      if (!state.interrupting) setStatus(data.state || 'speaking', `${personaName()} is speaking through Fish Audio…`);
+      markEvent('response audio skipped (fish mode)');
+      if (data.done) {
+        const fishText = String(state.pendingAssistantText || data.text || '').trim();
+        if (fishText) {
+          scheduleFishSpeak(fishText, 'response-audio');
+        } else {
+          emitLog('Fish mode reached end-of-audio with no speakable text', 'error');
+          markError('Fish mode had no final text to speak');
+        }
+      }
+      return;
+    }
     if (!state.interrupting) setStatus(data.state || 'speaking', `${personaName()} is speaking. Try not to look too impressed.`);
     if (data.text) showOverlay(escapeHtml(data.text), 'fairy', 8500);
     markEvent('response audio');
@@ -1364,6 +1962,12 @@ export function handleEvent(msg = {}) {
 
   if (type === 'call:screen.changed' && data.sessionId === state.sessionId) {
     const pct = Math.round(Number(data.changedRatio || 0) * 100);
+    state.lastScreenChange = {
+      avgDiff: Number(data.avgDiff || 0),
+      changedRatio: Number(data.changedRatio || 0),
+      at: new Date().toISOString(),
+      frameMeta: data.frameMeta || null,
+    };
     markEvent(`screen change noticed (${pct}%)`);
     if (els.screenStatus) els.screenStatus.textContent = `Screen changed noticeably (${pct}%). ${personaName()} has the new frame.`;
     return;
@@ -1446,6 +2050,8 @@ export function handleEvent(msg = {}) {
   }
 
   if (type === 'call:handoff.started' && data.sessionId === state.sessionId) {
+    state.lastRoutingDecision = 'handoff-started';
+    state.lastTaskSummary = String(data.summary || '').trim();
     setStatus('handing_off', `${personaName()} is handing that to Astra/OpenClaw…`);
     renderHandoff(`<strong>Routing to Astra/OpenClaw:</strong> ${escapeHtml(data.title || 'Background task')}<br><span>${escapeHtml(data.summary || '')}</span>`);
     showOverlay(`Routing to Astra: ${escapeHtml(data.title || 'Background task')}${data.summary ? `<br>${escapeHtml(data.summary)}` : ''}`, 'tool', 9000);
@@ -1456,6 +2062,7 @@ export function handleEvent(msg = {}) {
 
   if (type === 'call:handoff.task_created' && data.sessionId === state.sessionId) {
     state.lastTaskId = data.taskId || data.task?.id || '';
+    state.lastRoutingDecision = 'task-created';
     setStatus('task_running', `Astra/OpenClaw has the task now. ${personaName()} is watching the board.`);
     handleTaskUpdate(data.task || { id: state.lastTaskId, title: data.title, status: 'queued' });
     markEvent('task created');
@@ -1486,6 +2093,7 @@ export function handleEvent(msg = {}) {
   }
 
   if (type === 'call:assistant.interrupted' && data.sessionId === state.sessionId) {
+    state.lastRoutingDecision = `interrupted:${String(data.reason || 'user_speaking')}`;
     stopPlayback();
     commitPendingAssistantText('interrupted');
     showOverlay('Interrupted.', 'tool', 1200);

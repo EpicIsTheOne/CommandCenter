@@ -12,7 +12,7 @@ import os from 'node:os';
 import multer from 'multer';
 import config from './config.js';
 import OpenClawBridge from './openclaw-bridge.js';
-import { transcribe, speak, streamSpeak, listElevenLabsVoices, searchFishAudioVoices, previewFishAudioVoice, resolveAgentVoice } from './voice.js';
+import { transcribe, speak, streamSpeak, streamFishAudioText, listElevenLabsVoices, searchFishAudioVoices, previewFishAudioVoice, resolveAgentVoice } from './voice.js';
 import { loadAgentRoster, searchAgents } from './agents.js';
 import { loadVoiceSettings, saveVoiceSettings, maskApiKey, maskSessionCookie } from './settings.js';
 import { ensureCompanionRegistry, importCodexPetPackageFromDir, loadCompanionRegistry, loadCompanionSettings, resolveAgentVisual, saveCompanionSettings } from './companions.js';
@@ -319,6 +319,45 @@ function clearAuthCookie(res) {
   res.setHeader('Set-Cookie', attrs.join('; '));
 }
 
+async function requireUiAuthPage(req, res, next) {
+  const auth = await loadUiAuthConfig();
+  if (!auth.enabled) return next();
+  const token = parseCookies(req).cc_auth;
+  if (isValidSession(token)) return next();
+  const wantsHtml = String(req.headers.accept || '').includes('text/html');
+  if (wantsHtml) return res.redirect(`${basePath || '/'}?auth=required`);
+  return res.status(401).json({ ok: false, error: 'Unauthorized' });
+}
+
+function maskCommandCenterApiKey(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.length <= 8) return `${raw.slice(0, 2)}•••${raw.slice(-1)}`;
+  return `${raw.slice(0, 6)}••••${raw.slice(-6)}`;
+}
+
+function generateCommandCenterApiKey() {
+  return `cc_${randomUUID().replace(/-/g, '')}_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+}
+
+async function setEnvKeyInDotenv(key, value) {
+  const envPath = join(__dirname, '..', '.env');
+  let raw = '';
+  try { raw = await fsp.readFile(envPath, 'utf8'); } catch {}
+  const lines = String(raw || '').split(/\r?\n/);
+  let found = false;
+  const out = lines.map((line) => {
+    if (line.startsWith(`${key}=`)) {
+      found = true;
+      return `${key}=${value}`;
+    }
+    return line;
+  });
+  if (!found) out.push(`${key}=${value}`);
+  const normalized = out.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\n?$/, '\n');
+  await fsp.writeFile(envPath, normalized, 'utf8');
+}
+
 app.get(`${basePath}/api/auth/status`, async (req, res) => {
   const auth = await loadUiAuthConfig();
   const token = parseCookies(req).cc_auth;
@@ -371,16 +410,49 @@ app.post(`${basePath}/api/auth/logout`, async (req, res) => {
 app.use(async (req, res, next) => {
   if (!req.path.startsWith(`${basePath}/api/`)) return next();
   if (req.path.startsWith(`${basePath}/api/auth/`)) return next();
+  if (req.path.startsWith(`${basePath}/api/v1/`)) return next();
+  if (req.path.startsWith(`${basePath}/api/fairy/`)) return next();
+  if (req.path.startsWith(`${basePath}/api/call/`)) return next();
+  if (req.path.startsWith(`${basePath}/api/live/`)) return next();
   const auth = await loadUiAuthConfig();
   if (!auth.enabled) return next();
   const token = parseCookies(req).cc_auth;
   if (!isValidSession(token)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
   return next();
 });
+
+
+app.get(`${basePath}/api/settings/api-key`, async (_req, res) => {
+  const current = String(config.apiKey || '').trim();
+  return res.json({
+    ok: true,
+    hasApiKey: !!current,
+    apiKeyMasked: maskCommandCenterApiKey(current),
+    basePath,
+    v1BaseUrl: `${basePath}/api/v1`,
+  });
+});
+
+app.post(`${basePath}/api/settings/api-key/rotate`, async (_req, res) => {
+  try {
+    const nextKey = generateCommandCenterApiKey();
+    await setEnvKeyInDotenv('COMMANDCENTER_API_KEY', nextKey);
+    config.apiKey = nextKey;
+    return res.json({ ok: true, apiKey: nextKey, apiKeyMasked: maskCommandCenterApiKey(nextKey), rotated: true });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message || 'Could not rotate API key' });
+  }
+});
+
+app.get(`${basePath}/api/settings/api-key/reveal`, async (_req, res) => {
+  const current = String(config.apiKey || '').trim();
+  return res.json({ ok: true, hasApiKey: !!current, apiKey: current });
+});
 app.use(`${basePath}/media/music`, express.static(getMusicDir()));
 app.use(`${basePath}/media/intros`, express.static(getIntroDir()));
 app.use(`${basePath}/media/appearance/backgrounds`, express.static(getAppearanceBackgroundDir()));
 app.use(`${basePath}/media/branding`, express.static(getBrandingDir()));
+app.use(`${basePath}/docs`, requireUiAuthPage);
 app.use(basePath || '/', express.static(join(__dirname, '..', 'public')));
 app.use(`${basePath}/api/v1`, requireApiAuth);
 await ensureCompanionRegistry();
@@ -683,7 +755,12 @@ function maybeAnnounceLiveTaskProgress(msg) {
   if (!taskId || status !== 'working') return;
   const session = findSessionForLiveTask(taskId);
   if (!session) return;
-  const updated = updateCallSession(session.id, { handoffTaskId: taskId, handoffTitle: task.title || session.handoffTitle || '' });
+  const updated = updateCallSession(session.id, {
+    handoffTaskId: taskId,
+    handoffTitle: task.title || session.handoffTitle || '',
+    lastTaskSummary: task.summary || 'OpenClaw is working on it.',
+  });
+  broadcastCallDebugState(session.id);
   broadcast({
     type: 'call:handoff.progress',
     data: {
@@ -697,6 +774,188 @@ function maybeAnnounceLiveTaskProgress(msg) {
   });
 }
 
+function sanitizeFrameMeta(value = {}) {
+  const input = value && typeof value === 'object' ? value : {};
+  const cleanString = (v, max = 160) => String(v || '').replace(/[\r\n\t]+/g, ' ').trim().slice(0, max);
+  const cleanNumber = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
+  return {
+    source: cleanString(input.source, 24),
+    reason: cleanString(input.reason, 48),
+    frameId: cleanNumber(input.frameId),
+    capturedAt: cleanString(input.capturedAt, 40),
+    stable: input.stable === true,
+    videoWidth: cleanNumber(input.videoWidth),
+    videoHeight: cleanNumber(input.videoHeight),
+    displaySurface: cleanString(input.displaySurface, 40),
+    logicalSurface: typeof input.logicalSurface === 'boolean' ? input.logicalSurface : null,
+    cursor: cleanString(input.cursor, 40),
+    trackLabel: cleanString(input.trackLabel, 120),
+    avgDiff: cleanNumber(input.avgDiff),
+    changedRatio: cleanNumber(input.changedRatio),
+  };
+}
+
+function describeFrameMeta(meta = {}) {
+  const bits = [];
+  if (meta.source) bits.push(`source=${meta.source}`);
+  if (meta.reason) bits.push(`reason=${meta.reason}`);
+  if (meta.frameId) bits.push(`frame=${meta.frameId}`);
+  if (meta.displaySurface) bits.push(`surface=${meta.displaySurface}`);
+  if (meta.stable) bits.push('stable');
+  if (meta.videoWidth && meta.videoHeight) bits.push(`${meta.videoWidth}x${meta.videoHeight}`);
+  return bits.join(' ');
+}
+
+function summarizeVisualMemory(visualMemory = {}) {
+  const recent = Array.isArray(visualMemory?.recent) ? visualMemory.recent.slice(0, 6) : [];
+  return {
+    current: visualMemory?.current || null,
+    recent,
+    lastStableScreenFrameAt: visualMemory?.lastStableScreenFrameAt || null,
+    lastStableScreenFrameMeta: visualMemory?.lastStableScreenFrameMeta || null,
+    lastChangeAt: visualMemory?.lastChangeAt || null,
+    lastChangeSummary: visualMemory?.lastChangeSummary || '',
+  };
+}
+
+function buildCallDebugState(session = {}) {
+  return {
+    sessionId: session.id || '',
+    lastScreenFrameAt: session.lastScreenFrameAt || null,
+    lastScreenFrameMeta: session.lastScreenFrameMeta || null,
+    lastCameraFrameAt: session.lastCameraFrameAt || null,
+    lastCameraFrameMeta: session.lastCameraFrameMeta || null,
+    lastScreenChange: session.lastScreenChange || null,
+    lastGeminiHint: session.lastGeminiHint || '',
+    lastGeminiHintAt: session.lastGeminiHintAt || null,
+    lastVisualAssumption: session.lastVisualAssumption || '',
+    lastVisualConfidence: session.lastVisualConfidence || '',
+    lastRoutingDecision: session.lastRoutingDecision || '',
+    lastTaskSummary: session.lastTaskSummary || '',
+    visualMemory: summarizeVisualMemory(session.visualMemory || {}),
+  };
+}
+
+function broadcastCallDebugState(sessionId) {
+  const session = getCallSession(sessionId);
+  if (!session) return;
+  broadcast({
+    type: 'call:debug.state',
+    data: {
+      sessionId,
+      debug: buildCallDebugState(session),
+    },
+  });
+}
+
+function pushVisualMemoryEntry(sessionId, entry = {}, patch = {}) {
+  const session = getCallSession(sessionId);
+  if (!session) return null;
+  const existing = session.visualMemory || {};
+  const recent = [
+    {
+      observedAt: new Date().toISOString(),
+      summary: '',
+      confidence: '',
+      ...entry,
+    },
+    ...(Array.isArray(existing.recent) ? existing.recent : []),
+  ].slice(0, 8);
+  const visualMemory = {
+    current: entry.current || existing.current || null,
+    recent,
+    lastStableScreenFrameAt: existing.lastStableScreenFrameAt || null,
+    lastStableScreenFrameMeta: existing.lastStableScreenFrameMeta || null,
+    lastChangeAt: existing.lastChangeAt || null,
+    lastChangeSummary: existing.lastChangeSummary || '',
+    ...patch,
+  };
+  return updateCallSession(sessionId, { visualMemory });
+}
+
+function describeVisualSurface(meta = {}) {
+  const bits = [];
+  if (meta.displaySurface) bits.push(meta.displaySurface);
+  if (meta.videoWidth && meta.videoHeight) bits.push(`${meta.videoWidth}x${meta.videoHeight}`);
+  if (meta.trackLabel) bits.push(meta.trackLabel.slice(0, 80));
+  return bits.join(' · ');
+}
+
+function inferVisualConfidence(meta = {}, session = {}, { duringTransition = false } = {}) {
+  if (!meta || !meta.stable) return 'low';
+  if (duringTransition) return 'medium';
+  const lastChange = session?.lastScreenChange || null;
+  if (lastChange?.at) {
+    const ageMs = Date.now() - new Date(lastChange.at).getTime();
+    if (Number.isFinite(ageMs) && ageMs < 4500) return 'medium';
+  }
+  return 'high';
+}
+
+function buildStableVisualSnapshot(meta = {}, session = {}) {
+  const previous = session?.visualMemory?.current || null;
+  const confidence = inferVisualConfidence(meta, session);
+  const surfaceText = describeVisualSurface(meta);
+  let summary = 'Stable screen frame received.';
+  if (surfaceText) summary = `Stable ${surfaceText} frame received.`;
+  if (previous?.summary && previous.summary === summary) {
+    summary = `${summary} Visual context appears consistent with the previous stable state.`;
+  }
+  return {
+    source: 'screen',
+    observedAt: new Date().toISOString(),
+    confidence,
+    pageGuess: '',
+    appGuess: '',
+    routeGuess: '',
+    visibleTexts: [],
+    uiState: {
+      loading: false,
+      modalOpen: false,
+      errorVisible: false,
+      blocked: false,
+      transitional: false,
+    },
+    importantElements: [],
+    summary,
+    surface: meta.displaySurface || '',
+    trackLabel: meta.trackLabel || '',
+    frameId: meta.frameId || 0,
+  };
+}
+
+function summarizeStableVisualDelta(previousMeta = {}, nextMeta = {}, session = {}) {
+  if (!previousMeta || !previousMeta.frameId) {
+    return {
+      summary: 'First stable visual state captured for this screen-sharing run.',
+      assumption: 'Fairy now has a stable screen frame and can start rebuilding current visual awareness carefully.',
+      confidence: inferVisualConfidence(nextMeta, session),
+    };
+  }
+  const changes = [];
+  if ((previousMeta.trackLabel || '') && (nextMeta.trackLabel || '') && previousMeta.trackLabel !== nextMeta.trackLabel) {
+    changes.push('capture target label changed');
+  }
+  if ((previousMeta.displaySurface || '') && (nextMeta.displaySurface || '') && previousMeta.displaySurface !== nextMeta.displaySurface) {
+    changes.push(`surface changed from ${previousMeta.displaySurface} to ${nextMeta.displaySurface}`);
+  }
+  if (previousMeta.videoWidth !== nextMeta.videoWidth || previousMeta.videoHeight !== nextMeta.videoHeight) {
+    changes.push(`frame size changed from ${previousMeta.videoWidth || 0}x${previousMeta.videoHeight || 0} to ${nextMeta.videoWidth || 0}x${nextMeta.videoHeight || 0}`);
+  }
+  if ((nextMeta.reason || '').includes('screen-change')) {
+    changes.push('a meaningful screen transition finished and stabilized');
+  }
+  if (!changes.length) changes.push('visual context appears consistent with the previous stable frame');
+  const confidence = inferVisualConfidence(nextMeta, session, { duringTransition: /change/i.test(nextMeta.reason || '') });
+  return {
+    summary: changes.join('; '),
+    assumption: changes.some((item) => /changed|transition/.test(item))
+      ? 'Visual context likely changed; Fairy should favor the newest stable frame and avoid stale page assumptions.'
+      : 'Visual context appears stable enough to keep current assumptions unless visible text contradicts them.',
+    confidence,
+  };
+}
+
 function maybePromptScreenChange(sessionId, payload = {}) {
   const session = getCallSession(sessionId);
   if (!session || !session.active || !session.screenShareActive) return;
@@ -705,13 +964,32 @@ function maybePromptScreenChange(sessionId, payload = {}) {
   if (!live) return;
   const avgDiff = Number(payload.avgDiff || 0);
   const changedRatio = Number(payload.changedRatio || 0);
+  const frameMeta = sanitizeFrameMeta(payload.frameMeta || session.lastScreenFrameMeta || {});
+  const metaLine = describeFrameMeta(frameMeta);
+  const currentVisual = session.visualMemory?.current || null;
+  const previousVisual = Array.isArray(session.visualMemory?.recent) ? session.visualMemory.recent[0] : null;
   const prompt = [
     'SYSTEM EVENT FOR LIVE CALL:',
-    'The shared screen changed noticeably.',
+    'The shared screen changed noticeably after a stabilized post-change frame was uploaded.',
     `Change strength: avgDiff=${avgDiff || 0}, changedRatio=${changedRatio || 0}`,
-    'Do not interrupt Epic just to narrate pixels. Simply update your visual assumptions. If Epic is already asking about the screen, use the newest frames. If you choose to speak, only mention meaningful state changes such as a new error, modal, redirect, enabled action, completed load, or a blocked step.',
-  ].join('\n');
+    metaLine ? `Newest frame metadata: ${metaLine}` : '',
+    currentVisual?.summary ? `Current visual memory: ${currentVisual.summary}` : '',
+    previousVisual?.summary ? `Recent prior visual summary: ${previousVisual.summary}` : '',
+    'Use the newest stable screen frame as visual context. Prefer the newest stable state over older assumptions. Do not identify a website, app, tab, or route unless visible text/UI clearly supports it. If the frame looks blank, partially loaded, or transitional, say it appears to still be loading instead of guessing. Do not interrupt Epic just to narrate pixels; speak only for meaningful state changes such as a new error, modal, redirect, enabled action, completed load, or blocked step.',
+  ].filter(Boolean).join('\n');
+  updateCallSession(sessionId, {
+    lastGeminiHint: prompt,
+    lastGeminiHintAt: new Date().toISOString(),
+    lastVisualAssumption: 'Recent major screen change; favor the newest stable frame and avoid stale app/page guesses until visible UI confirms them.',
+    lastVisualConfidence: frameMeta?.stable ? 'medium' : 'low',
+    visualMemory: {
+      ...(session.visualMemory || {}),
+      lastChangeAt: new Date().toISOString(),
+      lastChangeSummary: `Major screen change detected (${avgDiff || 0}/${changedRatio || 0}).`,
+    },
+  });
   broadcast({ type: 'call:debug', data: { sessionId, message: `Prompting Fairy with meaningful screen change (${avgDiff}/${changedRatio}).` } });
+  broadcastCallDebugState(sessionId);
   try {
     live.sendTextTurn(prompt);
   } catch (err) {
@@ -760,7 +1038,9 @@ function maybeAnnounceLiveTaskResult(msg) {
   const updated = setCallSessionState(session.id, 'thinking', {
     handoffTaskId: taskId,
     handoffTitle: title,
+    lastTaskSummary: summary || result || statusLine,
   }, { broadcastState: false });
+  broadcastCallDebugState(session.id);
   broadcast({ type: 'call:debug', data: { sessionId: session.id, message: `Prompting Fairy to announce live task ${taskId} (${status}).` } });
   broadcast({ type: 'call:session.state', data: { sessionId: session.id, state: updated?.state || 'thinking', session: updated || session } });
   try {
@@ -988,6 +1268,8 @@ app.get(`${basePath}/api/settings/gemini`, async (req, res) => {
       thinkingLevel: settings.thinkingLevel || runtime.thinkingLevel || 'minimal',
       voiceName: settings.voiceName || runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
       liveVoiceName: settings.voiceName || runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
+      speechOutputMode: settings.speechOutputMode || runtime.speechOutputMode || 'gemini',
+      fishVoiceId: settings.fishVoiceId || runtime.fishVoiceId || '',
       personaName: settings.personaName || runtime.personaName || 'Fairy',
       operatorName: settings.operatorName || runtime.operatorName || 'Epic',
       personalityPrompt: settings.personalityPrompt || runtime.personalityPrompt || '',
@@ -1010,6 +1292,8 @@ app.post(`${basePath}/api/settings/gemini`, async (req, res) => {
       responseModalities: body.responseModalities !== undefined ? body.responseModalities : existing.responseModalities,
       thinkingLevel: body.thinkingLevel !== undefined ? String(body.thinkingLevel || '').trim() : existing.thinkingLevel,
       voiceName: body.voiceName !== undefined ? String(body.voiceName || '').trim() : existing.voiceName,
+      speechOutputMode: body.speechOutputMode !== undefined ? String(body.speechOutputMode || '').trim() : existing.speechOutputMode,
+      fishVoiceId: body.fishVoiceId !== undefined ? String(body.fishVoiceId || '').trim() : existing.fishVoiceId,
       personaName: body.personaName !== undefined ? String(body.personaName || '').trim() : existing.personaName,
       operatorName: body.operatorName !== undefined ? String(body.operatorName || '').trim() : existing.operatorName,
       personalityPrompt: body.personalityPrompt !== undefined ? String(body.personalityPrompt || '') : existing.personalityPrompt,
@@ -1028,6 +1312,8 @@ app.post(`${basePath}/api/settings/gemini`, async (req, res) => {
         thinkingLevel: saved.thinkingLevel,
         voiceName: saved.voiceName || runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
         liveVoiceName: saved.voiceName || runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
+        speechOutputMode: saved.speechOutputMode || runtime.speechOutputMode || 'gemini',
+        fishVoiceId: saved.fishVoiceId || runtime.fishVoiceId || '',
         personaName: saved.personaName || runtime.personaName || 'Fairy',
         operatorName: saved.operatorName || runtime.operatorName || 'Epic',
         personalityPrompt: saved.personalityPrompt || runtime.personalityPrompt || '',
@@ -2392,6 +2678,8 @@ app.get(`${basePath}/api/live/config`, async (req, res) => {
       thinkingLevel: config.thinkingLevel,
       voiceName: config.voiceName || FAIRY_LIVE_VOICE_NAME,
       liveVoiceName: config.voiceName || FAIRY_LIVE_VOICE_NAME,
+      speechOutputMode: config.speechOutputMode || 'gemini',
+      fishVoiceId: config.fishVoiceId || '',
       personaName: config.personaName || 'Fairy',
       operatorName: config.operatorName || 'Epic',
       personalityPrompt: config.personalityPrompt || '',
@@ -2449,6 +2737,36 @@ app.get(`${basePath}/api/call/:id`, async (req, res) => {
   res.json({ ok: true, session });
 });
 
+app.post(`${basePath}/api/call/:id/fairy-speak`, async (req, res) => {
+  try {
+    const session = getCallSession(String(req.params.id || ''));
+    if (!session || String(session.persona || '') !== 'fairy') {
+      return res.status(404).json({ ok: false, error: 'Fairy call session not found' });
+    }
+    const text = String(req.body?.text || '').trim();
+    if (!text) return res.status(400).json({ ok: false, error: 'No text provided' });
+
+    const geminiSettings = await loadGeminiSettings();
+    if (String(geminiSettings.speechOutputMode || 'gemini') !== 'fish') {
+      return res.status(400).json({ ok: false, error: 'Fairy Fish voice mode is not enabled' });
+    }
+    const fishVoiceId = String(geminiSettings.fishVoiceId || '').trim();
+    if (!fishVoiceId) {
+      return res.status(400).json({ ok: false, error: 'No Fairy Fish voice ID configured' });
+    }
+
+    const voiceSettings = await loadVoiceSettings();
+    const mergedVoiceSettings = {
+      ...voiceSettings,
+      provider: 'fish',
+    };
+    await streamFishAudioText(text, mergedVoiceSettings, res, { voiceId: fishVoiceId, agentId: session.agent || 'main' });
+  } catch (err) {
+    console.error('[fairy] Fish speech error:', err.message);
+    res.status(500).json({ ok: false, error: err.message || 'Fairy Fish speech failed' });
+  }
+});
+
 app.post(`${basePath}/api/call/start`, async (req, res) => {
   try {
     const runtime = await loadGeminiRuntimeConfig();
@@ -2475,10 +2793,13 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
       limit: 10,
     });
 
+    const liveResponseModalities = Array.isArray(runtime.responseModalities) && runtime.responseModalities.length
+      ? runtime.responseModalities
+      : ['AUDIO'];
     const gemini = new GeminiLiveSession({
       apiKey: runtime.apiKey,
       model: runtime.model,
-      responseModalities: runtime.responseModalities,
+      responseModalities: liveResponseModalities,
       voiceName: runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
       systemPrompt: buildFairyLiveSystemPrompt({
         roster: currentRoster,
@@ -2586,6 +2907,8 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
                   responseModalities: args.responseModalities !== undefined ? args.responseModalities : existing.responseModalities,
                   thinkingLevel: args.thinkingLevel !== undefined ? String(args.thinkingLevel || '').trim() : existing.thinkingLevel,
                   voiceName: args.voiceName !== undefined ? String(args.voiceName || '').trim() : existing.voiceName,
+                  speechOutputMode: args.speechOutputMode !== undefined ? String(args.speechOutputMode || '').trim() : existing.speechOutputMode,
+                  fishVoiceId: args.fishVoiceId !== undefined ? String(args.fishVoiceId || '').trim() : existing.fishVoiceId,
                   personaName: args.personaName !== undefined ? String(args.personaName || '').trim() : existing.personaName,
                   operatorName: args.operatorName !== undefined ? String(args.operatorName || '').trim() : existing.operatorName,
                   personalityPrompt: args.personalityPrompt !== undefined ? String(args.personalityPrompt || '') : existing.personalityPrompt,
@@ -2594,13 +2917,15 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
                 };
                 const saved = await saveGeminiSettings(next);
                 const runtimeNow = await loadGeminiRuntimeConfig();
-                const changedKeys = ['model','responseModalities','thinkingLevel','voiceName','personaName','operatorName','personalityPrompt','memoryEnabled','memoryNotes']
+                const changedKeys = ['model','responseModalities','thinkingLevel','voiceName','speechOutputMode','fishVoiceId','personaName','operatorName','personalityPrompt','memoryEnabled','memoryNotes']
                   .filter((key) => args[key] !== undefined);
                 const settings = {
                   model: saved.model || runtimeNow.model,
                   responseModalities: saved.responseModalities || runtimeNow.responseModalities || ['AUDIO'],
                   thinkingLevel: saved.thinkingLevel || runtimeNow.thinkingLevel || 'minimal',
                   voiceName: saved.voiceName || runtimeNow.voiceName || FAIRY_LIVE_VOICE_NAME,
+                  speechOutputMode: saved.speechOutputMode || runtimeNow.speechOutputMode || 'gemini',
+                  fishVoiceId: saved.fishVoiceId || runtimeNow.fishVoiceId || '',
                   personaName: saved.personaName || runtimeNow.personaName || 'Fairy',
                   operatorName: saved.operatorName || runtimeNow.operatorName || 'Epic',
                   memoryEnabled: saved.memoryEnabled ?? runtimeNow.memoryEnabled ?? true,
@@ -2790,6 +3115,7 @@ Tell Epic briefly that you put the image on screen and that he can copy the link
           const pcm16Base64 = String(event.data?.pcm16Base64 || '');
           const mimeType = String(event.data?.mimeType || 'audio/pcm;rate=24000');
           const updated = setCallSessionState(session.id, 'speaking');
+          const finalText = event.data?.done ? String(getCallSession(session.id)?.lastAssistantText || '').trim() : '';
           broadcast({
             type: 'call:response.audio',
             data: {
@@ -2797,9 +3123,22 @@ Tell Epic briefly that you put the image on screen and that he can copy the link
               pcm16Base64,
               mimeType,
               done: !!event.data?.done,
+              text: finalText,
               state: updated?.state || 'speaking',
             },
           });
+          if (event.data?.done && finalText) {
+            broadcast({
+              type: 'call:response.text',
+              data: {
+                sessionId: session.id,
+                text: finalText,
+                done: true,
+                state: updated?.state || 'speaking',
+                source: 'response.audio.final',
+              },
+            });
+          }
           broadcast({ type: 'call:debug', data: { sessionId: session.id, message: `Gemini audio chunk ${pcm16Base64.length}b ${mimeType}` } });
           return;
         }
@@ -2825,6 +3164,7 @@ Tell Epic briefly that you put the image on screen and that he can copy the link
 
     const ready = setCallSessionState(session.id, 'ready', {}, { broadcastState: false }) || session;
     broadcast({ type: 'call:session.started', data: ready });
+    broadcastCallDebugState(session.id);
     res.json({ ok: true, session: ready, runtime: { model: runtime.model, thinkingLevel: runtime.thinkingLevel } });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -2883,17 +3223,91 @@ app.post(`${basePath}/api/call/:id/screen`, async (req, res) => {
     if (!live) return res.status(404).json({ ok: false, error: 'Live Gemini session not found' });
     const jpegBase64 = String(req.body?.jpegBase64 || '').trim();
     const mimeType = String(req.body?.mimeType || 'image/jpeg').trim();
+    const frameMeta = sanitizeFrameMeta(req.body?.frameMeta || req.body?.meta || {});
     if (!jpegBase64) return res.status(400).json({ ok: false, error: 'Missing jpegBase64' });
     live.sendVideoFrame({ imageBase64: jpegBase64, mimeType });
     const current = getCallSession(sessionId);
-    const updated = updateCallSession(sessionId, { screenShareActive: true });
+    const updated = updateCallSession(sessionId, {
+      screenShareActive: true,
+      lastScreenFrameAt: new Date().toISOString(),
+      lastScreenFrameMeta: frameMeta,
+      screenFrameCount: Number(current?.screenFrameCount || 0) + 1,
+    });
     if (!current?.screenShareActive) {
       broadcast({ type: 'call:screen.enabled', data: { sessionId, session: updated } });
     }
-    broadcast({ type: 'call:debug', data: { sessionId, message: `Screen frame uplink ${jpegBase64.length}b ${mimeType}` } });
-    return res.json({ ok: true });
+    const previousStableMeta = current?.visualMemory?.lastStableScreenFrameMeta || null;
+    const nextVisualMemory = {
+      ...(updated?.visualMemory || current?.visualMemory || {}),
+      ...(frameMeta.stable ? (() => {
+        const delta = summarizeStableVisualDelta(previousStableMeta || {}, frameMeta, current || updated || {});
+        const snapshot = buildStableVisualSnapshot(frameMeta, current || updated || {});
+        snapshot.summary = delta.summary;
+        snapshot.confidence = delta.confidence;
+        return {
+          lastStableScreenFrameAt: updated?.lastScreenFrameAt || new Date().toISOString(),
+          lastStableScreenFrameMeta: frameMeta,
+          current: snapshot,
+          lastChangeSummary: delta.summary,
+        };
+      })() : {}),
+    };
+    const afterVisual = updateCallSession(sessionId, {
+      visualMemory: nextVisualMemory,
+      ...(frameMeta.stable ? {
+        lastVisualAssumption: summarizeStableVisualDelta(previousStableMeta || {}, frameMeta, current || updated || {}).assumption,
+        lastVisualConfidence: summarizeStableVisualDelta(previousStableMeta || {}, frameMeta, current || updated || {}).confidence,
+      } : {}),
+    });
+    if (frameMeta.stable) {
+      const delta = summarizeStableVisualDelta(previousStableMeta || {}, frameMeta, current || updated || {});
+      pushVisualMemoryEntry(sessionId, {
+        reason: frameMeta.reason || 'stable-frame',
+        summary: delta.summary,
+        confidence: delta.confidence,
+        current: nextVisualMemory.current,
+      }, {
+        current: nextVisualMemory.current,
+        lastStableScreenFrameAt: nextVisualMemory.lastStableScreenFrameAt,
+        lastStableScreenFrameMeta: nextVisualMemory.lastStableScreenFrameMeta,
+        lastChangeSummary: delta.summary,
+      });
+    }
+    const metaText = describeFrameMeta(frameMeta);
+    broadcast({ type: 'call:debug', data: { sessionId, message: `Screen frame uplink #${updated?.screenFrameCount || 1} ${jpegBase64.length}b ${mimeType}${metaText ? ` ${metaText}` : ''}` } });
+    broadcastCallDebugState(sessionId);
+    return res.json({ ok: true, frameMeta });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post(`${basePath}/api/call/:id/camera`, async (req, res) => {
+  try {
+    const sessionId = String(req.params.id || '');
+    const live = liveGeminiSessions.get(sessionId);
+    if (!live) return res.status(404).json({ ok: false, error: 'Live Gemini session not found' });
+    const jpegBase64 = String(req.body?.jpegBase64 || '').trim();
+    const mimeType = String(req.body?.mimeType || 'image/jpeg').trim();
+    const frameMeta = sanitizeFrameMeta(req.body?.frameMeta || req.body?.meta || {});
+    if (!jpegBase64) return res.status(400).json({ ok: false, error: 'Missing jpegBase64' });
+    live.sendVideoFrame({ imageBase64: jpegBase64, mimeType });
+    const current = getCallSession(sessionId);
+    const updated = updateCallSession(sessionId, {
+      cameraShareActive: true,
+      lastCameraFrameAt: new Date().toISOString(),
+      lastCameraFrameMeta: frameMeta,
+      cameraFrameCount: Number(current?.cameraFrameCount || 0) + 1,
+    });
+    if (!current?.cameraShareActive) {
+      broadcast({ type: 'call:camera.enabled', data: { sessionId, session: updated } });
+    }
+    const metaText = describeFrameMeta(frameMeta);
+    broadcast({ type: 'call:debug', data: { sessionId, message: `Camera frame uplink #${updated?.cameraFrameCount || 1} ${jpegBase64.length}b ${mimeType}${metaText ? ` ${metaText}` : ''}` } });
+    broadcastCallDebugState(sessionId);
+    return res.json({ ok: true, frameMeta });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message || 'Could not send camera frame' });
   }
 });
 
@@ -2926,7 +3340,12 @@ app.post(`${basePath}/api/call/:id/event`, async (req, res) => {
       if (looksComplexRequest(text)) {
         const title = text.slice(0, 80) || 'Background task';
         const summary = buildHandoffSpokenSummary(text, session.agent, roster);
-        const started = setCallSessionState(sessionId, 'handing_off', { handoffTitle: title, handoffTaskId: '' });
+        const started = setCallSessionState(sessionId, 'handing_off', {
+          handoffTitle: title,
+          handoffTaskId: '',
+          lastRoutingDecision: 'complex-request-handoff',
+          lastTaskSummary: summary,
+        });
         broadcastCallHandoff('call:handoff.started', sessionId, { title, summary, agent: session.agent, session: started });
         const task = await createLiveTask({
           title,
@@ -2934,7 +3353,13 @@ app.post(`${basePath}/api/call/:id/event`, async (req, res) => {
           prompt: text,
           agent: session.agent,
         });
-        const linked = setCallSessionState(sessionId, 'task_running', { handoffTitle: title, handoffTaskId: task.id });
+        const linked = setCallSessionState(sessionId, 'task_running', {
+          handoffTitle: title,
+          handoffTaskId: task.id,
+          lastRoutingDecision: 'complex-request-handoff',
+          lastTaskSummary: summary,
+        });
+        broadcastCallDebugState(sessionId);
         broadcastCallHandoff('call:handoff.task_created', sessionId, { taskId: task.id, task, session: linked });
         broadcast({ type: 'live_task:update', data: task });
         runLiveTask(task, { broadcast, roster });
@@ -2986,35 +3411,96 @@ ${text}`
     if (eventType === 'assistant.interrupted') {
       clearLiveWatchdog(sessionId);
       const reason = String(req.body?.reason || 'user_speaking').trim() || 'user_speaking';
-      const updated = updateCallSession(sessionId, { state: 'listening', currentTurnAudioChunks: 0, partialTranscript: '' });
+      const updated = updateCallSession(sessionId, {
+        state: 'listening',
+        currentTurnAudioChunks: 0,
+        partialTranscript: '',
+        lastRoutingDecision: `interrupted:${reason}`,
+      });
       broadcast({ type: 'call:assistant.interrupted', data: { sessionId, reason, state: updated?.state || 'listening' } });
+      broadcastCallDebugState(sessionId);
       return res.json({ ok: true, session: updated });
     }
 
     if (eventType === 'screen.started') {
-      const updated = updateCallSession(sessionId, { screenShareActive: true });
+      const frameMeta = sanitizeFrameMeta(req.body?.frameMeta || {});
+      const updated = updateCallSession(sessionId, {
+        screenShareActive: true,
+        lastScreenFrameMeta: frameMeta,
+        lastGeminiHintAt: new Date().toISOString(),
+        lastVisualAssumption: 'Screen share started; building fresh visual state from stable frames.',
+        lastVisualConfidence: 'low',
+        visualMemory: {
+          ...(session.visualMemory || {}),
+          current: null,
+          recent: [],
+          lastChangeAt: null,
+          lastChangeSummary: 'Screen share started.',
+        },
+      });
       const live = liveGeminiSessions.get(sessionId);
       if (live) {
         try {
-          live.sendTextTurn('Screen sharing is now active. Use incoming screen frames as visual context. Prioritize meaningful changes: errors, warnings, redirects, enabled actions, blocked flows, modals, completed loads, auth failures, and obvious next steps. Do not narrate every frame. If Epic asks for changes or actions, hand off to OpenClaw.');
+          const metaText = describeFrameMeta(frameMeta);
+          const prompt = `Screen sharing is now active${metaText ? ` (${metaText})` : ''}. Use incoming stable screen frames as visual context. Prioritize meaningful changes: errors, warnings, redirects, enabled actions, blocked flows, modals, completed loads, auth failures, and obvious next steps. Do not narrate every frame. Do not identify a website, app, tab, or route unless visible text/UI clearly supports it; if the frame is blank or transitional, say it appears to still be loading. If Epic asks for changes or actions, hand off to OpenClaw.`;
+          updateCallSession(sessionId, { lastGeminiHint: prompt, lastGeminiHintAt: new Date().toISOString() });
+          live.sendTextTurn(prompt);
         } catch (err) {
           broadcast({ type: 'call:error', data: { sessionId, message: err.message || 'Could not send screen context to Gemini' } });
         }
       }
       broadcast({ type: 'call:screen.enabled', data: { sessionId, session: updated } });
+      broadcastCallDebugState(sessionId);
       return res.json({ ok: true, session: updated });
     }
 
     if (eventType === 'screen.changed') {
       const avgDiff = Number(req.body?.avgDiff || 0);
       const changedRatio = Number(req.body?.changedRatio || 0);
-      broadcast({ type: 'call:screen.changed', data: { sessionId, avgDiff, changedRatio } });
-      maybePromptScreenChange(sessionId, { avgDiff, changedRatio });
-      return res.json({ ok: true, session: getCallSession(sessionId) });
+      const frameMeta = sanitizeFrameMeta(req.body?.frameMeta || {});
+      const updated = updateCallSession(sessionId, {
+        lastScreenFrameMeta: frameMeta || session.lastScreenFrameMeta,
+        lastScreenChange: { avgDiff, changedRatio, at: new Date().toISOString(), frameMeta },
+        lastVisualAssumption: 'A major screen transition just happened; older page assumptions may now be stale until the next stable frame confirms the new state.',
+        lastVisualConfidence: 'low',
+        visualMemory: {
+          ...(session.visualMemory || {}),
+          current: session.visualMemory?.current ? {
+            ...session.visualMemory.current,
+            confidence: 'low',
+            uiState: {
+              ...(session.visualMemory.current.uiState || {}),
+              transitional: true,
+              loading: true,
+            },
+            summary: 'Recent major screen change detected; waiting for the next stable frame before trusting old assumptions.',
+          } : null,
+          lastChangeAt: new Date().toISOString(),
+          lastChangeSummary: `Screen changed (${avgDiff}/${changedRatio}).`,
+        },
+      });
+      pushVisualMemoryEntry(sessionId, {
+        reason: 'screen-change-stable',
+        summary: `Screen changed (${avgDiff}/${changedRatio}).`,
+        confidence: frameMeta?.stable ? 'medium' : 'low',
+      });
+      broadcast({ type: 'call:screen.changed', data: { sessionId, avgDiff, changedRatio, frameMeta } });
+      maybePromptScreenChange(sessionId, { avgDiff, changedRatio, frameMeta });
+      broadcastCallDebugState(sessionId);
+      return res.json({ ok: true, session: updated || getCallSession(sessionId) });
     }
 
     if (eventType === 'screen.stopped') {
-      const updated = updateCallSession(sessionId, { screenShareActive: false });
+      const updated = updateCallSession(sessionId, {
+        screenShareActive: false,
+        lastVisualAssumption: 'Screen sharing stopped; no current screen visibility.',
+        lastVisualConfidence: 'none',
+        visualMemory: {
+          ...(session.visualMemory || {}),
+          current: null,
+          lastChangeSummary: 'Screen sharing stopped.',
+        },
+      });
       const live = liveGeminiSessions.get(sessionId);
       if (live) {
         try {
@@ -3022,25 +3508,35 @@ ${text}`
         } catch {}
       }
       broadcast({ type: 'call:screen.disabled', data: { sessionId, session: updated } });
+      broadcastCallDebugState(sessionId);
       return res.json({ ok: true, session: updated });
     }
 
     if (eventType === 'camera.started') {
-      const updated = updateCallSession(sessionId, { cameraShareActive: true });
+      const updated = updateCallSession(sessionId, {
+        cameraShareActive: true,
+        lastVisualAssumption: 'Camera sharing active; use camera frames for current visual answers.',
+      });
       const live = liveGeminiSessions.get(sessionId);
       if (live) {
         try {
-          live.sendTextTurn('Camera sharing is now active. Use incoming camera frames as visual context for what Epic is showing you. If Epic asks what you can see, answer from the camera frames. If he asks for actions, hand off to OpenClaw.');
+          const prompt = 'Camera sharing is now active. Use incoming camera frames as visual context for what Epic is showing you. If Epic asks what you can see, answer from the camera frames. If he asks for actions, hand off to OpenClaw.';
+          updateCallSession(sessionId, { lastGeminiHint: prompt, lastGeminiHintAt: new Date().toISOString() });
+          live.sendTextTurn(prompt);
         } catch (err) {
           broadcast({ type: 'call:error', data: { sessionId, message: err.message || 'Could not send camera context to Gemini' } });
         }
       }
       broadcast({ type: 'call:camera.enabled', data: { sessionId, session: updated } });
+      broadcastCallDebugState(sessionId);
       return res.json({ ok: true, session: updated });
     }
 
     if (eventType === 'camera.stopped') {
-      const updated = updateCallSession(sessionId, { cameraShareActive: false });
+      const updated = updateCallSession(sessionId, {
+        cameraShareActive: false,
+        lastVisualAssumption: 'Camera sharing stopped; no current camera visibility.',
+      });
       const live = liveGeminiSessions.get(sessionId);
       if (live) {
         try {
@@ -3048,6 +3544,7 @@ ${text}`
         } catch {}
       }
       broadcast({ type: 'call:camera.disabled', data: { sessionId, session: updated } });
+      broadcastCallDebugState(sessionId);
       return res.json({ ok: true, session: updated });
     }
 
@@ -3160,6 +3657,8 @@ app.get(`${basePath}/api/v1/fairy/config`, async (req, res) => {
       responseModalities: config.responseModalities,
       thinkingLevel: config.thinkingLevel,
       voiceName: config.voiceName || FAIRY_LIVE_VOICE_NAME,
+      speechOutputMode: config.speechOutputMode || 'gemini',
+      fishVoiceId: config.fishVoiceId || '',
       personaName: config.personaName || 'Fairy',
       operatorName: config.operatorName || 'Epic',
       personalityPrompt: config.personalityPrompt || '',
@@ -3184,6 +3683,8 @@ app.get(`${basePath}/api/v1/fairy/settings`, async (req, res) => {
       responseModalities: settings.responseModalities || runtime.responseModalities || ['AUDIO'],
       thinkingLevel: settings.thinkingLevel || runtime.thinkingLevel || 'minimal',
       voiceName: settings.voiceName || runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
+      speechOutputMode: settings.speechOutputMode || runtime.speechOutputMode || 'gemini',
+      fishVoiceId: settings.fishVoiceId || runtime.fishVoiceId || '',
       personaName: settings.personaName || runtime.personaName || 'Fairy',
       operatorName: settings.operatorName || runtime.operatorName || 'Epic',
       personalityPrompt: settings.personalityPrompt || runtime.personalityPrompt || '',
@@ -3205,6 +3706,8 @@ app.post(`${basePath}/api/v1/fairy/settings`, async (req, res) => {
       responseModalities: body.responseModalities !== undefined ? body.responseModalities : existing.responseModalities,
       thinkingLevel: body.thinkingLevel !== undefined ? String(body.thinkingLevel || '').trim() : existing.thinkingLevel,
       voiceName: body.voiceName !== undefined ? String(body.voiceName || '').trim() : existing.voiceName,
+      speechOutputMode: body.speechOutputMode !== undefined ? String(body.speechOutputMode || '').trim() : existing.speechOutputMode,
+      fishVoiceId: body.fishVoiceId !== undefined ? String(body.fishVoiceId || '').trim() : existing.fishVoiceId,
       personaName: body.personaName !== undefined ? String(body.personaName || '').trim() : existing.personaName,
       operatorName: body.operatorName !== undefined ? String(body.operatorName || '').trim() : existing.operatorName,
       personalityPrompt: body.personalityPrompt !== undefined ? String(body.personalityPrompt || '') : existing.personalityPrompt,
@@ -3222,6 +3725,8 @@ app.post(`${basePath}/api/v1/fairy/settings`, async (req, res) => {
         responseModalities: saved.responseModalities || runtime.responseModalities || ['AUDIO'],
         thinkingLevel: saved.thinkingLevel || runtime.thinkingLevel || 'minimal',
         voiceName: saved.voiceName || runtime.voiceName || FAIRY_LIVE_VOICE_NAME,
+        speechOutputMode: saved.speechOutputMode || runtime.speechOutputMode || 'gemini',
+        fishVoiceId: saved.fishVoiceId || runtime.fishVoiceId || '',
         personaName: saved.personaName || runtime.personaName || 'Fairy',
         operatorName: saved.operatorName || runtime.operatorName || 'Epic',
         personalityPrompt: saved.personalityPrompt || runtime.personalityPrompt || '',
@@ -3332,11 +3837,18 @@ app.post(`${basePath}/api/v1/fairy/calls/:id/screen`, async (req, res) => {
     if (!live) return res.status(404).json({ ok: false, error: 'Live Gemini session not found' });
     const jpegBase64 = String(req.body?.jpegBase64 || '').trim();
     const mimeType = String(req.body?.mimeType || 'image/jpeg').trim();
+    const frameMeta = sanitizeFrameMeta(req.body?.frameMeta || req.body?.meta || {});
     if (!jpegBase64) return res.status(400).json({ ok: false, error: 'Missing jpegBase64' });
     live.sendVideoFrame({ imageBase64: jpegBase64, mimeType });
-    const updated = updateCallSession(sessionId, { screenShareActive: true });
+    const current = getCallSession(sessionId);
+    const updated = updateCallSession(sessionId, {
+      screenShareActive: true,
+      lastScreenFrameAt: new Date().toISOString(),
+      lastScreenFrameMeta: frameMeta,
+      screenFrameCount: Number(current?.screenFrameCount || 0) + 1,
+    });
     broadcast({ type: 'call:screen.enabled', data: { sessionId, session: updated } });
-    return res.json({ ok: true, session: updated });
+    return res.json({ ok: true, session: updated, frameMeta });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message || 'Could not send screen frame' });
   }
@@ -3349,11 +3861,18 @@ app.post(`${basePath}/api/v1/fairy/calls/:id/camera`, async (req, res) => {
     if (!live) return res.status(404).json({ ok: false, error: 'Live Gemini session not found' });
     const jpegBase64 = String(req.body?.jpegBase64 || '').trim();
     const mimeType = String(req.body?.mimeType || 'image/jpeg').trim();
+    const frameMeta = sanitizeFrameMeta(req.body?.frameMeta || req.body?.meta || {});
     if (!jpegBase64) return res.status(400).json({ ok: false, error: 'Missing jpegBase64' });
     live.sendVideoFrame({ imageBase64: jpegBase64, mimeType });
-    const updated = updateCallSession(sessionId, { cameraShareActive: true });
+    const current = getCallSession(sessionId);
+    const updated = updateCallSession(sessionId, {
+      cameraShareActive: true,
+      lastCameraFrameAt: new Date().toISOString(),
+      lastCameraFrameMeta: frameMeta,
+      cameraFrameCount: Number(current?.cameraFrameCount || 0) + 1,
+    });
     broadcast({ type: 'call:camera.enabled', data: { sessionId, session: updated } });
-    return res.json({ ok: true, session: updated });
+    return res.json({ ok: true, session: updated, frameMeta });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message || 'Could not send camera frame' });
   }

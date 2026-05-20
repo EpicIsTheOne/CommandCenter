@@ -10,7 +10,7 @@ import * as intro from './intro.js?v=20260514b';
 import * as appearance from './appearance.js?v=20260514b';
 import * as branding from './branding.js?v=20260514b';
 import * as layoutSettings from './layout-settings.js?v=20260514b';
-import * as fairyLive from './fairy-live.js?v=20260518-fairy-image2';
+import * as fairyLive from './fairy-live.js?v=20260520-fairy-fishspeed1';
 
 const APP_BUILD = '20260518-fairy-chatcall1';
 console.log('[CommandCenter] app build:', APP_BUILD);
@@ -1630,6 +1630,8 @@ function populateGeminiSettingsForm(geminiSettings = {}) {
   const modelInput = document.getElementById('gemini-live-model');
   const modalitiesSelect = document.getElementById('gemini-response-modalities');
   const thinkingSelect = document.getElementById('gemini-thinking-level');
+  const speechOutputModeSelect = document.getElementById('gemini-speech-output-mode');
+  const fishVoiceIdInput = document.getElementById('gemini-fish-voice-id');
   const liveVoiceSelect = document.getElementById('gemini-live-voice');
   const liveVoiceHint = document.getElementById('gemini-live-voice-hint');
   const sourceHint = document.getElementById('gemini-source-hint');
@@ -1652,6 +1654,8 @@ function populateGeminiSettingsForm(geminiSettings = {}) {
     modalitiesSelect.value = ['AUDIO', 'TEXT', 'AUDIO,TEXT'].includes(modalities) ? modalities : 'AUDIO';
   }
   if (thinkingSelect) thinkingSelect.value = geminiSettings.thinkingLevel || 'minimal';
+  if (speechOutputModeSelect) speechOutputModeSelect.value = geminiSettings.speechOutputMode || 'gemini';
+  if (fishVoiceIdInput) fishVoiceIdInput.value = geminiSettings.fishVoiceId || '';
   if (liveVoiceSelect) {
     const options = Array.isArray(geminiSettings.availableVoiceNames) ? geminiSettings.availableVoiceNames : [];
     if (options.length) {
@@ -1659,7 +1663,12 @@ function populateGeminiSettingsForm(geminiSettings = {}) {
     }
     liveVoiceSelect.value = geminiSettings.voiceName || geminiSettings.liveVoiceName || 'Sulafat';
   }
-  if (liveVoiceHint) liveVoiceHint.textContent = `Current live voice: ${geminiSettings.voiceName || geminiSettings.liveVoiceName || 'Sulafat'}.`;
+  if (liveVoiceHint) {
+    const mode = geminiSettings.speechOutputMode || 'gemini';
+    liveVoiceHint.textContent = mode === 'fish'
+      ? `Current speech mode: Fish Audio${geminiSettings.fishVoiceId ? ` · voice ${geminiSettings.fishVoiceId}` : ' · no Fish voice selected yet'}. Gemini native live voice stays saved as ${geminiSettings.voiceName || geminiSettings.liveVoiceName || 'Sulafat'}.`
+      : `Current live voice: ${geminiSettings.voiceName || geminiSettings.liveVoiceName || 'Sulafat'}.`;
+  }
   if (sourceHint) {
     const source = geminiSettings.source || 'command-center-local';
     sourceHint.textContent = geminiSettings.usingEnvKey
@@ -1757,7 +1766,9 @@ function renderFairySettingsDiagnostics(config = {}, sessions = []) {
     <div><strong>Operator:</strong> ${escapeHtml(config.operatorName || 'Epic')}</div>
     <div><strong>Model:</strong> ${escapeHtml(config.model || 'unknown')}</div>
     <div><strong>Source:</strong> ${escapeHtml(config.source || 'unknown')}</div>
+    <div><strong>Speech mode:</strong> ${escapeHtml(config.speechOutputMode === 'fish' ? 'Fish Audio from Gemini text' : 'Gemini native voice')}</div>
     <div><strong>Live voice:</strong> ${escapeHtml(config.voiceName || config.liveVoiceName || 'Sulafat')}</div>
+    <div><strong>Fish voice id:</strong> ${escapeHtml(config.fishVoiceId || '—')}</div>
     <div><strong>Memory:</strong> ${config.memoryEnabled === false ? 'disabled' : 'enabled'}</div>
     <div><strong>Transport:</strong> ${escapeHtml(config.transport || 'unknown')}</div>
     <div><strong>Active live sessions:</strong> ${activeSessions}</div>
@@ -1787,13 +1798,15 @@ async function saveGeminiSettingsOnly() {
   const model = document.getElementById('gemini-live-model')?.value?.trim() || 'gemini-3.1-flash-live-preview';
   const responseModalities = (document.getElementById('gemini-response-modalities')?.value || 'AUDIO').split(',').map((item) => item.trim()).filter(Boolean);
   const thinkingLevel = document.getElementById('gemini-thinking-level')?.value?.trim() || 'minimal';
+  const speechOutputMode = document.getElementById('gemini-speech-output-mode')?.value?.trim() || 'gemini';
+  const fishVoiceId = document.getElementById('gemini-fish-voice-id')?.value?.trim() || '';
   const voiceName = document.getElementById('gemini-live-voice')?.value?.trim() || 'Sulafat';
   setFairyTestStatus('Saving Fairy/Gemini settings…');
   try {
     const data = await fetchJson(`${BASE}/api/settings/gemini`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey, personaName, operatorName, personalityPrompt, memoryEnabled, memoryNotes, model, responseModalities, thinkingLevel, voiceName }),
+      body: JSON.stringify({ apiKey, personaName, operatorName, personalityPrompt, memoryEnabled, memoryNotes, model, responseModalities, thinkingLevel, speechOutputMode, fishVoiceId, voiceName }),
     });
     populateGeminiSettingsForm(data.settings || {});
     await fairyLive.refreshConfig?.();
@@ -2193,6 +2206,8 @@ async function saveSettings() {
   const geminiModel = document.getElementById('gemini-live-model')?.value?.trim() || 'gemini-3.1-flash-live-preview';
   const geminiResponseModalities = (document.getElementById('gemini-response-modalities')?.value || 'AUDIO').split(',').map((item) => item.trim()).filter(Boolean);
   const geminiThinkingLevel = document.getElementById('gemini-thinking-level')?.value?.trim() || 'minimal';
+  const geminiSpeechOutputMode = document.getElementById('gemini-speech-output-mode')?.value?.trim() || 'gemini';
+  const geminiFishVoiceId = document.getElementById('gemini-fish-voice-id')?.value?.trim() || '';
   const geminiVoiceName = document.getElementById('gemini-live-voice')?.value?.trim() || 'Sulafat';
   const fishPlaybackMode = document.getElementById('fish-playback-mode')?.value?.trim() || 'auto';
   const fishAutoStreamMinChars = Number(document.getElementById('fish-auto-stream-min-chars')?.value || 260);
@@ -2250,7 +2265,7 @@ async function saveSettings() {
     await fetchJson(`${BASE}/api/settings/gemini`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey: geminiApiKey, personaName: geminiPersonaName, operatorName: geminiOperatorName, personalityPrompt: geminiPersonalityPrompt, memoryEnabled: geminiMemoryEnabled, memoryNotes: geminiMemoryNotes, model: geminiModel, responseModalities: geminiResponseModalities, thinkingLevel: geminiThinkingLevel, voiceName: geminiVoiceName }),
+      body: JSON.stringify({ apiKey: geminiApiKey, personaName: geminiPersonaName, operatorName: geminiOperatorName, personalityPrompt: geminiPersonalityPrompt, memoryEnabled: geminiMemoryEnabled, memoryNotes: geminiMemoryNotes, model: geminiModel, responseModalities: geminiResponseModalities, thinkingLevel: geminiThinkingLevel, speechOutputMode: geminiSpeechOutputMode, fishVoiceId: geminiFishVoiceId, voiceName: geminiVoiceName }),
     });
 
     await fetchJson(`${BASE}/api/settings/companions`, {

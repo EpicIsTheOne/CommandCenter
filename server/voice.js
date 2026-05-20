@@ -276,6 +276,60 @@ async function speakWithFishAudio(text, settings, overrideVoiceId = '', agentId 
   };
 }
 
+export async function streamFishAudioText(text, settings = {}, outRes, { voiceId = '', agentId = 'main' } = {}) {
+  const resolvedVoiceId = String(voiceId || resolveFishVoiceId(settings, agentId) || '').trim();
+  if (!resolvedVoiceId) throw new Error('Fish Audio voice ID is required.');
+
+  const base = getFishApiBase(settings);
+  const cookie = getFishSessionCookie(settings);
+  const playbackMode = resolveFishPlaybackMode(text, settings);
+  const headers = {
+    'Content-Type': 'application/json',
+    Accept: 'audio/mpeg,audio/*,*/*',
+  };
+  if (cookie) headers.Cookie = cookie;
+
+  const upstream = await fetch(`${base}/api/tts/audio`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      text,
+      voiceId: resolvedVoiceId,
+      format: settings.fishFormat || 'mp3',
+      includeAsteriskNarration: settings.fishIncludeAsteriskNarration === true,
+      stream: playbackMode === 'stream',
+      latency: playbackMode === 'stream' ? 'low' : 'normal',
+    }),
+  });
+
+  if (!upstream.ok) {
+    const errText = await upstream.text().catch(() => '');
+    throw new Error(`Fish Audio TTS stream failed (${upstream.status}): ${errText || 'request failed'}`);
+  }
+
+  outRes.status(200);
+  outRes.set('Content-Type', upstream.headers.get('content-type') || 'audio/mpeg');
+  outRes.set('Cache-Control', 'no-store');
+  outRes.set('X-TTS-Mode', upstream.headers.get('x-tts-mode') || playbackMode);
+  const taggedText = upstream.headers.get('x-tts-tagged-text');
+  if (taggedText) outRes.set('X-TTS-Tagged-Text', taggedText);
+
+  if (!upstream.body) {
+    const arrayBuffer = await upstream.arrayBuffer();
+    outRes.end(Buffer.from(arrayBuffer));
+    return true;
+  }
+
+  for await (const chunk of upstream.body) {
+    if (!chunk?.length) continue;
+    if (!outRes.write(Buffer.from(chunk))) {
+      await new Promise((resolve) => outRes.once('drain', resolve));
+    }
+  }
+  outRes.end();
+  return true;
+}
+
 
 export async function previewFishAudioVoice({ text = '', voiceId = '', settings = null } = {}) {
   const nextSettings = settings || await loadVoiceSettings();

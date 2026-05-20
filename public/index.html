@@ -109,6 +109,12 @@
         <span id="fairy-live-camera-status" class="fairy-live-audio-status">Camera off.</span>
       </div>
       <div id="fairy-live-diagnostics" class="fairy-live-diagnostics"></div>
+      <div class="fairy-live-debug-wrap">
+        <button id="fairy-live-debug-toggle" class="fairy-live-debug-toggle" type="button" aria-expanded="false">DEBUG</button>
+        <div id="fairy-live-debug-panel" class="fairy-live-debug-panel hidden">
+          <div id="fairy-live-debug-content" class="fairy-live-debug-content"></div>
+        </div>
+      </div>
       <div class="fairy-live-text-row">
         <input id="fairy-live-text" type="text" autocomplete="off" placeholder="Test a Fairy turn…">
         <button id="fairy-live-send" class="secondary-button" type="button">SEND</button>
@@ -540,6 +546,21 @@
             </div>
 
             <div class="setting-group nested-setting-group">
+              <label for="gemini-speech-output-mode">Speech output mode</label>
+              <select id="gemini-speech-output-mode">
+                <option value="gemini">Gemini native voice</option>
+                <option value="fish">Fish Audio from Gemini text</option>
+              </select>
+              <div class="setting-hint">Default stays Gemini native voice. Switch to Fish if you want Fairy to speak with a Fish voice using Gemini's text output.</div>
+            </div>
+
+            <div class="setting-group nested-setting-group">
+              <label for="gemini-fish-voice-id">Fairy Fish voice ID</label>
+              <input id="gemini-fish-voice-id" type="text" autocomplete="off" placeholder="Paste a Fish voice/reference ID">
+              <div class="setting-hint">Used only when speech output mode is set to Fish. It reuses the Fish Audio base/session settings from the main Voice settings section.</div>
+            </div>
+
+            <div class="setting-group nested-setting-group">
               <label for="gemini-live-voice">Live voice</label>
               <select id="gemini-live-voice">
                 <option value="Zephyr">Zephyr</option>
@@ -957,6 +978,6 @@
 
   <script src="vendor/picovoice/web-voice-processor.js"></script>
   <script src="vendor/picovoice/porcupine-web.js"></script>
-  <script type="module" src="js/app.js?v=20260517-fairy-search1"></script>
+  <script type="module" src="js/app.js?v=20260520-fairy-fishspeed1"></script>
 </body>
 </html>
