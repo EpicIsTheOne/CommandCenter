@@ -10,7 +10,7 @@ import * as intro from './intro.js?v=20260514b';
 import * as appearance from './appearance.js?v=20260514b';
 import * as branding from './branding.js?v=20260514b';
 import * as layoutSettings from './layout-settings.js?v=20260514b';
-import * as fairyLive from './fairy-live.js?v=20260520-fairy-fishspeed1';
+import * as fairyLive from './fairy-live.js?v=20260520-fairy-recording4';
 
 const APP_BUILD = '20260518-fairy-chatcall1';
 console.log('[CommandCenter] app build:', APP_BUILD);
@@ -83,6 +83,59 @@ function setSettingsStatus(text, isError = false) {
   if (!el) return;
   el.textContent = text || '';
   el.style.color = isError ? 'var(--red)' : 'var(--text-dim)';
+}
+
+function formatBytes(bytes = 0) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let size = value;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size >= 10 || index === 0 ? Math.round(size) : size.toFixed(1)} ${units[index]}`;
+}
+
+function formatDurationMs(ms = 0) {
+  const total = Math.max(0, Math.round(Number(ms || 0) / 1000));
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return mins ? `${mins}m ${String(secs).padStart(2, '0')}s` : `${secs}s`;
+}
+
+async function refreshFairyRecordings() {
+  const status = document.getElementById('fairy-recordings-status');
+  const list = document.getElementById('fairy-recordings-list');
+  if (status) status.textContent = 'Loading Fairy recordings…';
+  try {
+    const data = await fetchJson(`${BASE}/api/fairy/recordings`);
+    const items = Array.isArray(data.recordings) ? data.recordings : [];
+    if (status) status.textContent = items.length ? `${items.length} saved recording${items.length === 1 ? '' : 's'}.` : 'No Fairy recordings saved yet.';
+    if (list) {
+      if (!items.length) {
+        list.innerHTML = 'No Fairy recordings saved yet.';
+      } else {
+        list.innerHTML = items.map((item) => {
+          const started = item.startedAt ? new Date(item.startedAt).toLocaleString() : 'unknown start';
+          const notes = item.notes ? `<div class="setting-hint">${escapeHtml(item.notes)}</div>` : '';
+          const flags = [item.includeMic ? 'mic' : '', item.includeFairy ? 'fairy voice' : ''].filter(Boolean).join(' + ');
+          return `<div class="memory-row" style="margin-bottom:10px; padding:10px 12px; border:1px solid rgba(255,255,255,0.08); border-radius:12px;">
+            <div style="display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; align-items:center;">
+              <strong>${escapeHtml(item.filename || item.id || 'Fairy recording')}</strong>
+              <a class="secondary-button" href="${escapeHtml(item.downloadUrl || '#')}" target="_blank" rel="noopener noreferrer">DOWNLOAD</a>
+            </div>
+            <div class="setting-hint">${escapeHtml(started)} · ${escapeHtml(formatDurationMs(item.durationMs || 0))} · ${escapeHtml(formatBytes(item.bytes || 0))}${flags ? ` · ${escapeHtml(flags)}` : ''}</div>
+            ${notes}
+          </div>`;
+        }).join('');
+      }
+    }
+  } catch (err) {
+    if (status) status.textContent = err.message || 'Could not load Fairy recordings.';
+    if (list) list.textContent = err.message || 'Could not load Fairy recordings.';
+  }
 }
 
 function isStandaloneDisplay() {
@@ -2092,6 +2145,7 @@ async function openSettings() {
     populateGeminiSettingsForm(geminiData.settings || {});
     await refreshFairyDiagnostics();
     await refreshFairyMemoryList();
+    await refreshFairyRecordings();
     renderWorkspaceRoomEditor();
     setSetupTestResult('No setup test run yet.', [], 'ok');
     setSettingsStatus('Settings loaded.');
@@ -2469,6 +2523,7 @@ async function main() {
   document.getElementById('global-settings-btn')?.addEventListener('click', (e) => { e.stopPropagation(); openSettings(); });
   document.getElementById('close-settings-btn')?.addEventListener('click', closeSettings);
   document.querySelector('[data-close-settings="true"]')?.addEventListener('click', closeSettings);
+  document.getElementById('refresh-fairy-recordings-btn')?.addEventListener('click', (e) => { e.stopPropagation(); refreshFairyRecordings(); });
   document.getElementById('save-settings-btn')?.addEventListener('click', saveSettings);
   document.getElementById('pwa-install-btn')?.addEventListener('click', installPwaFromSettings);
   document.getElementById('change-password-btn')?.addEventListener('click', openPasswordModal);

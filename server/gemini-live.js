@@ -172,6 +172,33 @@ const FAIRY_LIVE_TOOLS = [{
       },
       required: ['query'],
     },
+  }, {
+    name: 'start_screen_recording',
+    description: 'Start recording the currently shared Fairy screen session when Epic asks you to record the screen. Use only when screen sharing is active or Epic clearly wants recording to begin now.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        notes: { type: 'STRING', description: 'Optional short note about what is being recorded.' },
+      },
+    },
+  }, {
+    name: 'stop_screen_recording',
+    description: 'Stop the active Fairy screen recording and save the captured video when Epic asks to stop recording.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        reason: { type: 'STRING', description: 'Optional short reason for stopping the recording.' },
+      },
+    },
+  }, {
+    name: 'end_live_call',
+    description: 'End the current Fairy live call when the conversation is clearly wrapping up or Epic explicitly asks to hang up. Use this sparingly and politely.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        reason: { type: 'STRING', description: 'Optional short reason for ending the call.' },
+      },
+    },
   }],
 }];
 

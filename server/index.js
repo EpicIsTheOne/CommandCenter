@@ -29,6 +29,7 @@ import { startSessionMonitor } from './session-monitor.js';
 import { GEMINI_LIVE_VOICE_OPTIONS, loadGeminiRuntimeConfig, loadGeminiSettings, saveGeminiSettings } from './gemini-config.js';
 import { createLiveTask, getLiveTask, listLiveTasks, looksComplexRequest, runLiveTask } from './live-tasks.js';
 import { createCallSession, endCallSession, getCallSession, listCallSessions, updateCallSession } from './call-session-store.js';
+import { cleanupFairyRecordingIndex, getFairyRecording, getFairyRecordingPath, listFairyRecordings, saveFairyRecording } from './fairy-recordings.js';
 import { GeminiLiveSession, FAIRY_LIVE_VOICE_NAME, buildFairyLiveSystemPrompt } from './gemini-live.js';
 import { addFairyMemoryEntry, buildFairyMemoryContext, loadFairyMemory, removeFairyMemoryEntry, selectRelevantFairyMemory, updateFairyMemoryEntry } from './fairy-memory.js';
 import { requireApiAuth } from './api-auth.js';
@@ -463,6 +464,7 @@ await ensureBrandingStorage();
 
 const liveGeminiSessions = new Map();
 const liveGeminiWatchdogs = new Map();
+const liveScreenChangePrompts = new Map();
 const announcedLiveTaskResults = new Set();
 const agentActivity = new Map();
 
@@ -959,9 +961,14 @@ function summarizeStableVisualDelta(previousMeta = {}, nextMeta = {}, session = 
 function maybePromptScreenChange(sessionId, payload = {}) {
   const session = getCallSession(sessionId);
   if (!session || !session.active || !session.screenShareActive) return;
-  if (!['ready', 'listening'].includes(String(session.state || ''))) return;
   const live = liveGeminiSessions.get(sessionId);
   if (!live) return;
+  const now = Date.now();
+  const existingPrompt = liveScreenChangePrompts.get(sessionId) || {};
+  if (existingPrompt.lastAt && now - existingPrompt.lastAt < 3500) {
+    liveScreenChangePrompts.set(sessionId, { ...existingPrompt, pendingPayload: payload, lastSkippedAt: now });
+    return;
+  }
   const avgDiff = Number(payload.avgDiff || 0);
   const changedRatio = Number(payload.changedRatio || 0);
   const frameMeta = sanitizeFrameMeta(payload.frameMeta || session.lastScreenFrameMeta || {});
@@ -971,11 +978,13 @@ function maybePromptScreenChange(sessionId, payload = {}) {
   const prompt = [
     'SYSTEM EVENT FOR LIVE CALL:',
     'The shared screen changed noticeably after a stabilized post-change frame was uploaded.',
+    `Current call state: ${String(session.state || 'unknown')}`,
     `Change strength: avgDiff=${avgDiff || 0}, changedRatio=${changedRatio || 0}`,
     metaLine ? `Newest frame metadata: ${metaLine}` : '',
     currentVisual?.summary ? `Current visual memory: ${currentVisual.summary}` : '',
     previousVisual?.summary ? `Recent prior visual summary: ${previousVisual.summary}` : '',
-    'Use the newest stable screen frame as visual context. Prefer the newest stable state over older assumptions. Do not identify a website, app, tab, or route unless visible text/UI clearly supports it. If the frame looks blank, partially loaded, or transitional, say it appears to still be loading instead of guessing. Do not interrupt Epic just to narrate pixels; speak only for meaningful state changes such as a new error, modal, redirect, enabled action, completed load, or blocked step.',
+    'Use the newest stable screen frame as visual context. Prefer the newest stable state over older assumptions. Do not identify a website, app, tab, or route unless visible text/UI clearly supports it. If the frame looks blank, partially loaded, or transitional, say it appears to still be loading instead of guessing.',
+    'If this is a meaningful user-visible state change, briefly comment on it now without waiting for Epic to ask. Keep it short. If it is merely animation/noise or you genuinely cannot tell what changed, stay quiet rather than guessing.',
   ].filter(Boolean).join('\n');
   updateCallSession(sessionId, {
     lastGeminiHint: prompt,
@@ -988,13 +997,19 @@ function maybePromptScreenChange(sessionId, payload = {}) {
       lastChangeSummary: `Major screen change detected (${avgDiff || 0}/${changedRatio || 0}).`,
     },
   });
-  broadcast({ type: 'call:debug', data: { sessionId, message: `Prompting Fairy with meaningful screen change (${avgDiff}/${changedRatio}).` } });
+  broadcast({ type: 'call:debug', data: { sessionId, message: `Prompting Fairy with meaningful screen change (${avgDiff}/${changedRatio}) while state=${session.state || 'unknown'}.` } });
   broadcastCallDebugState(sessionId);
   try {
+    liveScreenChangePrompts.set(sessionId, { lastAt: Date.now(), pendingPayload: null });
     live.sendTextTurn(prompt);
   } catch (err) {
     broadcast({ type: 'call:error', data: { sessionId, message: err.message || 'Could not send screen-change hint to Gemini' } });
   }
+}
+
+function broadcastRecordingCommand(sessionId, action, extra = {}) {
+  broadcast({ type: 'call:recording.command', data: { sessionId, action, ...extra } });
+  broadcast({ type: 'call:debug', data: { sessionId, message: `Recording command sent: ${action}` } });
 }
 
 function maybeAnnounceLiveTaskResult(msg) {
@@ -2767,6 +2782,56 @@ app.post(`${basePath}/api/call/:id/fairy-speak`, async (req, res) => {
   }
 });
 
+app.get(`${basePath}/api/fairy/recordings`, async (req, res) => {
+  try {
+    const recordings = await cleanupFairyRecordingIndex();
+    res.json({
+      ok: true,
+      recordings: recordings.map((item) => ({
+        ...item,
+        downloadUrl: `${basePath}/api/fairy/recordings/${encodeURIComponent(item.id)}/download`,
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not list Fairy recordings' });
+  }
+});
+
+app.get(`${basePath}/api/fairy/recordings/:id/download`, async (req, res) => {
+  try {
+    const record = await getFairyRecording(String(req.params.id || ''));
+    if (!record) return res.status(404).json({ ok: false, error: 'Recording not found' });
+    res.download(getFairyRecordingPath(record), record.filename || 'fairy-recording.webm');
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not download Fairy recording' });
+  }
+});
+
+app.post(`${basePath}/api/call/:id/recording`, upload.single('video'), async (req, res) => {
+  try {
+    const sessionId = String(req.params.id || '').trim();
+    if (!sessionId) return res.status(400).json({ ok: false, error: 'Missing session id' });
+    if (!req.file?.buffer?.length) return res.status(400).json({ ok: false, error: 'Missing recording video' });
+    const record = await saveFairyRecording({
+      buffer: req.file.buffer,
+      mimeType: String(req.body?.mimeType || req.file.mimetype || 'video/webm').trim(),
+      sessionId,
+      startedAt: String(req.body?.startedAt || '').trim(),
+      endedAt: String(req.body?.endedAt || '').trim(),
+      durationMs: Number(req.body?.durationMs || 0),
+      includeMic: String(req.body?.includeMic || 'false') === 'true',
+      includeFairy: String(req.body?.includeFairy || 'false') === 'true',
+      notes: String(req.body?.notes || '').trim(),
+      source: 'fairy-live',
+    });
+    updateCallSession(sessionId, { recordingActive: false, lastRecordingId: record.id });
+    broadcast({ type: 'call:recording.saved', data: { sessionId, record: { ...record, downloadUrl: `${basePath}/api/fairy/recordings/${encodeURIComponent(record.id)}/download` } } });
+    res.json({ ok: true, record: { ...record, downloadUrl: `${basePath}/api/fairy/recordings/${encodeURIComponent(record.id)}/download` } });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not save Fairy recording' });
+  }
+});
+
 app.post(`${basePath}/api/call/start`, async (req, res) => {
   try {
     const runtime = await loadGeminiRuntimeConfig();
@@ -3053,6 +3118,45 @@ Tell Epic briefly that you put the image on screen and that he can copy the link
                 })();
                 continue;
               }
+              if (name === 'start_screen_recording') {
+                const liveSession = getCallSession(session.id);
+                if (!liveSession?.screenShareActive) {
+                  functionResponses.push({ name, id, response: { ok: false, error: 'Screen sharing is not active, so there is nothing to record yet.' } });
+                  continue;
+                }
+                if (liveSession?.recordingActive) {
+                  functionResponses.push({ name, id, response: { ok: true, alreadyRecording: true, message: 'Screen recording is already running.' } });
+                  continue;
+                }
+                const notes = String(args.notes || '').trim().slice(0, 240);
+                updateCallSession(session.id, { recordingActive: true, recordingStartedAt: new Date().toISOString() });
+                broadcastRecordingCommand(session.id, 'start', { notes });
+                functionResponses.push({ name, id, response: { ok: true, started: true, message: 'Recording started. Tell Epic you are capturing it now.' } });
+                continue;
+              }
+              if (name === 'stop_screen_recording') {
+                const liveSession = getCallSession(session.id);
+                if (!liveSession?.recordingActive) {
+                  functionResponses.push({ name, id, response: { ok: false, error: 'No Fairy screen recording is currently active.' } });
+                  continue;
+                }
+                const reason = String(args.reason || '').trim().slice(0, 200);
+                broadcastRecordingCommand(session.id, 'stop', { reason, requestedBy: 'fairy-tool' });
+                functionResponses.push({ name, id, response: { ok: true, stopping: true, message: 'Stopping and saving the recording now.' } });
+                continue;
+              }
+              if (name === 'end_live_call') {
+                broadcast({ type: 'call:end.requested', data: { sessionId: session.id, reason: String(args.reason || '').trim().slice(0, 200), source: 'fairy-tool' } });
+                functionResponses.push({ name, id, response: { ok: true, ending: true, message: 'Ending the live call now.' } });
+                setTimeout(() => {
+                  const currentLive = liveGeminiSessions.get(session.id);
+                  if (currentLive) {
+                    try { currentLive.sendTextTurn('SYSTEM EVENT FOR LIVE CALL:\nWrap up in one short sentence, then end the call.'); } catch {}
+                  }
+                  broadcastRecordingCommand(session.id, 'prepare-end', { source: 'fairy-tool' });
+                }, 50);
+                continue;
+              }
               if (name !== 'handoff_to_openclaw') {
                 functionResponses.push({ name, id, response: { error: `Unsupported tool: ${name}` } });
                 continue;
@@ -3151,6 +3255,7 @@ Tell Epic briefly that you put the image on screen and that he can copy the link
             maybeQueueFairyMemoryUpdate(ended).catch(() => {});
           }
           liveGeminiSessions.delete(session.id);
+          liveScreenChangePrompts.delete(session.id);
         }
       },
       onError: (error) => {
@@ -3178,6 +3283,7 @@ app.post(`${basePath}/api/call/:id/end`, async (req, res) => {
   if (live) {
     live.close();
     liveGeminiSessions.delete(sessionId);
+    liveScreenChangePrompts.delete(sessionId);
   }
   const session = endCallSession(sessionId, 'ended');
   if (!session) return res.status(404).json({ ok: false, error: 'Call session not found' });
@@ -3190,7 +3296,11 @@ app.post(`${basePath}/api/call/:id/audio`, async (req, res) => {
   try {
     const sessionId = String(req.params.id || '');
     const live = liveGeminiSessions.get(sessionId);
-    if (!live) return res.status(404).json({ ok: false, error: 'Live Gemini session not found' });
+    if (!live) {
+      const session = getCallSession(sessionId);
+      if (session?.state === 'ended') return res.json({ ok: true, ignored: true, ended: true });
+      return res.status(404).json({ ok: false, error: 'Live Gemini session not found' });
+    }
     const pcm16Base64 = String(req.body?.pcm16Base64 || '').trim();
     const mimeType = String(req.body?.mimeType || 'audio/pcm;rate=16000').trim();
     if (!pcm16Base64) return res.status(400).json({ ok: false, error: 'Missing pcm16Base64' });
@@ -3418,6 +3528,25 @@ ${text}`
         lastRoutingDecision: `interrupted:${reason}`,
       });
       broadcast({ type: 'call:assistant.interrupted', data: { sessionId, reason, state: updated?.state || 'listening' } });
+      broadcastCallDebugState(sessionId);
+      return res.json({ ok: true, session: updated });
+    }
+
+    if (eventType === 'recording.started') {
+      const updated = updateCallSession(sessionId, {
+        recordingActive: true,
+        recordingStartedAt: String(req.body?.startedAt || new Date().toISOString()).trim(),
+      });
+      broadcast({ type: 'call:recording.started', data: { sessionId, session: updated } });
+      broadcastCallDebugState(sessionId);
+      return res.json({ ok: true, session: updated });
+    }
+
+    if (eventType === 'recording.stopped') {
+      const updated = updateCallSession(sessionId, {
+        recordingActive: false,
+      });
+      broadcast({ type: 'call:recording.stopped', data: { sessionId, session: updated, reason: String(req.body?.reason || '').trim() } });
       broadcastCallDebugState(sessionId);
       return res.json({ ok: true, session: updated });
     }

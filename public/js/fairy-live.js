@@ -30,6 +30,7 @@ const state = {
   vad: null,
   pcmQueue: [],
   audioPostChain: Promise.resolve(),
+  audioUploadController: null,
   playbackContext: null,
   playbackNextTime: 0,
   playbackSources: new Set(),
@@ -85,6 +86,23 @@ const state = {
   visualMemory: null,
   screenUploadFailures: 0,
   cameraUploadFailures: 0,
+  recordingActive: false,
+  recordingSaving: false,
+  recordingNotes: '',
+  recordingStartedAt: '',
+  recordingEndedAt: '',
+  recordingRecorder: null,
+  recordingChunks: [],
+  recordingStream: null,
+  recordingVideoTrack: null,
+  recordingMixContext: null,
+  recordingMixDestination: null,
+  recordingPlaybackDestination: null,
+  recordingMicSource: null,
+  recordingPlaybackSource: null,
+  endingAfterRecording: false,
+  callEnding: false,
+  lastEndedSessionId: '',
 };
 
 const els = {};
@@ -572,7 +590,16 @@ function commitPendingAssistantText(reason = 'done') {
   return text;
 }
 
-function scheduleFishSpeak(text, reason = 'done', delayMs = 280) {
+function fishSpeakDelayForText(text = '', done = false) {
+  if (done) return 70;
+  const value = String(text || '').trim();
+  if (!value) return 650;
+  if (/[.!?…]["')\]]?$/.test(value)) return 420;
+  if (value.length >= 180) return 520;
+  return 700;
+}
+
+function scheduleFishSpeak(text, reason = 'done', delayMs = 650) {
   const message = String(text || '').trim();
   emitLog(`scheduleFishSpeak called (${reason}) len=${message.length} mode=${state.speechOutputMode} delay=${delayMs}`, 'info');
   if (!message || state.speechOutputMode !== 'fish') return;
@@ -582,6 +609,10 @@ function scheduleFishSpeak(text, reason = 'done', delayMs = 280) {
     const latest = String(state.pendingAssistantText || message).trim();
     const committed = commitPendingAssistantText(`fish-${reason}`) || latest;
     emitLog(`scheduleFishSpeak firing (${reason}) committed=${committed.length}`, 'info');
+    if (state.fishPlaybackAudio && !state.fishPlaybackAudio.ended && !state.fishPlaybackAudio.paused) {
+      emitLog('Skipping late Fish update because playback is already active', 'info');
+      return;
+    }
     playFairyFishResponse(committed).catch((err) => {
       markError(err.message || `${personaName()} Fish voice playback failed`);
       setStatus('error', err.message || `${personaName()} Fish voice playback failed`);
@@ -815,12 +846,23 @@ function postAudioChunk(samples) {
   const pcm16Base64 = int16ToBase64(samples);
   state.audioPostChain = state.audioPostChain
     .catch(() => {})
-    .then(() => fetchJson(`${BASE}/api/call/${encodeURIComponent(sessionId)}/audio`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pcm16Base64, mimeType: `audio/pcm;rate=${INPUT_SAMPLE_RATE}` }),
-    }))
+    .then(async () => {
+      if (state.sessionId !== sessionId || !state.micActive) return null;
+      const controller = new AbortController();
+      state.audioUploadController = controller;
+      try {
+        return await fetchJson(`${BASE}/api/call/${encodeURIComponent(sessionId)}/audio`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pcm16Base64, mimeType: `audio/pcm;rate=${INPUT_SAMPLE_RATE}` }),
+          signal: controller.signal,
+        });
+      } finally {
+        if (state.audioUploadController === controller) state.audioUploadController = null;
+      }
+    })
     .catch((err) => {
+      if (err?.name === 'AbortError') return;
       if (state.sessionId === sessionId) {
         setStatus('error', err.message || 'Mic audio upload failed');
         stopMic().catch(() => {});
@@ -945,6 +987,7 @@ async function ensurePlaybackContext() {
   if (!state.playbackContext) {
     state.playbackContext = new (window.AudioContext || window.webkitAudioContext)();
     state.playbackNextTime = state.playbackContext.currentTime;
+    state.recordingPlaybackDestination = state.playbackContext.createMediaStreamDestination();
   }
   if (state.playbackContext.state === 'suspended') await state.playbackContext.resume();
   return state.playbackContext;
@@ -966,6 +1009,7 @@ async function playAudioChunk(pcm16Base64, mimeType = 'audio/pcm;rate=24000', do
   const source = ctx.createBufferSource();
   source.buffer = buffer;
   source.connect(ctx.destination);
+  if (state.recordingPlaybackDestination) source.connect(state.recordingPlaybackDestination);
   const startAt = Math.max(ctx.currentTime + 0.02, state.playbackNextTime || ctx.currentTime);
   state.playbackNextTime = startAt + buffer.duration;
   const generation = state.playbackGeneration;
@@ -1086,6 +1130,13 @@ async function playFairyFishResponse(text) {
     const audioUrl = URL.createObjectURL(audioBlob);
     const audio = new Audio(audioUrl);
     audio.volume = 1.0;
+    const ctx = await ensurePlaybackContext();
+    let mediaSource = null;
+    try {
+      mediaSource = ctx.createMediaElementSource(audio);
+      mediaSource.connect(ctx.destination);
+      if (state.recordingPlaybackDestination) mediaSource.connect(state.recordingPlaybackDestination);
+    } catch (_) {}
     state.fishPlaybackAudio = audio;
     state.fishPlaybackUrl = audioUrl;
     state.playbackActive = true;
@@ -1185,9 +1236,14 @@ async function startMic() {
   }
 }
 
-async function stopMic() {
-  flushPcmQueue();
+async function stopMic({ flush = true } = {}) {
+  if (flush) flushPcmQueue();
+  else state.pcmQueue = [];
   state.micActive = false;
+  if (!flush) {
+    try { state.audioUploadController?.abort?.(); } catch (_) {}
+    state.audioUploadController = null;
+  }
   state.micMuted = false;
   try { state.micProcessor?.disconnect(); } catch (_) {}
   try { state.micSource?.disconnect(); } catch (_) {}
@@ -1446,6 +1502,120 @@ function captureVisualFrame(video, canvas, { quality = 0.68 } = {}) {
   return dataUrl.split(',')[1] || '';
 }
 
+function preferredRecordingMimeType() {
+  const candidates = [
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm;codecs=h264,opus',
+    'video/webm',
+  ];
+  return candidates.find((value) => window.MediaRecorder?.isTypeSupported?.(value)) || 'video/webm';
+}
+
+async function buildRecordingStream() {
+  if (!state.screenStream?.getVideoTracks?.()?.length) throw new Error('Screen sharing must be active before recording can start.');
+  await ensurePlaybackContext();
+  const mixCtx = new (window.AudioContext || window.webkitAudioContext)();
+  const mixDest = mixCtx.createMediaStreamDestination();
+  const videoTrack = state.screenStream.getVideoTracks()[0];
+  if (!videoTrack) throw new Error('No screen video track available for recording.');
+  if (state.micStream?.getAudioTracks?.()?.length) {
+    const micSource = mixCtx.createMediaStreamSource(state.micStream);
+    micSource.connect(mixDest);
+    state.recordingMicSource = micSource;
+  }
+  if (state.recordingPlaybackDestination?.stream?.getAudioTracks?.()?.length) {
+    const playbackSource = mixCtx.createMediaStreamSource(state.recordingPlaybackDestination.stream);
+    playbackSource.connect(mixDest);
+    state.recordingPlaybackSource = playbackSource;
+  }
+  const out = new MediaStream([videoTrack.clone(), ...mixDest.stream.getAudioTracks()]);
+  state.recordingMixContext = mixCtx;
+  state.recordingMixDestination = mixDest;
+  state.recordingStream = out;
+  state.recordingVideoTrack = videoTrack;
+  return out;
+}
+
+async function uploadSavedRecording(blob, { reason = 'manual-stop' } = {}) {
+  if (!state.sessionId || !blob) return null;
+  const form = new FormData();
+  form.append('video', blob, `fairy-recording-${Date.now()}.webm`);
+  form.append('mimeType', blob.type || 'video/webm');
+  form.append('startedAt', state.recordingStartedAt || '');
+  form.append('endedAt', state.recordingEndedAt || new Date().toISOString());
+  form.append('durationMs', String(Math.max(0, Date.now() - new Date(state.recordingStartedAt || Date.now()).getTime())));
+  form.append('includeMic', String(!!state.micStream?.getAudioTracks?.()?.length));
+  form.append('includeFairy', String(true));
+  form.append('notes', state.recordingNotes || reason || '');
+  const res = await fetch(`${BASE}/api/call/${encodeURIComponent(state.sessionId)}/recording`, { method: 'POST', body: form });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Could not save Fairy recording');
+  return data.record;
+}
+
+async function stopScreenRecording({ reason = 'manual-stop', keepStateForEnd = false } = {}) {
+  if (!state.recordingActive || !state.recordingRecorder) return null;
+  state.recordingSaving = true;
+  state.recordingEndedAt = new Date().toISOString();
+  const recorder = state.recordingRecorder;
+  const stream = state.recordingStream;
+  const mixCtx = state.recordingMixContext;
+  const chunksRef = state.recordingChunks;
+  await fetchJson(`${BASE}/api/call/${encodeURIComponent(state.sessionId)}/event`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'recording.stopped', reason }),
+  }).catch(() => {});
+  const blob = await new Promise((resolve) => {
+    recorder.onstop = () => resolve(new Blob(chunksRef, { type: recorder.mimeType || 'video/webm' }));
+    try { if (recorder.state !== 'inactive') recorder.stop(); else resolve(new Blob(chunksRef, { type: recorder.mimeType || 'video/webm' })); } catch (_) { resolve(new Blob(chunksRef, { type: recorder.mimeType || 'video/webm' })); }
+  });
+  try { stream?.getTracks?.().forEach((track) => track.stop()); } catch (_) {}
+  try { await mixCtx?.close?.(); } catch (_) {}
+  let saved = null;
+  try {
+    saved = await uploadSavedRecording(blob, { reason });
+    if (saved?.downloadUrl) showOverlay('Fairy recording saved.', 'info', 2800);
+  } finally {
+    if (!keepStateForEnd) state.recordingActive = false;
+    state.recordingSaving = false;
+    state.recordingRecorder = null;
+    state.recordingChunks = [];
+    state.recordingStream = null;
+    state.recordingMixContext = null;
+    state.recordingMixDestination = null;
+    state.recordingMicSource = null;
+    state.recordingPlaybackSource = null;
+  }
+  return saved;
+}
+
+async function startScreenRecording(notes = '') {
+  if (!state.sessionId) throw new Error('Start Fairy Live before recording.');
+  if (!state.screenActive || !state.screenStream) throw new Error('Screen sharing must be active before recording can start.');
+  if (state.recordingActive) return false;
+  const stream = await buildRecordingStream();
+  const chunks = [];
+  const recorder = new MediaRecorder(stream, { mimeType: preferredRecordingMimeType() });
+  recorder.ondataavailable = (event) => {
+    if (event.data?.size) chunks.push(event.data);
+  };
+  recorder.start(1000);
+  state.recordingActive = true;
+  state.recordingNotes = String(notes || '').trim().slice(0, 240);
+  state.recordingStartedAt = new Date().toISOString();
+  state.recordingEndedAt = '';
+  state.recordingRecorder = recorder;
+  state.recordingChunks = chunks;
+  await fetchJson(`${BASE}/api/call/${encodeURIComponent(state.sessionId)}/event`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'recording.started', startedAt: state.recordingStartedAt }),
+  }).catch(() => {});
+  appendTranscript('system', 'Fairy started recording the shared screen.', 'recording');
+  emitLog('Screen recording started', 'info');
+  markEvent('recording started');
+  showOverlay('Fairy is recording this screen.', 'tool', 2600);
+  return true;
+}
+
 async function startScreenShare() {
   if (!state.sessionId) {
     setStatus('idle', 'Start Fairy Live before sharing your screen. One portal at a time.');
@@ -1506,6 +1676,9 @@ async function startScreenShare() {
 }
 
 async function stopScreenShare() {
+  if (state.recordingActive) {
+    try { await stopScreenRecording({ reason: 'screen-share-stopped' }); } catch (_) {}
+  }
   if (state.screenTimer) clearInterval(state.screenTimer);
   state.screenTimer = null;
   clearScreenStabilizers();
@@ -1664,6 +1837,8 @@ async function startCall() {
       body: JSON.stringify({ persona: 'fairy' }),
     });
     state.sessionId = data.session?.id || '';
+    state.callEnding = false;
+    state.lastEndedSessionId = '';
     state.transcriptEntries = [];
     state.pendingAssistantText = '';
     emitDirectChatSync('session-start');
@@ -1684,14 +1859,19 @@ async function startCall() {
 }
 
 async function endCall() {
-  if (!state.sessionId) return;
+  if (!state.sessionId || state.callEnding) return;
   const id = state.sessionId;
+  state.callEnding = true;
   try {
-    await stopMic();
+    if (state.recordingActive) {
+      try { await stopScreenRecording({ reason: 'call-ended' }); } catch (_) {}
+    }
+    await stopMic({ flush: false });
     await stopScreenShare();
     stopPlayback();
     state.interrupting = false;
     await fetchJson(`${BASE}/api/call/${encodeURIComponent(id)}/end`, { method: 'POST' });
+    state.lastEndedSessionId = id;
     state.sessionId = '';
     emitDirectChatSync('session-end');
     setStatus('ended', `${personaName()} Live ended. The desk is quiet again. Suspiciously quiet.`);
@@ -1702,6 +1882,8 @@ async function endCall() {
     markEvent('call ended');
   } catch (err) {
     setStatus('error', err.message || `Failed to end ${personaName()} Live`);
+  } finally {
+    state.callEnding = false;
   }
 }
 
@@ -1858,8 +2040,11 @@ export function handleEvent(msg = {}) {
   }
 
   if (type === 'call:session.ended') {
+    const endedId = String(data.id || data.sessionId || '').trim();
+    if (state.callEnding || (endedId && endedId === state.lastEndedSessionId)) return;
     if (!state.sessionId || data.id === state.sessionId || data.sessionId === state.sessionId) {
-      stopMic().catch(() => {});
+      if (endedId) state.lastEndedSessionId = endedId;
+      stopMic({ flush: false }).catch(() => {});
       stopScreenShare().catch(() => {});
       stopCameraShare().catch(() => {});
       stopPlayback();
@@ -1923,7 +2108,7 @@ export function handleEvent(msg = {}) {
     setStatus(data.state || (data.done ? 'speaking' : 'thinking'), displayText || `${personaName()} responded.`);
     if (data.taskId) state.lastTaskId = data.taskId;
     if (state.speechOutputMode === 'fish' && displayText) {
-      scheduleFishSpeak(displayText, data.done ? 'response-text-done' : 'response-text-stream', data.done ? 70 : 280);
+      scheduleFishSpeak(displayText, data.done ? 'response-text-done' : 'response-text-stream', fishSpeakDelayForText(displayText, !!data.done));
     } else if (data.done) {
       commitPendingAssistantText('done');
     }
@@ -1937,7 +2122,7 @@ export function handleEvent(msg = {}) {
       if (data.done) {
         const fishText = String(state.pendingAssistantText || data.text || '').trim();
         if (fishText) {
-          scheduleFishSpeak(fishText, 'response-audio');
+          scheduleFishSpeak(fishText, 'response-audio', 70);
         } else {
           emitLog('Fish mode reached end-of-audio with no speakable text', 'error');
           markError('Fish mode had no final text to speak');
@@ -1952,6 +2137,42 @@ export function handleEvent(msg = {}) {
       markError(err.message || `${personaName()} audio playback failed`);
       setStatus('error', err.message || `${personaName()} audio playback failed`);
     });
+    return;
+  }
+
+  if (type === 'call:recording.command' && data.sessionId === state.sessionId) {
+    const action = String(data.action || '').trim();
+    if (action === 'start') {
+      startScreenRecording(String(data.notes || '').trim()).catch((err) => {
+        markError(err.message || 'Could not start Fairy recording');
+        setStatus('error', err.message || 'Could not start Fairy recording');
+      });
+      return;
+    }
+    if (action === 'stop') {
+      stopScreenRecording({ reason: String(data.reason || 'tool-stop').trim() || 'tool-stop' }).catch((err) => {
+        markError(err.message || 'Could not stop Fairy recording');
+      });
+      return;
+    }
+    if (action === 'prepare-end') {
+      endCall().catch((err) => {
+        markError(err.message || `Failed to end ${personaName()} Live`);
+      });
+      return;
+    }
+  }
+
+  if (type === 'call:end.requested' && data.sessionId === state.sessionId) {
+    endCall().catch((err) => {
+      markError(err.message || `Failed to end ${personaName()} Live`);
+    });
+    return;
+  }
+
+  if (type === 'call:recording.saved' && data.sessionId === state.sessionId) {
+    showOverlay('Fairy saved the recording.', 'tool', 3200);
+    markEvent('recording saved');
     return;
   }
 

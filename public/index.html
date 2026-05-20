@@ -967,6 +967,22 @@
           </div>
         </details>
 
+        <details id="fairy-recordings-settings-group" class="setting-group collapsible-setting">
+          <summary class="collapsible-setting-summary">
+            <span>Fairy Recordings</span>
+            <span class="setting-hint">View and download saved Fairy screen recordings</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <div class="setting-group nested-setting-group">
+              <div class="setting-row" style="gap:8px; flex-wrap:wrap; align-items:center;">
+                <button id="refresh-fairy-recordings-btn" class="secondary-button" type="button">REFRESH RECORDINGS</button>
+                <span id="fairy-recordings-status" class="setting-hint">No recordings loaded yet.</span>
+              </div>
+              <div id="fairy-recordings-list" class="fairy-diagnostics-settings setting-hint">No Fairy recordings loaded yet.</div>
+            </div>
+          </div>
+        </details>
+
         <div id="settings-status" class="settings-status"></div>
       </div>
       <div class="modal-footer">
@@ -978,6 +994,6 @@
 
   <script src="vendor/picovoice/web-voice-processor.js"></script>
   <script src="vendor/picovoice/porcupine-web.js"></script>
-  <script type="module" src="js/app.js?v=20260520-fairy-fishspeed1"></script>
+  <script type="module" src="js/app.js?v=20260520-fairy-recording4"></script>
 </body>
 </html>
