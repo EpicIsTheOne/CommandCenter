@@ -820,6 +820,112 @@ function summarizeVisualMemory(visualMemory = {}) {
   };
 }
 
+const LIVE_INTENT_OVERRIDES = new Set(['', 'normal', 'just_watch', 'quiet', 'guide_me', 'operator_now', 'narrate']);
+
+function normalizeLiveIntentOverride(value = '') {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (!normalized || normalized === 'normal' || normalized === 'none' || normalized === 'clear' || normalized === 'reset') return '';
+  return LIVE_INTENT_OVERRIDES.has(normalized) ? normalized : '';
+}
+
+function describeLiveIntentOverride(intent = '') {
+  const value = normalizeLiveIntentOverride(intent);
+  if (value === 'just_watch') return 'Just watch: stay especially quiet unless something clearly important happens.';
+  if (value === 'quiet') return 'Quiet: still helpful, but less chatty and more defer-heavy.';
+  if (value === 'guide_me') return 'Guide Me: be more proactive and step-by-step right now.';
+  if (value === 'operator_now') return 'Operator Now: bias harder toward routing and execution-ready summaries.';
+  if (value === 'narrate') return 'Narrate: allow more observational commentary for demos, streams, or active walkthroughs.';
+  return 'Normal: follow the selected call mode with no temporary override.';
+}
+
+function applyLiveIntentOverride(policy = {}, intent = '') {
+  const value = normalizeLiveIntentOverride(intent);
+  const base = { ...policy, liveIntentOverride: value };
+  if (!value) return base;
+  if (value === 'just_watch') {
+    return {
+      ...base,
+      interruptStrictness: 'high',
+      proactivity: 'low',
+      suppressScreenCommentary: false,
+      deferNonCriticalCommentary: true,
+      screenChangeDebounceMs: Math.max(Number(base.screenChangeDebounceMs || 0), 6000),
+      modeDecision: `${base.modeDecision}+intent:just_watch`,
+      modeReason: 'Live override is set to Just Watch, so Fairy should stay especially quiet unless something clearly important happens.',
+    };
+  }
+  if (value === 'quiet') {
+    return {
+      ...base,
+      proactivity: base.proactivity === 'high' ? 'medium' : base.proactivity === 'medium' ? 'medium-low' : 'low',
+      responseStyle: base.responseStyle === 'directive' ? 'brief-directive' : base.responseStyle === 'guided' ? 'guided-brief' : 'quiet-brief',
+      deferNonCriticalCommentary: true,
+      screenChangeDebounceMs: Math.max(Number(base.screenChangeDebounceMs || 0), 4200),
+      modeDecision: `${base.modeDecision}+intent:quiet`,
+      modeReason: 'Live override is set to Quiet, so Fairy should be less chatty and more selective about unsolicited commentary.',
+    };
+  }
+  if (value === 'guide_me') {
+    return {
+      ...base,
+      responseStyle: 'guided',
+      interruptStrictness: 'normal',
+      proactivity: 'high',
+      suppressScreenCommentary: false,
+      deferNonCriticalCommentary: false,
+      screenChangeDebounceMs: Math.min(Number(base.screenChangeDebounceMs || 3500), 2400),
+      modeDecision: `${base.modeDecision}+intent:guide_me`,
+      modeReason: 'Live override is set to Guide Me, so Fairy should be more proactive and step-by-step right now.',
+    };
+  }
+  if (value === 'operator_now') {
+    return {
+      ...base,
+      handoffPolicy: 'aggressive',
+      responseStyle: 'directive',
+      interruptStrictness: 'normal',
+      proactivity: 'high',
+      suppressScreenCommentary: false,
+      deferNonCriticalCommentary: false,
+      screenChangeDebounceMs: Math.min(Number(base.screenChangeDebounceMs || 3500), 2600),
+      modeDecision: `${base.modeDecision}+intent:operator_now`,
+      modeReason: 'Live override is set to Operator Now, so Fairy should bias harder toward routing and execution-ready summaries.',
+    };
+  }
+  if (value === 'narrate') {
+    return {
+      ...base,
+      responseStyle: base.responseStyle === 'short' ? 'short-narrate' : 'narrative-brief',
+      interruptStrictness: 'normal',
+      proactivity: 'high',
+      suppressScreenCommentary: false,
+      deferNonCriticalCommentary: false,
+      screenChangeDebounceMs: Math.min(Number(base.screenChangeDebounceMs || 3500), 2200),
+      modeDecision: `${base.modeDecision}+intent:narrate`,
+      modeReason: 'Live override is set to Narrate, so Fairy can describe meaningful visible changes more freely for the moment.',
+    };
+  }
+  return base;
+}
+
+function buildEffectiveCallPolicy(callMode = 'universal', intensityLevel = 'low', liveIntentOverride = '') {
+  return applyLiveIntentOverride(buildCallModePolicy(callMode, intensityLevel), liveIntentOverride);
+}
+
+function buildLiveIntentSystemEvent(callMode = 'universal', liveIntentOverride = '') {
+  const intent = normalizeLiveIntentOverride(liveIntentOverride);
+  if (!intent) return `SYSTEM EVENT FOR LIVE CALL:
+Live intent override cleared. Return to the normal behavior for the current call mode.`;
+  const mode = normalizeCallMode(callMode || 'universal');
+  return [
+    'SYSTEM EVENT FOR LIVE CALL:',
+    `Active call mode: ${mode}.`,
+    `Active live intent override: ${intent}.`,
+    describeLiveIntentOverride(intent),
+    'Apply this override immediately on top of the current call mode until it is changed or cleared.',
+  ].join('\n');
+}
+
 function buildCallModePolicy(callMode = 'universal', intensityLevel = 'low') {
   const mode = normalizeCallMode(callMode || 'universal');
   if (mode === 'gaming') {
@@ -996,6 +1102,8 @@ function buildCallDebugState(session = {}) {
     lastVisualAssumption: session.lastVisualAssumption || '',
     lastVisualConfidence: session.lastVisualConfidence || '',
     callMode: session.callMode || 'universal',
+    liveIntentOverride: normalizeLiveIntentOverride(session.liveIntentOverride || ''),
+    liveIntentStatus: describeLiveIntentOverride(session.liveIntentOverride || ''),
     modeDecision: session.modeDecision || '',
     modeReason: session.modeReason || '',
     intensityLevel: session.intensityLevel || 'low',
@@ -1139,13 +1247,14 @@ function flushDeferredScreenCommentary(sessionId, reason = 'calm-gap') {
   if (!live) return false;
   const payload = pending.pendingPayload;
   const intensityLevel = session.callMode === 'gaming' ? inferGamingIntensity(payload, session) : (session.intensityLevel || 'low');
-  if (session.callMode === 'gaming' && intensityLevel !== 'low') return false;
+  const modePolicy = buildEffectiveCallPolicy(session.callMode || 'universal', intensityLevel, session.liveIntentOverride || '');
+  if (session.callMode === 'gaming' && !session.liveIntentOverride && intensityLevel !== 'low') return false;
   liveScreenChangePrompts.set(sessionId, { ...pending, pendingPayload: null, lastFlushAt: Date.now(), flushReason: reason });
   updateCallSession(sessionId, {
     intensityLevel,
     speechSuppressedReason: '',
-    modeDecision: session.callMode === 'gaming' ? 'gaming:calm-gap-release' : (session.modeDecision || ''),
-    modeReason: session.callMode === 'gaming' ? 'Queued FYI commentary was released after intensity dropped.' : (session.modeReason || ''),
+    modeDecision: session.callMode === 'gaming' && !session.liveIntentOverride ? 'gaming:calm-gap-release' : (modePolicy.modeDecision || session.modeDecision || ''),
+    modeReason: session.callMode === 'gaming' && !session.liveIntentOverride ? 'Queued FYI commentary was released after intensity dropped.' : (modePolicy.modeReason || session.modeReason || ''),
   });
   broadcast({ type: 'call:debug', data: { sessionId, message: `Releasing deferred screen commentary after ${reason}.` } });
   maybePromptScreenChange(sessionId, { ...payload, forceFlush: true, releaseReason: reason });
@@ -1165,7 +1274,7 @@ function maybePromptScreenChange(sessionId, payload = {}) {
   const changedRatio = Number(payload.changedRatio || 0);
   const frameMeta = sanitizeFrameMeta(payload.frameMeta || session.lastScreenFrameMeta || {});
   const intensityLevel = session.callMode === 'gaming' ? inferGamingIntensity(payload, session) : (session.intensityLevel || 'low');
-  const modePolicy = buildCallModePolicy(session.callMode || 'universal', intensityLevel);
+  const modePolicy = buildEffectiveCallPolicy(session.callMode || 'universal', intensityLevel, session.liveIntentOverride || '');
   const callout = classifyScreenChangeCallout(payload, frameMeta, session);
   const effectivePayload = existingPrompt.pendingPayload && intensityLevel === 'low'
     ? {
@@ -1179,6 +1288,8 @@ function maybePromptScreenChange(sessionId, payload = {}) {
   updateCallSession(sessionId, {
     intensityLevel,
     handoffPolicy: modePolicy.handoffPolicy,
+    proactivity: modePolicy.proactivity,
+    responseStyle: modePolicy.responseStyle,
     modeDecision: modePolicy.modeDecision,
     modeReason: modePolicy.modeReason,
     speechSuppressedReason: modePolicy.suppressScreenCommentary ? 'combat' : modePolicy.deferNonCriticalCommentary && (callout.tier === '3' || ((session.callMode === 'record' || session.callMode === 'observe') && callout.tier !== '1')) ? 'cooldown' : '',
@@ -1210,6 +1321,7 @@ function maybePromptScreenChange(sessionId, payload = {}) {
   const metaLine = describeFrameMeta(frameMeta);
   const currentVisual = session.visualMemory?.current || null;
   const previousVisual = Array.isArray(session.visualMemory?.recent) ? session.visualMemory.recent[0] : null;
+  const overrideLine = session.liveIntentOverride ? `Live intent override: ${session.liveIntentOverride}; ${describeLiveIntentOverride(session.liveIntentOverride)}` : '';
   const modeLine = session.callMode === 'gaming'
     ? `Gaming callout policy: tier ${callout.tier} (${callout.kind}); intensity=${intensityLevel}; use short copilot phrasing${releaseReason ? `; this was deferred until a calm gap after ${releaseReason}` : ''}.`
     : session.callMode === 'record'
@@ -1229,6 +1341,7 @@ function maybePromptScreenChange(sessionId, payload = {}) {
     currentVisual?.summary ? `Current visual memory: ${currentVisual.summary}` : '',
     previousVisual?.summary ? `Recent prior visual summary: ${previousVisual.summary}` : '',
     modeLine,
+    overrideLine,
     'Use the newest stable screen frame as visual context. Prefer the newest stable state over older assumptions. Do not identify a website, app, tab, or route unless visible text/UI clearly supports it. If the frame looks blank, partially loaded, or transitional, say it appears to still be loading instead of guessing.',
     callout.tier === '1'
       ? 'If this looks critical or obvious, comment immediately in one short game-copilot line. Prefer fragments like "Respawn screen." or "Objective changed."'
@@ -1550,6 +1663,7 @@ app.get(`${basePath}/api/settings/gemini`, async (req, res) => {
       memoryEnabled: settings.memoryEnabled ?? runtime.memoryEnabled ?? true,
       memoryNotes: settings.memoryNotes || runtime.memoryNotes || '',
       callMode: settings.callMode || runtime.callMode || 'universal',
+      liveIntentOverride: '',
       availableCallModes: FAIRY_CALL_MODE_OPTIONS,
       availableVoiceNames: GEMINI_LIVE_VOICE_OPTIONS,
       source: runtime.source || 'command-center-local',
@@ -3110,7 +3224,7 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
       ? requestedAgent
       : String(currentRoster.primaryAgentId || 'orchestrator').trim();
     const activeCallMode = normalizeCallMode(runtime.callMode || 'universal');
-    const initialModePolicy = buildCallModePolicy(activeCallMode, 'low');
+    const initialModePolicy = buildEffectiveCallPolicy(activeCallMode, 'low', '');
     const session = createCallSession({
       agent: sessionAgent,
       mode: 'gemini-live',
@@ -3152,6 +3266,7 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
         personalityPrompt: runtime.personalityPrompt || '',
         memoryContext,
         callMode: activeCallMode,
+        liveIntentOverride: '',
       }),
       onEvent: (event) => {
         const current = getCallSession(session.id);
@@ -3565,9 +3680,10 @@ app.post(`${basePath}/api/call/:id/mode`, async (req, res) => {
     if (!session) return res.status(404).json({ ok: false, error: 'Call session not found' });
     const callMode = normalizeCallMode(req.body?.callMode || session.callMode || 'universal');
     const intensityLevel = String(session.intensityLevel || 'low').trim() || 'low';
-    const policy = buildCallModePolicy(callMode, intensityLevel);
+    const policy = buildEffectiveCallPolicy(callMode, intensityLevel, session.liveIntentOverride || '');
     const updated = updateCallSession(sessionId, {
       callMode,
+      liveIntentOverride: normalizeLiveIntentOverride(session.liveIntentOverride || ''),
       handoffPolicy: policy.handoffPolicy,
       proactivity: policy.proactivity,
       responseStyle: policy.responseStyle,
@@ -3575,7 +3691,7 @@ app.post(`${basePath}/api/call/:id/mode`, async (req, res) => {
       modeReason: policy.modeReason,
       speechSuppressedReason: policy.suppressScreenCommentary ? 'combat' : '',
     });
-    broadcast({ type: 'call:mode.updated', data: { sessionId, callMode, session: updated } });
+    broadcast({ type: 'call:mode.updated', data: { sessionId, callMode, liveIntentOverride: normalizeLiveIntentOverride(updated?.liveIntentOverride || ''), session: updated } });
     broadcastCallDebugState(sessionId);
     return res.json({ ok: true, session: updated, callMode });
   } catch (err) {
@@ -3630,6 +3746,40 @@ app.post(`${basePath}/api/call/:id/audio`, async (req, res) => {
     res.json({ ok: true, state: updated?.state || 'listening' });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+app.post(`${basePath}/api/call/:id/intent`, async (req, res) => {
+  try {
+    const sessionId = String(req.params.id || '').trim();
+    const session = getCallSession(sessionId);
+    if (!session) return res.status(404).json({ ok: false, error: 'Call session not found' });
+    const liveIntentOverride = normalizeLiveIntentOverride(req.body?.intentOverride || req.body?.liveIntentOverride || '');
+    const intensityLevel = session.callMode === 'gaming' ? (session.intensityLevel || 'low') : 'low';
+    const policy = buildEffectiveCallPolicy(session.callMode || 'universal', intensityLevel, liveIntentOverride);
+    const updated = updateCallSession(sessionId, {
+      liveIntentOverride,
+      liveIntentSetAt: new Date().toISOString(),
+      handoffPolicy: policy.handoffPolicy,
+      proactivity: policy.proactivity,
+      responseStyle: policy.responseStyle,
+      modeDecision: policy.modeDecision,
+      modeReason: policy.modeReason,
+      speechSuppressedReason: '',
+    });
+    broadcast({ type: 'call:intent.updated', data: { sessionId, liveIntentOverride, session: updated } });
+    broadcastCallDebugState(sessionId);
+    const live = liveGeminiSessions.get(sessionId);
+    if (live) {
+      try {
+        live.sendTextTurn(buildLiveIntentSystemEvent(session.callMode || 'universal', liveIntentOverride));
+      } catch (err) {
+        broadcast({ type: 'call:error', data: { sessionId, message: err.message || 'Could not apply live intent override' } });
+      }
+    }
+    return res.json({ ok: true, session: updated, liveIntentOverride, liveIntentStatus: describeLiveIntentOverride(liveIntentOverride) });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message || 'Could not update live intent override' });
   }
 });
 

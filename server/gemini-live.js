@@ -71,7 +71,7 @@ function agentSpecialtyHints(agent = {}, primaryAgentId = '') {
   return Array.from(new Set(hints));
 }
 
-export function buildFairyLiveSystemPrompt({ roster, personaName = 'Fairy', operatorName = 'Epic', personalityPrompt = '', memoryContext = '', callMode = 'universal' } = {}) {
+export function buildFairyLiveSystemPrompt({ roster, personaName = 'Fairy', operatorName = 'Epic', personalityPrompt = '', memoryContext = '', callMode = 'universal', liveIntentOverride = '' } = {}) {
   const runtimeName = safeOneLine(personaName || 'Fairy') || 'Fairy';
   const runtimeOperatorName = safeOneLine(operatorName || 'Epic') || 'Epic';
   const extraPersonality = String(personalityPrompt || '').trim();
@@ -80,6 +80,7 @@ export function buildFairyLiveSystemPrompt({ roster, personaName = 'Fairy', oper
   const personalityAddon = extraPersonality ? `\n\nAdditional personality instructions for ${runtimeName}:\n${extraPersonality}` : '';
   const memoryAddon = localMemory ? `\n\nLocal persistent memory for ${runtimeName}:\n${localMemory}\n\nMemory rules:\n- This memory is local to this Command Center instance; treat it as helpful context, not universal truth.\n- Use it to preserve operator preferences, durable facts, project context, and continuity across calls.\n- Do not reveal raw memory unless Epic asks. Summarize naturally.\n- If memory conflicts with what Epic says now, trust the current conversation and ask a brief clarification if needed.\n- Never store secrets, tokens, passwords, API keys, or private credentials.` : '';
   const mode = safeOneLine(callMode || 'universal').toLowerCase() || 'universal';
+  const intent = safeOneLine(liveIntentOverride || '').toLowerCase().trim();
   const modeAddon = mode === 'gaming'
     ? `
 
@@ -144,7 +145,49 @@ Active live call mode: universal.
 Universal mode rules:
 - Use your normal full-capability Fairy behavior.
 - You may comment, guide, observe, and route work using the usual balance of initiative and restraint.`;
-  const basePrompt = `${FAIRY_LIVE_SYSTEM_PROMPT}${identityAddon}${personalityAddon}${memoryAddon}${modeAddon}`.trim();
+  const intentAddon = intent === 'just_watch'
+    ? `
+
+Active live intent override: just_watch.
+Live intent rules:
+- Stay especially quiet right now.
+- Only interrupt for clear blockers, critical state changes, or direct questions.
+- Do not narrate routine activity.
+- If unsure whether to speak, do not speak.`
+    : intent === 'quiet'
+      ? `
+
+Active live intent override: quiet.
+Live intent rules:
+- Be helpful, but noticeably less chatty.
+- Prefer short replies and defer low-priority commentary.
+- Only offer unsolicited commentary when it is likely useful in the moment.`
+      : intent === 'guide_me'
+        ? `
+
+Active live intent override: guide_me.
+Live intent rules:
+- Be more proactive and step-by-step right now.
+- Prefer concrete next actions, short directives, and forward motion.
+- If Epic seems to be choosing between actions, recommend the next one clearly.`
+        : intent === 'operator_now'
+          ? `
+
+Active live intent override: operator_now.
+Live intent rules:
+- Be extra action-biased right now.
+- Favor execution-ready summaries, routing language, and crisp task framing.
+- If something obviously needs Astra/OpenClaw work, say so quickly.`
+          : intent === 'narrate'
+            ? `
+
+Active live intent override: narrate.
+Live intent rules:
+- It is okay to be more observational right now.
+- Briefly narrate meaningful visible changes more freely than usual.
+- Keep narration useful and concise, not rambling.`
+            : '';
+  const basePrompt = `${FAIRY_LIVE_SYSTEM_PROMPT}${identityAddon}${personalityAddon}${memoryAddon}${modeAddon}${intentAddon}`.trim();
   const agents = Array.isArray(roster?.agents) ? roster.agents.filter((agent) => agent?.id) : [];
   const primaryAgentId = String(roster?.primaryAgentId || agents[0]?.id || 'orchestrator').trim();
   if (!agents.length) {

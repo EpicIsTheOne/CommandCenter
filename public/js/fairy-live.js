@@ -71,6 +71,7 @@ const state = {
   speechOutputMode: 'gemini',
   fishVoiceId: '',
   callMode: 'universal',
+  liveIntentOverride: '',
   intensityLevel: 'low',
   speechSuppressedReason: '',
   lastModeDecision: '',
@@ -144,12 +145,31 @@ function describeCallMode(mode = 'universal') {
   return 'Universal mode keeps normal Fairy behavior.';
 }
 
+function describeLiveIntentOverride(intent = '') {
+  const value = String(intent || '').trim().toLowerCase();
+  if (value === 'just_watch') return 'Just Watch: stay especially quiet unless something clearly important happens.';
+  if (value === 'quiet') return 'Quiet: still helpful, but less chatty and more defer-heavy.';
+  if (value === 'guide_me') return 'Guide Me: be more proactive and step-by-step right now.';
+  if (value === 'operator_now') return 'Operator Now: bias harder toward routing and execution-ready summaries.';
+  if (value === 'narrate') return 'Narrate: allow more observational commentary for demos, streams, or active walkthroughs.';
+  return 'Normal: follow the selected call mode with no temporary override.';
+}
+
+function applyLiveIntentUi() {
+  if (els.intentOverrideSelect) {
+    els.intentOverrideSelect.value = state.liveIntentOverride || '';
+    els.intentOverrideSelect.disabled = !state.sessionId;
+  }
+  if (els.intentOverrideStatus) els.intentOverrideStatus.textContent = describeLiveIntentOverride(state.liveIntentOverride || '');
+}
+
 function applyCallModeUi() {
   if (els.callModeSelect) {
     els.callModeSelect.value = state.callMode || 'universal';
     els.callModeSelect.disabled = !state.sessionId;
   }
   if (els.callModeStatus) els.callModeStatus.textContent = describeCallMode(state.callMode || 'universal');
+  applyLiveIntentUi();
 }
 
 function applyPersonaUi() {
@@ -228,6 +248,7 @@ function renderDebugPanel() {
     ]),
     renderDebugSection('MODE', [
       ['mode', state.callMode || 'universal'],
+      ['live intent', state.liveIntentOverride || 'normal'],
       ['intensity', state.intensityLevel || 'low'],
       ['suppressed', state.speechSuppressedReason || 'none'],
       ['callout tier', state.lastCalloutTier || '—'],
@@ -1996,6 +2017,8 @@ export function init() {
   els.diagnostics = document.getElementById('fairy-live-diagnostics');
   els.callModeSelect = document.getElementById('fairy-live-call-mode');
   els.callModeStatus = document.getElementById('fairy-live-call-mode-status');
+  els.intentOverrideSelect = document.getElementById('fairy-live-intent-override');
+  els.intentOverrideStatus = document.getElementById('fairy-live-intent-status');
   els.debugToggle = document.getElementById('fairy-live-debug-toggle');
   els.debugPanel = document.getElementById('fairy-live-debug-panel');
   els.debugContent = document.getElementById('fairy-live-debug-content');
@@ -2043,6 +2066,26 @@ export function init() {
     } catch (err) {
       markError(err.message || 'Could not update call mode');
       applyCallModeUi();
+    }
+  });
+
+  els.intentOverrideSelect?.addEventListener('change', async (event) => {
+    const nextIntent = String(event.target?.value || '').trim().toLowerCase();
+    if (!state.sessionId) { applyLiveIntentUi(); return; }
+    try {
+      const data = await fetchJson(`${BASE}/api/call/${encodeURIComponent(state.sessionId)}/intent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ intentOverride: nextIntent }),
+      });
+      state.liveIntentOverride = String(data.liveIntentOverride || '').trim().toLowerCase();
+      state.serverSessionMeta = data.session || state.serverSessionMeta;
+      markEvent(`intent ${state.liveIntentOverride || 'normal'}`);
+      applyLiveIntentUi();
+      renderDiagnostics();
+    } catch (err) {
+      markError(err.message || 'Could not update live intent override');
+      applyLiveIntentUi();
     }
   });
 
@@ -2095,6 +2138,7 @@ export function handleEvent(msg = {}) {
     state.sessionId = data.id || data.sessionId || state.sessionId;
     if (data.session) state.serverSessionMeta = data.session;
     state.callMode = String(data.callMode || data.session?.callMode || state.callMode || 'universal').trim().toLowerCase() || 'universal';
+    state.liveIntentOverride = String(data.liveIntentOverride || data.session?.liveIntentOverride || state.liveIntentOverride || '').trim().toLowerCase();
     applyCallModeUi();
     setStatus(data.state || 'ready', `${personaName()} is live.`);
     appendTranscript('system', `Session ready: ${state.sessionId}`, 'system');
@@ -2123,6 +2167,7 @@ export function handleEvent(msg = {}) {
       state.lastModeDecision = '';
       state.lastModeReason = '';
       state.lastCalloutTier = '';
+      state.liveIntentOverride = '';
       applyCallModeUi();
       setStatus('ended', `${personaName()} Live ended.`);
       emitFairyCallAudioEvent('commandcenter:fairy-call-end', { sessionId: data.id || data.sessionId || state.sessionId });
@@ -2148,6 +2193,7 @@ export function handleEvent(msg = {}) {
     state.lastVisualAssumption = String(debug.lastVisualAssumption || '').trim();
     state.lastVisualConfidence = String(debug.lastVisualConfidence || '').trim();
     state.callMode = String(debug.callMode || state.callMode || 'universal').trim().toLowerCase() || 'universal';
+    state.liveIntentOverride = String(debug.liveIntentOverride || state.liveIntentOverride || '').trim().toLowerCase();
     state.intensityLevel = String(debug.intensityLevel || state.intensityLevel || 'low').trim() || 'low';
     state.speechSuppressedReason = String(debug.speechSuppressedReason || '').trim();
     state.lastModeDecision = String(debug.modeDecision || '').trim();
@@ -2166,8 +2212,17 @@ export function handleEvent(msg = {}) {
 
   if (type === 'call:mode.updated' && data.sessionId === state.sessionId) {
     state.callMode = String(data.callMode || data.session?.callMode || state.callMode || 'universal').trim().toLowerCase() || 'universal';
+    state.liveIntentOverride = String(data.liveIntentOverride || data.session?.liveIntentOverride || state.liveIntentOverride || '').trim().toLowerCase();
     if (data.session) state.serverSessionMeta = data.session;
     applyCallModeUi();
+    renderDiagnostics();
+    return;
+  }
+
+  if (type === 'call:intent.updated' && data.sessionId === state.sessionId) {
+    state.liveIntentOverride = String(data.liveIntentOverride || data.session?.liveIntentOverride || '').trim().toLowerCase();
+    if (data.session) state.serverSessionMeta = data.session;
+    applyLiveIntentUi();
     renderDiagnostics();
     return;
   }

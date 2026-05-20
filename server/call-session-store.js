@@ -40,6 +40,8 @@ export function createCallSession({ agent = 'orchestrator', mode = 'gemini-live'
     lastRoutingDecision: '',
     lastTaskSummary: '',
     callMode,
+    liveIntentOverride: '',
+    liveIntentSetAt: null,
     modeDecision: '',
     modeReason: '',
     intensityLevel: 'low',

@@ -113,6 +113,18 @@
         <span id="fairy-live-call-mode-status" class="fairy-live-audio-status">Universal mode keeps normal Fairy behavior.</span>
       </div>
       <div class="fairy-live-audio-row">
+        <label for="fairy-live-intent-override" class="setting-hint" style="min-width:92px;">LIVE INTENT</label>
+        <select id="fairy-live-intent-override" class="secondary-button" disabled>
+          <option value="">Normal</option>
+          <option value="just_watch">Just Watch</option>
+          <option value="quiet">Quiet</option>
+          <option value="guide_me">Guide Me</option>
+          <option value="operator_now">Operator Now</option>
+          <option value="narrate">Narrate</option>
+        </select>
+        <span id="fairy-live-intent-status" class="fairy-live-audio-status">Normal: follow the selected call mode with no temporary override.</span>
+      </div>
+      <div class="fairy-live-audio-row">
         <button id="fairy-live-screen" class="secondary-button fairy-live-screen" type="button" disabled>SHARE SCREEN</button>
         <span id="fairy-live-screen-status" class="fairy-live-audio-status">Screen sharing off.</span>
       </div>
