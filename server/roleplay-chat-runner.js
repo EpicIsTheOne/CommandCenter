@@ -125,30 +125,45 @@ function buildMessages(session, latestMessage, attachmentContext = '') {
   ];
 }
 
-export async function runRoleplayChatTurn({ session, latestMessage, attachmentContext = '', model, onEvent } = {}) {
-  const apiKey = String(process.env.OPENROUTER_API_KEY || '').trim();
-  if (!apiKey) throw new Error('OPENROUTER_API_KEY is not configured');
+function normalizeRoleplayProvider(input = {}) {
+  const provider = input && typeof input === 'object' ? input : {};
+  const baseURL = String(provider.baseUrl || provider.baseURL || '').trim();
+  const apiKey = String(provider.apiKey || '').trim();
+  const model = String(provider.model || '').trim();
+  return { baseURL, apiKey, model };
+}
+
+export async function runRoleplayChatTurn({ session, latestMessage, attachmentContext = '', model, roleplayProvider = null, onEvent } = {}) {
+  const provider = normalizeRoleplayProvider(roleplayProvider || session?.metadata?.roleplayProvider || {});
+  const chosenModel = String(model || provider.model || process.env.OPENROUTER_ROLEPLAY_MODEL || DEFAULT_ROLEPLAY_MODEL).trim() || DEFAULT_ROLEPLAY_MODEL;
+  const baseURL = String(provider.baseURL || process.env.OPENROUTER_BASE_URL || DEFAULT_OPENROUTER_BASE_URL).trim();
+  const apiKey = String(provider.apiKey || process.env.OPENROUTER_API_KEY || '').trim();
+  const isOpenRouter = /openrouter\.ai\/api\/v1\/?$/i.test(baseURL);
+  if (isOpenRouter && !apiKey) throw new Error('OPENROUTER_API_KEY is not configured');
 
   const client = new OpenAI({
-    apiKey,
-    baseURL: String(process.env.OPENROUTER_BASE_URL || DEFAULT_OPENROUTER_BASE_URL).trim(),
+    apiKey: apiKey || 'not-needed',
+    baseURL,
   });
 
-  const chosenModel = String(model || process.env.OPENROUTER_ROLEPLAY_MODEL || DEFAULT_ROLEPLAY_MODEL).trim() || DEFAULT_ROLEPLAY_MODEL;
   const messages = buildMessages(session, latestMessage, attachmentContext);
 
   try { onEvent?.({ type: 'thinking', data: { mode: 'roleplay', model: chosenModel, status: 'Processing...' } }); } catch {}
+
+  const requestOptions = isOpenRouter
+    ? {
+        headers: {
+          'HTTP-Referer': process.env.OPENROUTER_HTTP_REFERER || 'https://techexplore.us/commandcenter/',
+          'X-Title': process.env.OPENROUTER_APP_TITLE || 'OpenClaw Command Center',
+        },
+      }
+    : undefined;
 
   const response = await client.chat.completions.create({
     model: chosenModel,
     messages,
     temperature: 0.9,
-  }, {
-    headers: {
-      'HTTP-Referer': process.env.OPENROUTER_HTTP_REFERER || 'https://techexplore.us/commandcenter/',
-      'X-Title': process.env.OPENROUTER_APP_TITLE || 'OpenClaw Command Center',
-    },
-  });
+  }, requestOptions);
 
   const text = String(response.choices?.[0]?.message?.content || '').trim();
   if (!text) throw new Error('Roleplay model returned an empty response');

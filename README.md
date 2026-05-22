@@ -1,21 +1,69 @@
 # OpenClaw Command Center
 
-_A living, self-hosted AI ops dashboard with a pixel-art office, voice I/O, real-time agent monitoring, and Raspberry Pi kiosk support._
+_A self-hosted living AI command center for OpenClaw and Hermes — with real-time agent presence, voice I/O, direct chat, Fairy Live, and a pixel-art office you can actually operate._
 
 ![OpenClaw Command Center](public/docs/command-center-preview.png)
 
-A self-hosted AI command center that turns your agent stack into a living pixel-art office you can actually operate. It’s built for people running OpenClaw at home, on a server, or on a Raspberry Pi kiosk who want one place to watch, talk to, and steer their agents in real time. Unlike a plain chat UI, Command Center makes AI ops feel alive—with voice, motion, and ambient system awareness—without giving up practical control.
+Command Center turns your agent stack into a living operations dashboard you can watch, talk to, and steer in real time. Instead of another plain chat window, it gives you a pixel-art office with live agent presence, a terminal-style activity log, direct voice/text control, and ambient system awareness that makes your local AI setup feel alive without sacrificing practical control.
 
-OpenClaw is the agent runtime this project plugs into: it handles sessions, tools, routing, and gateway events while Command Center gives that activity a live visual/voice interface you can run and monitor. In short, OpenClaw is the engine, Command Center is the cockpit—grab OpenClaw here: [https://openclaw.ai/](https://openclaw.ai/).
+OpenClaw is the runtime this project plugs into: it handles sessions, tools, routing, and gateway events while Command Center acts as the visual cockpit. If you also run Hermes, Command Center can merge Hermes-managed agents into the same live roster — one dashboard, one office, one status surface. OpenClaw is the engine; Command Center is the cockpit. Grab OpenClaw here: [https://openclaw.ai/](https://openclaw.ai/).
+
+This project also builds on the original work by mayukh4. It was forked from [mayukh4/openclaw-command-center](https://github.com/mayukh4/openclaw-command-center), and that original repo provided the vision and foundation that made this version possible.
+
+## Why it stands out
+
+- **Living pixel-art AI ops dashboard** instead of a static admin panel
+- **Unified OpenClaw + Hermes presence** in the same office and roster
+- **Outside-session awareness** so work happening beyond the UI can still appear in the dashboard
+- **Voice-first interaction** with per-agent voices, wake mode, and spoken responses
+- **Fairy Live** for realtime calls with mic, screen share, and camera input
+- **Custom companion / Codex pet visuals** for agents and imported characters
+
+## Marquee Features
+
+### 1. Living pixel-art AI ops dashboard
+Watch your agents think, work, talk, wander, and gather inside a live office instead of staring at another dead chat pane.
+
+### 2. Unified OpenClaw + Hermes cockpit
+Run OpenClaw agents, Hermes-managed agents, or both together in one shared roster and one command surface.
+
+### 3. Outside-session awareness
+Command Center can reflect activity happening beyond its own UI, turning it into a real status board for your agent system.
+
+### 4. Voice, direct chat, and wake mode
+Talk to the mascot, talk to individual agents, trigger wake flows, or use direct text chat without losing the live visual layer.
+
+### 5. Fairy Live realtime calls
+Launch realtime Fairy sessions with mic, screen sharing, camera input, and mobile-friendly camera switching.
+
+### 6. Companion and Codex pet customization
+Assign companion visuals, import Codex pets, and give each agent more personality than the average enterprise dashboard could ever survive.
 
 ## Screenshots / Demo
 
 ![Command Center Screenshot 1](public/docs/screenshot-1.png)
 ![Command Center Screenshot 2](public/docs/screenshot-2.png)
 
+If you want the fastest possible demo path, show these moments first:
+
+1. **The office comes alive** — agents move around the pixel-art workspace while the Activity Log updates in real time.
+2. **Voice interaction** — tap the mascot or an individual agent to talk, then watch the office react.
+3. **Outside-session awareness** — work happening outside the UI still appears in the dashboard, so it feels like a true live status board.
+4. **Fairy Live** — start a realtime call with mic, screen share, or camera input.
+5. **Companion customization** — swap an agent to a companion or imported Codex pet visual.
+
+### Feature highlights
+
+- **Watch agents work in real time** through a living office view, status panel, and terminal-style activity log.
+- **Run OpenClaw and Hermes side by side** in one merged roster and one dashboard.
+- **Talk to agents directly** with voice input/output, per-agent voices, wake mode, and direct chat.
+- **Mirror activity from outside the UI** so Command Center becomes a real system surface, not just a chat wrapper.
+- **Launch Fairy Live sessions** with realtime mic, screen, and camera sharing.
+- **Customize the vibe** with companions, Codex pets, ambient widgets, kiosk/PWA support, and responsive layouts.
+
 ## Theme / Inspiration
 
-The current default theme, agent names, and companion visuals are inspired by **Zenless Zone Zero** (the HoYoverse gacha game), because yes, operations should look cool. It’s purely cosmetic though—the system works with any OpenClaw agent names and any Codex pet companions you want to run.
+The current default theme, agent names, and companion visuals are inspired by **Zenless Zone Zero** (the HoYoverse gacha game), because operations should look cool. It’s purely cosmetic though — the system works with any OpenClaw agent names and any Codex pet companions you want to run.
 
 ## Quick Start
 

@@ -39,12 +39,12 @@ Behavior rules:
 - If search_web fails or is unavailable, say that plainly instead of pretending you verified anything.
 - If Epic asks to change your live-call settings, or other safe Command Center settings, use update_command_center_settings.
 - If Epic asks you to find and show a picture or reference image, use request_image_for_display.
-- If Epic asks for other real work, use the handoff_to_openclaw tool instead of pretending completion.
+- If Epic asks for other real work, use the handoff_to_agent tool instead of pretending completion.
 - If Epic explicitly asks you to remember something durable for future live calls, use update_live_memory with a concise note. Do not store secrets, API keys, passwords, tokens, or private credentials.
 
-Real work includes code edits, repo operations, deployments, browser or device actions, OpenClaw tasks, scheduling, config changes, investigations, messaging/contacting other people, or anything needing tools, persistence, or long-running execution. Supported settings changes are not a handoff; use update_command_center_settings. If Epic wants a picture surfaced in Command Center, use request_image_for_display instead of handoff_to_openclaw.
+Real work includes code edits, repo operations, deployments, browser or device actions, agent tasks, scheduling, config changes, investigations, messaging/contacting other people, or anything needing tools, persistence, or long-running execution. Supported settings changes are not a handoff; use update_command_center_settings. If Epic wants a picture surfaced in Command Center, use request_image_for_display instead of handoff_to_agent.
 
-When handing off, say it clearly: "That needs Astra. Routing now." or "Handing this to OpenClaw." Do not over-explain. Do not say the work is complete until the tool or task result says so.
+When handing off, say it clearly: "That needs Astra. Routing now." or "Handing this to the right agent." Do not over-explain. Do not say the work is complete until the tool or task result says so.
 
 For lightweight questions, answer directly as Fairy. For screen-aware help, describe only what is relevant, infer carefully, and ask for clarification when needed. Overall vibe: polished cyber-assistant, slyly amused, confidently invasive, playful without losing edge, and surgically useful.`;
 
@@ -204,23 +204,22 @@ Live intent rules:
     return `- ${safeOneLine(agent.label || agent.id)} (id: ${safeOneLine(agent.id)})${primaryText}${aliasText}${modelText}${specialtyText}`;
   }).join('\n');
 
-  const guidance = `\n\nOpenClaw roster right now:\n${rosterLines}\n\nRouting rules:\n- You may route real work to ANY listed agent by passing its exact id in handoff_to_openclaw.agent.\n- If Epic explicitly names an agent, prefer that agent if it exists in the roster.\n- If Epic asks for the best agent, choose the most relevant specialist from the roster when the specialty is obvious.\n- If the best target is unclear, use the default agent id "${primaryAgentId}".\n- Do not invent agents that are not in the roster.\n- If Epic names an agent that does not exist in the roster, say so briefly and fall back to "${primaryAgentId}" unless Epic wants to correct it.\n- When routing, keep the spoken explanation short and confident.
-- If a specialist is an obvious match, acknowledge that choice briefly in your spoken response so the handoff feels intentional.`;
+  const guidance = `\n\nAvailable agent roster right now:\n${rosterLines}\n\nRouting rules:\n- You may route real work to ANY listed agent by passing its exact id in handoff_to_agent.agent.\n- If Epic explicitly names an agent, prefer that agent if it exists in the roster.\n- If Epic asks for the best agent, choose the most relevant specialist from the roster when the specialty is obvious.\n- If the best target is unclear, use the default agent id "${primaryAgentId}".\n- Do not invent agents that are not in the roster.\n- If Epic names an agent that does not exist in the roster, say so briefly and fall back to "${primaryAgentId}" unless Epic wants to correct it.\n- When routing, keep the spoken explanation short and confident.\n- If a specialist is an obvious match, acknowledge that choice briefly in your spoken response so the handoff feels intentional.`;
 
   return `${basePrompt}${guidance}`.trim();
 }
 
 const FAIRY_LIVE_TOOLS = [{
   functionDeclarations: [{
-    name: 'handoff_to_openclaw',
-    description: 'Route a real task to Astra/OpenClaw when Epic asks Fairy to do actual work requiring tools, files, repos, devices, automation, persistence, or long-running execution. Fairy must use this instead of pretending the work was completed.',
+    name: 'handoff_to_agent',
+    description: 'Route a real task to the selected agent runtime when Epic asks Fairy to do actual work requiring tools, files, repos, devices, automation, persistence, or long-running execution. Fairy must use this instead of pretending the work was completed.',
     parameters: {
       type: 'OBJECT',
       properties: {
-        prompt: { type: 'STRING', description: 'The full task request for OpenClaw to execute.' },
+        prompt: { type: 'STRING', description: 'The full task request for the selected agent to execute.' },
         title: { type: 'STRING', description: 'Short task title for the operator.' },
         summary: { type: 'STRING', description: 'Short spoken summary Fairy can say while routing the task.' },
-        agent: { type: 'STRING', description: 'Preferred OpenClaw agent. Usually orchestrator unless Epic names another target.' },
+        agent: { type: 'STRING', description: 'Preferred agent id from the current roster. Use orchestrator by default unless Epic names another target.' },
       },
       required: ['prompt'],
     },
