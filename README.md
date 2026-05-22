@@ -38,6 +38,12 @@ For **live OpenClaw integration**:
 - point `GATEWAY_URL` at your OpenClaw gateway
 - either set `GATEWAY_TOKEN` manually **or** let CommandCenter auto-detect it from `~/.openclaw/openclaw.json` when running on the same machine
 
+For **Hermes integration/bridge**:
+- set `HERMES_BRIDGE_ENABLED=true`
+- make sure the `hermes` CLI is installed and available on `PATH` (or set `HERMES_BIN`)
+- CommandCenter will detect Hermes profiles and add them to the roster alongside OpenClaw agents
+- **Hermes and OpenClaw can co-exist in the same CommandCenter instance** — you do **not** need separate installs, separate dashboards, or a Hermes-only deployment
+
 Open **Settings** after boot and check the **Setup Status** section. It should clearly tell you whether you are:
 - in demo mode on purpose
 - live and connected
@@ -61,10 +67,13 @@ Additional panels and modals provide:
 
 ## Current Feature Set
 
-### Live OpenClaw activity
+### Live OpenClaw + Hermes activity
 
 - WebSocket bridge to the OpenClaw gateway.
+- Optional Hermes bridge/profile detection for Hermes-managed agents.
+- OpenClaw and Hermes agents can appear in the same office/roster at the same time.
 - Demo fallback if the gateway is unavailable.
+- Automatic recovery retry after temporary gateway outage, so a brief OpenClaw restart does not leave CommandCenter stuck in permanent demo fallback.
 - Normalized agent states:
   - idle
   - listening
@@ -256,7 +265,21 @@ The default/example roster may include agents like:
 | Orbit | `claw-1` | Coding/tasks | Cyan | Example sub-agent |
 | Nova | `claw-2` | Research/web | Purple | Example sub-agent |
 
-The actual roster is loaded from the project/OpenClaw agent configuration, so your local names may differ.
+The actual roster is loaded from the local OpenClaw configuration and/or Hermes profiles, so your local names may differ.
+
+### Hermes + OpenClaw co-existence
+
+CommandCenter does not force an either/or choice here.
+
+If OpenClaw is enabled, it loads agents from your OpenClaw config.
+If the Hermes bridge is also enabled, it additionally loads Hermes profiles and merges them into the same live roster.
+
+That means you can:
+- run OpenClaw-only
+- run Hermes-only
+- or run both together in one CommandCenter instance
+
+You do **not** need separate dashboards just because some agents come from OpenClaw and others come from Hermes.
 
 ## Architecture
 
@@ -265,12 +288,13 @@ The actual roster is loaded from the project/OpenClaw agent configuration, so yo
 | File | Purpose |
 |------|---------|
 | `index.js` | Express server, HTTP/HTTPS boot, WebSocket server, REST APIs, voice routes, direct chat, settings, docs routing, live call routes |
-| `openclaw-bridge.js` | OpenClaw gateway RPC v3 WebSocket bridge, event normalization, demo fallback |
+| `openclaw-bridge.js` | OpenClaw gateway RPC v3 WebSocket bridge, event normalization, demo fallback, and fallback recovery retry |
 | `session-monitor.js` | Watches OpenClaw session JSONL files so outside-session work appears in Command Center |
+| `hermes-session-monitor.js` | Mirrors Hermes session activity into the same CommandCenter event stream/office presence |
 | `voice.js` | TTS/STT integrations, ElevenLabs/Fish Audio support, voice resolution |
 | `settings.js` | Voice/settings persistence and masking helpers |
 | `companions.js` | Companion registry, Codex pet import, animation-map normalization |
-| `agents.js` | Agent roster loading and search helpers |
+| `agents.js` | Agent roster loading, OpenClaw/Hermes source detection, merge logic, and search helpers |
 | `api-auth.js` | Auth middleware for `/api/v1` |
 | `api-chat-runner.js` | API chat turn runner using OpenClaw CLI |
 | `api-session-store.js` | API chat/session persistence |
@@ -314,10 +338,11 @@ Direct chat UI → POST /api/chat/direct → openclaw agent CLI
   → saved chat history → WebSocket response → Activity Log + Office + optional TTS
 ```
 
-Outside OpenClaw activity:
+Outside OpenClaw / Hermes activity:
 
 ```text
 OpenClaw session JSONL changes → session-monitor.js
+Hermes session activity → hermes-session-monitor.js
   → normalized agent events → WebSocket → Activity Log + Office + speech
 ```
 
@@ -342,6 +367,12 @@ See `.env.example` for the full template.
 | `WEATHER_LOCATION` | `Kingston,Ontario,Canada` | City/region/country for wttr.in weather |
 | `BASE_PATH` | — | Optional mount path, e.g. `/commandcenter` |
 | `OPENCLAW_BIN` | `openclaw` | Override path/name for the OpenClaw CLI |
+| `HERMES_BRIDGE_ENABLED` | `false` | Enable Hermes profile detection and Hermes session bridge integration |
+| `HERMES_BIN` | `hermes` | Override path/name for the Hermes CLI |
+| `HERMES_AGENT_ID` | `hermes` | Default agent id used for the primary/default Hermes profile |
+| `HERMES_AGENT_LABEL` | `Nyxie` | Default display label for the primary/default Hermes profile |
+| `HERMES_AGENT_NAME` | `Nyxie` | Default spoken/name field for the primary/default Hermes profile |
+| `HERMES_AGENT_MODEL` | — | Optional model label override for the primary/default Hermes profile |
 
 Additional voice/wake credentials are usually configured through the settings UI and stored in the app settings files rather than manually editing `.env`.
 

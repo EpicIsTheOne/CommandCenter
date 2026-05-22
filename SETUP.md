@@ -9,7 +9,8 @@ This is the practical install flow for getting CommandCenter running without mys
 Verify:
 - **Node.js 18+** — `node --version`
 - **npm** — `npm --version`
-- **OpenClaw CLI** — `openclaw --version` (only needed for live mode)
+- **OpenClaw CLI** — `openclaw --version` (needed for live OpenClaw mode)
+- **Hermes CLI** — `hermes --help` (only needed if you want Hermes integration/bridge enabled)
 - **ffmpeg** — required for audio normalization/transcription
 
 If Node.js or ffmpeg is missing, install them first.
@@ -58,6 +59,8 @@ Expected output (minimum):
 
 This is the most important setup decision.
 
+Also: Hermes and OpenClaw do **not** need separate CommandCenter installs. If you enable both, they can co-exist inside the same dashboard and the same merged roster.
+
 ### Demo mode
 Use this if you just want to preview the UI.
 
@@ -89,6 +92,26 @@ If you want to set it manually, add:
 ```env
 GATEWAY_TOKEN=your_openclaw_gateway_token_here
 ```
+
+### Optional Hermes bridge integration
+
+If you also want Hermes agents to appear in CommandCenter, enable the Hermes bridge:
+
+```env
+HERMES_BRIDGE_ENABLED=true
+HERMES_BIN=hermes
+```
+
+What this does:
+- CommandCenter asks the Hermes CLI for available profiles
+- Hermes profiles are merged into the same office roster as OpenClaw agents
+- Hermes session activity can be mirrored into the same Activity Log/office state stream
+
+This is additive, not exclusive.
+You can run:
+- OpenClaw only
+- Hermes only
+- both OpenClaw and Hermes together
 
 ## 4) Voice setup
 

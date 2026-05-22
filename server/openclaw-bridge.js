@@ -26,6 +26,7 @@ export default class OpenClawBridge extends EventEmitter {
     this.maxReconnectDelay = 30000;
     this.demoIndex = 0;
     this.demoTimer = null;
+    this.recoveryTimer = null;
     this.connected = false;
     this.connectAttempts = 0;
     this.maxConnectAttempts = 3;
@@ -46,6 +47,7 @@ export default class OpenClawBridge extends EventEmitter {
 
   stop() {
     if (this.demoTimer) clearTimeout(this.demoTimer);
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     if (this.ws) this.ws.close();
   }
 
@@ -56,16 +58,41 @@ export default class OpenClawBridge extends EventEmitter {
     this.mode = 'demo';
     this.emit('connected', { mode: 'demo', fallbackReason: this.lastFallbackReason || '', authError: this.lastAuthError || '' });
     this.scheduleDemoEvent();
+    this.scheduleRecoveryReconnect();
   }
 
   scheduleDemoEvent() {
+    if (this.mode !== 'demo') return;
     const delay = 1500 + Math.random() * 3000;
     this.demoTimer = setTimeout(() => {
+      if (this.mode !== 'demo') return;
       const event = DEMO_EVENTS[this.demoIndex % DEMO_EVENTS.length];
       this.demoIndex++;
       this.emit('event', event);
       this.scheduleDemoEvent();
     }, delay);
+  }
+
+  scheduleRecoveryReconnect() {
+    if (config.demoMode) return;
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = setTimeout(() => {
+      if (this.mode !== 'demo' || !this.lastFallbackReason) return;
+      console.log('[bridge] Attempting recovery from demo fallback...');
+      this.connected = false;
+      this.mode = 'connecting';
+      this.connectAttempts = 0;
+      if (this.demoTimer) {
+        clearTimeout(this.demoTimer);
+        this.demoTimer = null;
+      }
+      if (this.ws) {
+        this.ws.removeAllListeners();
+        this.ws.close();
+        this.ws = null;
+      }
+      this.connectGateway();
+    }, 5000);
   }
 
   // --- Gateway Connection (RPC v3) ---
@@ -168,6 +195,14 @@ export default class OpenClawBridge extends EventEmitter {
       this.connectAttempts = 0;
       this.lastAuthError = '';
       this.lastFallbackReason = '';
+      if (this.demoTimer) {
+        clearTimeout(this.demoTimer);
+        this.demoTimer = null;
+      }
+      if (this.recoveryTimer) {
+        clearTimeout(this.recoveryTimer);
+        this.recoveryTimer = null;
+      }
       onAuth();
       this.emit('connected', { mode: 'live' });
       return;

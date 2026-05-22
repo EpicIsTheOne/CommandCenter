@@ -232,6 +232,26 @@
           </div>
         </details>
 
+        <details id="agents-settings-group" class="setting-group collapsible-setting">
+          <summary class="collapsible-setting-summary">
+            <span>Agents</span>
+            <span class="setting-hint">Detected OpenClaw and Hermes agents</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <div class="setting-group nested-setting-group">
+              <div class="setting-row between" style="align-items:center; gap:10px; flex-wrap:wrap;">
+                <label>Available agents</label>
+                <div class="settings-inline-actions" style="display:flex; gap:8px; flex-wrap:wrap;">
+                  <button id="detect-openclaw-agents-btn" class="secondary-button hidden" type="button">DETECT OPENCLAW</button>
+                  <button id="detect-hermes-agents-btn" class="secondary-button hidden" type="button">DETECT HERMES</button>
+                </div>
+              </div>
+              <div id="agents-settings-status" class="setting-hint">Checking agent sources...</div>
+              <div id="agents-settings-list" class="agent-voice-list"></div>
+            </div>
+          </div>
+        </details>
+
         <details id="app-install-settings-group" class="setting-group collapsible-setting">
           <summary class="collapsible-setting-summary">
             <span>Install App</span>

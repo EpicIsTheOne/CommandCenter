@@ -13,7 +13,7 @@ import multer from 'multer';
 import config from './config.js';
 import OpenClawBridge from './openclaw-bridge.js';
 import { transcribe, speak, streamSpeak, streamFishAudioText, listElevenLabsVoices, searchFishAudioVoices, previewFishAudioVoice, resolveAgentVoice } from './voice.js';
-import { loadAgentRoster, searchAgents } from './agents.js';
+import { loadAgentRoster, searchAgents, detectAgentSources } from './agents.js';
 import { loadVoiceSettings, saveVoiceSettings, maskApiKey, maskSessionCookie } from './settings.js';
 import { ensureCompanionRegistry, importCodexPetPackageFromDir, loadCompanionRegistry, loadCompanionSettings, resolveAgentVisual, saveCompanionSettings } from './companions.js';
 import { ensureMusicStorage, getMusicDir, loadMusicSettings, saveMusicSettings } from './music-settings.js';
@@ -26,6 +26,7 @@ import { loadWakeSettings, saveWakeSettings, maskAccessKey } from './wake-settin
 import { transcribeWakeAudio, warmWakeTranscriber } from './wake-transcriber.js';
 import { detectWakeKeyword, warmWakeKeywordDetector } from './wake-keyword-detector.js';
 import { startSessionMonitor } from './session-monitor.js';
+import { startHermesSessionMonitor } from './hermes-session-monitor.js';
 import { FAIRY_CALL_MODE_OPTIONS, GEMINI_LIVE_VOICE_OPTIONS, loadGeminiRuntimeConfig, loadGeminiSettings, saveGeminiSettings, normalizeCallMode } from './gemini-config.js';
 import { createLiveTask, getLiveTask, listLiveTasks, looksComplexRequest, runLiveTask } from './live-tasks.js';
 import { createCallSession, endCallSession, getCallSession, listCallSessions, updateCallSession } from './call-session-store.js';
@@ -35,7 +36,7 @@ import { addFairyMemoryEntry, buildFairyMemoryContext, loadFairyMemory, removeFa
 import { requireApiAuth } from './api-auth.js';
 import { runApiChatTurn } from './api-chat-runner.js';
 import { runRoleplayChatTurn } from './roleplay-chat-runner.js';
-import { appendApiSessionMessage, createApiSession, getApiSession, getApiSessionMeta, listApiSessions, searchApiSessions } from './api-session-store.js';
+import { appendApiSessionMessage, createApiSession, getApiSession, getApiSessionMeta, listApiSessions, saveApiSession, searchApiSessions } from './api-session-store.js';
 import { loadUiAuthConfig, setUiPassword, checkPassword, createSessionToken, createSession, isValidSession, revokeSession } from './ui-auth.js';
 
 function apiAttachmentPayload(files = []) {
@@ -449,6 +450,35 @@ app.get(`${basePath}/api/settings/api-key/reveal`, async (_req, res) => {
   const current = String(config.apiKey || '').trim();
   return res.json({ ok: true, hasApiKey: !!current, apiKey: current });
 });
+
+app.get(`${basePath}/api/settings/agents`, async (_req, res) => {
+  return res.json({ ok: true, ...(buildAgentSettingsPayload()) });
+});
+
+app.post(`${basePath}/api/settings/agents/detect`, async (req, res) => {
+  try {
+    const source = String(req.body?.source || '').trim().toLowerCase();
+    if (!['openclaw', 'hermes'].includes(source)) {
+      return res.status(400).json({ ok: false, error: 'source must be openclaw or hermes' });
+    }
+    if (source === 'openclaw') {
+      await setEnvKeyInDotenv('OPENCLAW_AGENT_SOURCE_ENABLED', 'true');
+    }
+    if (source === 'hermes') {
+      await setEnvKeyInDotenv('HERMES_BRIDGE_ENABLED', 'true');
+      const detected = detectAgentSources();
+      const first = detected.hermes.agents[0] || null;
+      if (first) {
+        await setEnvKeyInDotenv('HERMES_AGENT_ID', String(first.id || 'hermes'));
+        await setEnvKeyInDotenv('HERMES_AGENT_LABEL', String(first.label || first.name || 'Hermes'));
+        await setEnvKeyInDotenv('HERMES_AGENT_NAME', String(first.name || first.label || 'Hermes'));
+      }
+    }
+    return res.json({ ok: true, source, ...(buildAgentSettingsPayload()) });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message || 'Could not detect agents' });
+  }
+});
 app.use(`${basePath}/media/music`, express.static(getMusicDir()));
 app.use(`${basePath}/media/intros`, express.static(getIntroDir()));
 app.use(`${basePath}/media/appearance/backgrounds`, express.static(getAppearanceBackgroundDir()));
@@ -512,6 +542,52 @@ async function fetchLocalSettings(req, method, path, body = null) {
   let data = null;
   try { data = await upstream.json(); } catch { data = { ok: false, error: `Upstream ${method} ${path} did not return JSON` }; }
   return { status: upstream.status, data };
+}
+
+function buildAgentSettingsPayload() {
+  const roster = getRoster();
+  const detected = detectAgentSources();
+  const bySource = {
+    openclaw: roster.agents.filter((agent) => agent.source === 'openclaw' || agent.bridge === 'openclaw'),
+    hermes: roster.agents.filter((agent) => agent.source === 'hermes' || agent.bridge === 'hermes'),
+  };
+  return {
+    roster,
+    sources: {
+      openclaw: {
+        ...detected.openclaw,
+        activeAgents: bySource.openclaw,
+        showDetectButton: bySource.openclaw.length === 0,
+      },
+      hermes: {
+        ...detected.hermes,
+        activeAgents: bySource.hermes,
+        showDetectButton: bySource.hermes.length === 0,
+      },
+    },
+    actions: {
+      showDetectOpenClaw: bySource.openclaw.length === 0,
+      showDetectHermes: bySource.hermes.length === 0,
+    },
+  };
+}
+
+async function maybePersistHermesSession(session, result) {
+  const hermesSessionId = String(result?.hermesSessionId || '').trim();
+  const hermesProfile = String(result?.hermesProfile || '').trim();
+  if (!session?.id || (!hermesSessionId && !hermesProfile)) return session;
+  if (
+    String(session?.metadata?.hermesSessionId || '').trim() === hermesSessionId
+    && String(session?.metadata?.hermesProfile || '').trim() === hermesProfile
+  ) return session;
+  return await saveApiSession({
+    ...session,
+    metadata: {
+      ...(session.metadata || {}),
+      ...(hermesSessionId ? { hermesSessionId } : {}),
+      ...(hermesProfile ? { hermesProfile } : {}),
+    },
+  });
 }
 
 async function runImageLookupTask({ query, agent, session }) {
@@ -610,17 +686,23 @@ function inferTaskDomain(text = '') {
   return 'general';
 }
 
-function describeAgentChoice(agentId = '', roster) {
+function getAgentRuntimeInfo(agentId = '', roster) {
   const agents = Array.isArray(roster?.agents) ? roster.agents : [];
   const agent = agents.find((item) => item.id === agentId) || {};
-  const label = compactForSpeech(agent.label || agent.name || agent.id || agentId || 'OpenClaw', 80);
+  const runtime = agent.source === 'hermes' || agent.bridge === 'hermes' ? 'hermes' : 'openclaw';
+  const label = compactForSpeech(agent.label || agent.name || agent.id || agentId || (runtime === 'hermes' ? 'Hermes' : 'OpenClaw'), 80);
+  return { agent, runtime, label };
+}
+
+function describeAgentChoice(agentId = '', roster) {
+  const { agent, runtime, label } = getAgentRuntimeInfo(agentId, roster);
   const domain = inferTaskDomain(`${agent.id || ''} ${agent.label || ''} ${agent.name || ''}`);
-  if (domain === 'ui') return { label, reason: 'UI issue. Routing the visual specialist.' };
-  if (domain === 'backend') return { label, reason: 'Backend job. Routing the systems brain.' };
-  if (domain === 'qa') return { label, reason: 'Validation problem. Routing QA.' };
-  if (domain === 'research') return { label, reason: 'Research task. Routing the investigator.' };
-  if (domain === 'docs') return { label, reason: 'Docs work. Routing the writer.' };
-  return { label, reason: 'That needs Astra. Routing it through OpenClaw.' };
+  if (domain === 'ui') return { label, runtime, reason: 'UI issue. Routing the visual specialist.' };
+  if (domain === 'backend') return { label, runtime, reason: 'Backend job. Routing the systems brain.' };
+  if (domain === 'qa') return { label, runtime, reason: 'Validation problem. Routing QA.' };
+  if (domain === 'research') return { label, runtime, reason: 'Research task. Routing the investigator.' };
+  if (domain === 'docs') return { label, runtime, reason: 'Docs work. Routing the writer.' };
+  return { label, runtime, reason: runtime === 'hermes' ? 'That needs Nyxie. Routing it through Hermes.' : 'That needs Astra. Routing it through OpenClaw.' };
 }
 
 function buildHandoffSpokenSummary(text = '', agentId = '', roster) {
@@ -760,7 +842,7 @@ function maybeAnnounceLiveTaskProgress(msg) {
   const updated = updateCallSession(session.id, {
     handoffTaskId: taskId,
     handoffTitle: task.title || session.handoffTitle || '',
-    lastTaskSummary: task.summary || 'OpenClaw is working on it.',
+    lastTaskSummary: task.summary || (String(task.runtime || '').trim() === 'hermes' ? 'Hermes is working on it.' : 'OpenClaw is working on it.'),
   });
   broadcastCallDebugState(session.id);
   broadcast({
@@ -769,7 +851,7 @@ function maybeAnnounceLiveTaskProgress(msg) {
       sessionId: session.id,
       taskId,
       status,
-      summary: task.summary || 'OpenClaw is working on it.',
+      summary: task.summary || (String(task.runtime || '').trim() === 'hermes' ? 'Hermes is working on it.' : 'OpenClaw is working on it.'),
       title: task.title || session.handoffTitle || 'Background task',
       session: updated || session,
     },
@@ -1403,15 +1485,17 @@ function maybeAnnounceLiveTaskResult(msg) {
     if (oldest) announcedLiveTaskResults.delete(oldest);
   }
 
-  const title = compactForSpeech(task.title || session.handoffTitle || 'OpenClaw task', 180);
-  const agent = compactForSpeech(task.agent || session.agent || 'OpenClaw', 80);
+  const runtime = String(task.runtime || '').trim() === 'hermes' ? 'hermes' : 'openclaw';
+  const runtimeLabel = runtime === 'hermes' ? 'Hermes' : 'OpenClaw';
+  const title = compactForSpeech(task.title || session.handoffTitle || `${runtimeLabel} task`, 180);
+  const agent = compactForSpeech(task.agent || session.agent || runtimeLabel, 80);
   const summary = compactForSpeech(task.summary || '', 700);
   const result = compactForSpeech(task.result || task.error || '', 1800);
   const statusLine = status === 'completed'
-    ? 'The OpenClaw agent finished successfully.'
+    ? `The ${runtimeLabel} agent finished successfully.`
     : status === 'needs_input'
-      ? 'The OpenClaw agent needs more input from Epic.'
-      : 'The OpenClaw agent failed.';
+      ? `The ${runtimeLabel} agent needs more input from Epic.`
+      : `The ${runtimeLabel} agent failed.`;
   const prompt = [
     'SYSTEM EVENT FOR LIVE CALL:',
     statusLine,
@@ -3554,27 +3638,29 @@ Tell Epic briefly that you put the image on screen and that he can copy the link
                 }, 50);
                 continue;
               }
-              if (name !== 'handoff_to_openclaw') {
+              if (name !== 'handoff_to_openclaw' && name !== 'handoff_to_agent') {
                 functionResponses.push({ name, id, response: { error: `Unsupported tool: ${name}` } });
                 continue;
               }
               const prompt = String(args.prompt || '').trim();
-              const title = String(args.title || prompt.slice(0, 80) || 'OpenClaw task').trim();
+              const title = String(args.title || prompt.slice(0, 80) || 'Agent task').trim();
               const requestedAgent = String(args.agent || session.agent || 'orchestrator').trim();
               const agent = roster.agents.some((item) => item.id === requestedAgent)
                 ? requestedAgent
                 : String(roster.primaryAgentId || session.agent || 'orchestrator').trim();
+              const selectedAgent = roster.agents.find((item) => item.id === agent) || null;
+              const runtime = selectedAgent?.source === 'hermes' || selectedAgent?.bridge === 'hermes' ? 'hermes' : 'openclaw';
               const summary = String(args.summary || buildHandoffSpokenSummary(prompt, agent, roster)).trim();
               if (!prompt) {
-                functionResponses.push({ name, id, response: { error: 'Missing prompt for handoff_to_openclaw' } });
+                functionResponses.push({ name, id, response: { error: 'Missing prompt for handoff_to_agent' } });
                 continue;
               }
               const handoffStarted = setCallSessionState(session.id, 'handing_off', {
                 handoffTitle: title,
                 handoffTaskId: '',
               });
-              broadcastCallHandoff('call:handoff.started', session.id, { title, summary, agent, session: handoffStarted });
-              const task = await createLiveTask({ title, summary, prompt, agent });
+              broadcastCallHandoff('call:handoff.started', session.id, { title, summary, agent, runtime, session: handoffStarted });
+              const task = await createLiveTask({ title, summary, prompt, agent, runtime });
               const handoffLinked = setCallSessionState(session.id, 'task_running', {
                 handoffTaskId: task.id,
                 handoffTitle: title,
@@ -4571,6 +4657,7 @@ app.post(`${basePath}/api/v1/sessions/:id/messages`, async (req, res) => {
     const result = sessionMode === 'roleplay'
       ? await runRoleplayChatTurn({ session, latestMessage: text, attachmentContext, model: session.model || String(req.body?.model || '').trim() })
       : await runApiChatTurn({ session, latestMessage: text, attachmentContext });
+    session = await maybePersistHermesSession(session, result);
     const assistantMeta = { files: [], mode: sessionMode, model: result.model || session.model || '' };
     let audioPayload = null;
     if (req.body?.audio === true) {
@@ -4651,6 +4738,7 @@ app.post(`${basePath}/api/v1/sessions/:id/messages/stream`, async (req, res) => 
           attachmentContext,
           onEvent: (event) => sendEvent(event.type, event.data || {}),
         });
+    session = await maybePersistHermesSession(session, result);
     const assistantMeta = { files: [], mode: sessionMode, model: result.model || session.model || '' };
     let audioEvent = null;
     if (req.body?.audio === true) {
@@ -4708,6 +4796,7 @@ app.post(`${basePath}/api/v1/chat`, async (req, res) => {
     const userAppend = await appendApiSessionMessage(session.id, { role: 'user', text: message, meta: { files: attachmentPayload } });
     session = userAppend.session;
     const result = await runApiChatTurn({ session, latestMessage: message, attachmentContext });
+    session = await maybePersistHermesSession(session, result);
     const assistantMeta = { files: [] };
     let audioPayload = null;
     if (req.body?.audio === true) {
@@ -4770,6 +4859,8 @@ app.post(`${basePath}/api/chat/sessions`, async (req, res) => {
     const mode = String(req.body?.mode || 'agent').trim() === 'roleplay' ? 'roleplay' : 'agent';
     const model = String(req.body?.model || '').trim();
     const metadata = req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {};
+    const roleplayProvider = req.body?.roleplayProvider && typeof req.body.roleplayProvider === 'object' ? req.body.roleplayProvider : null;
+    if (mode === 'roleplay' && roleplayProvider) metadata.roleplayProvider = roleplayProvider;
     if (!agent) return res.status(400).json({ ok: false, error: 'agent is required' });
     const exists = roster.agents.some((item) => item.id === agent);
     if (!exists) return res.status(404).json({ ok: false, error: 'Agent not found' });
@@ -4799,6 +4890,7 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
     const requestedAgent = String(req.body?.agent || '').trim();
     const requestedMode = String(req.body?.mode || 'agent').trim() === 'roleplay' ? 'roleplay' : 'agent';
     const requestedModel = String(req.body?.model || '').trim();
+    const requestedRoleplayProvider = req.body?.roleplayProvider && typeof req.body.roleplayProvider === 'object' ? req.body.roleplayProvider : null;
     const existingSessionId = String(req.body?.sessionId || '').trim();
     const title = String(req.body?.title || '').trim();
     const fileIds = Array.isArray(req.body?.fileIds) ? req.body.fileIds : [];
@@ -4816,9 +4908,23 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
       session = await createApiSession({
         agent: target,
         title,
-        metadata: req.body?.metadata || {},
+        metadata: {
+          ...(req.body?.metadata || {}),
+          ...(requestedMode === 'roleplay' && requestedRoleplayProvider ? { roleplayProvider: requestedRoleplayProvider } : {}),
+        },
         mode: requestedMode,
         model: requestedMode === 'roleplay' ? requestedModel : '',
+      });
+    }
+
+    if (String(session.mode || 'agent') === 'roleplay' && (requestedModel || requestedRoleplayProvider)) {
+      session = await saveApiSession({
+        ...session,
+        model: requestedModel || session.model,
+        metadata: {
+          ...(session.metadata || {}),
+          ...(requestedRoleplayProvider ? { roleplayProvider: requestedRoleplayProvider } : {}),
+        },
       });
     }
 
@@ -4845,8 +4951,9 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
     });
 
     const result = sessionMode === 'roleplay'
-      ? await runRoleplayChatTurn({ session, latestMessage: userText, attachmentContext, model: session.model || requestedModel })
+      ? await runRoleplayChatTurn({ session, latestMessage: userText, attachmentContext, model: session.model || requestedModel, roleplayProvider: requestedRoleplayProvider })
       : await runApiChatTurn({ session, latestMessage: userText, attachmentContext });
+    session = await maybePersistHermesSession(session, result);
     const assistantMeta = { files: [], mode: sessionMode, model: result.model || session.model || '' };
     const assistantAppend = await appendApiSessionMessage(session.id, { role: 'assistant', text: result.text, meta: assistantMeta });
 
@@ -4956,6 +5063,7 @@ export { broadcast, wss };
 
 const bridge = new OpenClawBridge();
 const stopSessionMonitor = startSessionMonitor({ broadcast, roster, emitResponses: true });
+const stopHermesSessionMonitor = startHermesSessionMonitor({ broadcast });
 
 app.get(`${basePath}/api/session-monitor/debug`, (req, res) => {
   res.json({ ok: true, agents: typeof stopSessionMonitor.getDebugState === 'function' ? stopSessionMonitor.getDebugState() : [] });

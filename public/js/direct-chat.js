@@ -31,9 +31,27 @@ let sessionListEl = null;
 let sessionSearchEl = null;
 let newSessionBtnEl = null;
 let sessionMenuToggleEl = null;
+let roleplayModelSelectEl = null;
+let roleplayCustomBaseUrlEl = null;
+let roleplayCustomApiKeyEl = null;
+let roleplayCustomModelEl = null;
 let modeToggleEls = [];
 
+const ROLEPLAY_MODEL_STORAGE_KEY = 'commandcenter:direct-chat:roleplay-model';
+const ROLEPLAY_CUSTOM_STORAGE_KEY = 'commandcenter:direct-chat:roleplay-custom-provider';
 const ROLEPLAY_MODEL = 'z-ai/glm-5';
+const ROLEPLAY_CUSTOM_MODEL = '__custom_openai__';
+const ROLEPLAY_MODELS = [
+  { id: 'z-ai/glm-5', label: 'Z.ai GLM-5 (OpenRouter default)' },
+  { id: 'anthropic/claude-sonnet-4.5', label: 'Claude Sonnet 4.5' },
+  { id: 'openai/gpt-5.5', label: 'GPT-5.5' },
+  { id: 'anthracite-org/magnum-v4-72b', label: 'Magnum v4 72B' },
+  { id: 'sao10k/l3.1-euryale-70b', label: 'Euryale 70B' },
+  { id: 'sophosympatheia/rogue-rose-103b-v0.2', label: 'Rogue Rose 103B' },
+  { id: ROLEPLAY_CUSTOM_MODEL, label: 'Custom OpenAI-compatible...' },
+];
+let selectedRoleplayModel = localStorage.getItem(ROLEPLAY_MODEL_STORAGE_KEY) || ROLEPLAY_MODEL;
+let selectedRoleplayCustomProvider = loadStoredRoleplayCustomProvider();
 let activeChatMode = 'agent';
 
 const chatHistory = {};
@@ -83,6 +101,15 @@ function createPanel() {
           <div class="dc-chat-mode-row">
             <button class="dc-mode-toggle active" type="button" data-chat-mode="agent">Agent</button>
             <button class="dc-mode-toggle" type="button" data-chat-mode="roleplay">Roleplay</button>
+            <label class="dc-roleplay-model-wrap hidden">
+              <span>Model</span>
+              <select class="dc-roleplay-model" title="Roleplay model"></select>
+            </label>
+          </div>
+          <div class="dc-roleplay-custom hidden">
+            <input class="dc-roleplay-custom-url" type="url" placeholder="OpenAI-compatible base URL, e.g. http://localhost:1234/v1">
+            <input class="dc-roleplay-custom-model" type="text" placeholder="Model ID">
+            <input class="dc-roleplay-custom-key" type="password" placeholder="API key (optional)">
           </div>
           <div class="dc-session-bar">
             <button class="dc-session-toggle" type="button" aria-expanded="false">Session: <span class="dc-session-title">Latest</span> ▾</button>
@@ -148,6 +175,10 @@ function createPanel() {
   sessionSearchEl = panelEl.querySelector('.dc-session-search');
   newSessionBtnEl = panelEl.querySelector('.dc-session-new');
   sessionMenuToggleEl = panelEl.querySelector('.dc-session-toggle');
+  roleplayModelSelectEl = panelEl.querySelector('.dc-roleplay-model');
+  roleplayCustomBaseUrlEl = panelEl.querySelector('.dc-roleplay-custom-url');
+  roleplayCustomApiKeyEl = panelEl.querySelector('.dc-roleplay-custom-key');
+  roleplayCustomModelEl = panelEl.querySelector('.dc-roleplay-custom-model');
   modeToggleEls = Array.from(panelEl.querySelectorAll('.dc-mode-toggle'));
 
   panelEl.querySelector('.dc-close').addEventListener('click', closeChatPanel);
@@ -165,6 +196,11 @@ function createPanel() {
   sessionMenuToggleEl?.addEventListener('click', toggleSessionMenu);
   newSessionBtnEl?.addEventListener('click', createNewSession);
   modeToggleEls.forEach((btn) => btn.addEventListener('click', () => setChatMode(btn.dataset.chatMode || 'agent')));
+  initRoleplayModelSelect();
+  roleplayModelSelectEl?.addEventListener('change', () => setRoleplayModel(roleplayModelSelectEl.value));
+  [roleplayCustomBaseUrlEl, roleplayCustomApiKeyEl, roleplayCustomModelEl].forEach((input) => {
+    input?.addEventListener('input', persistRoleplayCustomProvider);
+  });
   sessionSearchEl?.addEventListener('input', () => renderSessionList(sessionSearchEl.value));
   panelEl.addEventListener('click', async (event) => {
     const speakButton = event.target?.closest?.('.dc-message-speak');
@@ -366,6 +402,70 @@ function getActiveHistoryKey() {
   return `main:${activeChatMode}`;
 }
 
+function loadStoredRoleplayCustomProvider() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(ROLEPLAY_CUSTOM_STORAGE_KEY) || '{}');
+    return {
+      baseUrl: String(parsed.baseUrl || '').trim(),
+      apiKey: String(parsed.apiKey || '').trim(),
+      model: String(parsed.model || '').trim(),
+    };
+  } catch {
+    return { baseUrl: '', apiKey: '', model: '' };
+  }
+}
+
+function getRoleplayProvider() {
+  if (selectedRoleplayModel !== ROLEPLAY_CUSTOM_MODEL) return null;
+  const baseUrl = String(roleplayCustomBaseUrlEl?.value || selectedRoleplayCustomProvider.baseUrl || '').trim();
+  const apiKey = String(roleplayCustomApiKeyEl?.value || selectedRoleplayCustomProvider.apiKey || '').trim();
+  const model = String(roleplayCustomModelEl?.value || selectedRoleplayCustomProvider.model || '').trim();
+  return { baseUrl, apiKey, model };
+}
+
+function getRoleplayModel() {
+  if (selectedRoleplayModel === ROLEPLAY_CUSTOM_MODEL) return getRoleplayProvider()?.model || '';
+  const model = String(selectedRoleplayModel || ROLEPLAY_MODEL).trim();
+  return model || ROLEPLAY_MODEL;
+}
+
+function persistRoleplayCustomProvider() {
+  selectedRoleplayCustomProvider = {
+    baseUrl: String(roleplayCustomBaseUrlEl?.value || '').trim(),
+    apiKey: String(roleplayCustomApiKeyEl?.value || '').trim(),
+    model: String(roleplayCustomModelEl?.value || '').trim(),
+  };
+  localStorage.setItem(ROLEPLAY_CUSTOM_STORAGE_KEY, JSON.stringify(selectedRoleplayCustomProvider));
+}
+
+function syncRoleplayCustomInputs() {
+  if (roleplayCustomBaseUrlEl) roleplayCustomBaseUrlEl.value = selectedRoleplayCustomProvider.baseUrl || '';
+  if (roleplayCustomApiKeyEl) roleplayCustomApiKeyEl.value = selectedRoleplayCustomProvider.apiKey || '';
+  if (roleplayCustomModelEl) roleplayCustomModelEl.value = selectedRoleplayCustomProvider.model || '';
+}
+
+function setRoleplayModel(model = ROLEPLAY_MODEL, { persist = true } = {}) {
+  const value = String(model || '').trim() || ROLEPLAY_MODEL;
+  selectedRoleplayModel = value;
+  if (roleplayModelSelectEl && roleplayModelSelectEl.value !== value) roleplayModelSelectEl.value = value;
+  if (persist) localStorage.setItem(ROLEPLAY_MODEL_STORAGE_KEY, value);
+  syncModeToggle();
+}
+
+function initRoleplayModelSelect() {
+  if (!roleplayModelSelectEl) return;
+  roleplayModelSelectEl.innerHTML = ROLEPLAY_MODELS.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.label)}</option>`).join('');
+  if (!ROLEPLAY_MODELS.some((item) => item.id === selectedRoleplayModel)) selectedRoleplayModel = ROLEPLAY_MODEL;
+  syncRoleplayCustomInputs();
+  setRoleplayModel(selectedRoleplayModel, { persist: false });
+}
+
+function syncRoleplayModelFromSession(sessionId = activeChatSessionId) {
+  if (activeChatMode !== 'roleplay' || !activeChatAgent || !sessionId) return;
+  const session = (sessionsByAgent[activeChatAgent] || []).find((item) => item.id === sessionId);
+  if (session?.model) setRoleplayModel(session.model);
+}
+
 function syncModeToggle() {
   const fairyMode = isFairyAgent();
   modeToggleEls.forEach((btn) => {
@@ -377,6 +477,12 @@ function syncModeToggle() {
   });
   if (sessionMenuToggleEl) sessionMenuToggleEl.classList.toggle('hidden', fairyMode);
   if (newSessionBtnEl) newSessionBtnEl.classList.toggle('hidden', fairyMode);
+  const isRoleplay = activeChatMode === 'roleplay';
+  const modelWrap = panelEl?.querySelector?.('.dc-roleplay-model-wrap');
+  const customWrap = panelEl?.querySelector?.('.dc-roleplay-custom');
+  modelWrap?.classList.toggle('hidden', fairyMode || !isRoleplay);
+  customWrap?.classList.toggle('hidden', fairyMode || !isRoleplay || selectedRoleplayModel !== ROLEPLAY_CUSTOM_MODEL);
+  if (roleplayModelSelectEl) roleplayModelSelectEl.disabled = fairyMode || !isRoleplay;
 }
 
 async function setChatMode(mode = 'agent') {
@@ -471,6 +577,16 @@ function renderMessages() {
   container.scrollTop = container.scrollHeight;
 }
 
+function formatEventSourceLabel(data = {}) {
+  const source = String(data?.source || '').trim();
+  const platform = String(data?.platform || '').trim();
+  if (!source) return '';
+  if (source === 'direct-chat') return 'Direct Chat';
+  if (source === 'hermes-session-monitor') return platform ? `Hermes · ${platform}` : 'Hermes';
+  if (source === 'session-monitor') return 'OpenClaw';
+  return platform ? `${source} · ${platform}` : source;
+}
+
 function renderMessage(msg, index = 0, messages = []) {
   const isUser = msg.role === 'user';
   const prev = messages[index - 1] || null;
@@ -504,12 +620,17 @@ function renderMessage(msg, index = 0, messages = []) {
     ? `<div class="dc-message-files">${msg.files.map(renderAttachedBadge).join('')}</div>`
     : '';
 
+  const metaLine = !isGroupedWithPrev && msg.meta
+    ? `<div class="dc-message-meta" style="font-size:11px; color:var(--text-dim); margin-top:2px; margin-bottom:4px;">${escapeHtml(msg.meta)}</div>`
+    : '';
+
   return `
     <div class="${classes.join(' ')}">
       ${isGroupedWithPrev ? '' : `<div class="dc-message-topline">
         <div class="dc-message-name">${escapeHtml(label)}</div>
         <div class="dc-message-time">${formatTime(msg.timestamp)}</div>
       </div>`}
+      ${metaLine}
       ${body}
       ${attachments}
       ${isGroupedWithPrev ? `<div class="dc-message-time dc-message-time-inline">${formatTime(msg.timestamp)}</div>` : ''}
@@ -728,6 +849,7 @@ function renderSessionList(query = '') {
 async function selectSession(sessionId) {
   if (!sessionId) return;
   activeChatSessionId = sessionId;
+  syncRoleplayModelFromSession(sessionId);
   await loadSessionMessages(sessionId);
   updateSessionTitle();
   renderMessages();
@@ -742,7 +864,13 @@ async function createNewSession() {
     const res = await fetch(`${BASE}/api/chat/sessions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agent: activeChatAgent, title: '', mode: activeChatMode, model: activeChatMode === 'roleplay' ? ROLEPLAY_MODEL : '' }),
+      body: JSON.stringify({
+        agent: activeChatAgent,
+        title: '',
+        mode: activeChatMode,
+        model: activeChatMode === 'roleplay' ? getRoleplayModel() : '',
+        roleplayProvider: activeChatMode === 'roleplay' ? getRoleplayProvider() : null,
+      }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || 'Failed to create session');
@@ -775,8 +903,20 @@ async function sendMessage() {
   messageInputEl.value = '';
   renderMessages();
 
+  if (!fairyMode && activeChatMode === 'roleplay' && selectedRoleplayModel === ROLEPLAY_CUSTOM_MODEL) {
+    persistRoleplayCustomProvider();
+    const provider = getRoleplayProvider();
+    if (!provider?.baseUrl || !provider?.model) {
+      removeTypingMessage(historyKey);
+      pendingByAgent[activeChatAgent] = false;
+      renderMessages();
+      terminal.log('[chat] Custom roleplay model requires a base URL and model ID.', 'error', true);
+      return;
+    }
+  }
+
   const agentLabel = getAgent(activeChatAgent).label;
-  const modeLabel = fairyMode ? 'fairy-live' : (activeChatMode === 'roleplay' ? `roleplay:${ROLEPLAY_MODEL}` : 'agent');
+  const modeLabel = fairyMode ? 'fairy-live' : (activeChatMode === 'roleplay' ? `roleplay:${getRoleplayModel()}` : 'agent');
   terminal.log(`[you → ${agentLabel} (${modeLabel})] ${text}`, 'agent', true);
 
   try {
@@ -788,9 +928,10 @@ async function sendMessage() {
       return;
     }
 
+    const roleplayProvider = activeChatMode === 'roleplay' ? getRoleplayProvider() : null;
     const payload = activeChatSessionId
-      ? { message: text, sessionId: activeChatSessionId, fileIds: selectedFileIds, mode: activeChatMode, model: activeChatMode === 'roleplay' ? ROLEPLAY_MODEL : '' }
-      : { message: text, agent: activeChatAgent, fileIds: selectedFileIds, mode: activeChatMode, model: activeChatMode === 'roleplay' ? ROLEPLAY_MODEL : '' };
+      ? { message: text, sessionId: activeChatSessionId, fileIds: selectedFileIds, mode: activeChatMode, model: activeChatMode === 'roleplay' ? getRoleplayModel() : '', roleplayProvider }
+      : { message: text, agent: activeChatAgent, fileIds: selectedFileIds, mode: activeChatMode, model: activeChatMode === 'roleplay' ? getRoleplayModel() : '', roleplayProvider };
 
     const res = await fetch(`${BASE}/api/chat/direct`, {
       method: 'POST',
@@ -876,48 +1017,52 @@ export function handleChatEvent(msg) {
   }
 
   const agentId = data?.agent;
-  if (!agentId || !pendingByAgent[agentId]) return;
+  if (!agentId) return;
   if (agentId !== activeChatAgent) return;
 
   const isDirectChatEvent = data?.chat === true || data?.source === 'direct-chat';
-  if (!isDirectChatEvent) return;
+  const isExternalAgentEvent = !isDirectChatEvent && (data?.source === 'hermes-session-monitor' || data?.source === 'session-monitor');
+  if (!isDirectChatEvent && !isExternalAgentEvent) return;
+  if (isDirectChatEvent && !pendingByAgent[agentId]) return;
   if (data?.sessionId && activeChatSessionId && data.sessionId !== activeChatSessionId) return;
 
   const historyKey = getActiveHistoryKey();
+  const sourceMeta = formatEventSourceLabel(data);
 
   if (type === 'agent:thinking') {
-    if (agentId === activeChatAgent) renderMessages();
+    if (isDirectChatEvent && agentId === activeChatAgent) renderMessages();
     return;
   }
 
   if (type === 'agent:tool_use') {
-    removeTypingMessage(historyKey);
+    if (isDirectChatEvent) removeTypingMessage(historyKey);
     addMessage(historyKey, {
       role: 'agent',
       kind: 'tool',
       text: `${data.tool || 'tool'}(${shortenToolInput(data.input)})`,
+      meta: sourceMeta,
     });
-    addMessage(historyKey, { role: 'agent', kind: 'typing', text: '' });
+    if (isDirectChatEvent) addMessage(historyKey, { role: 'agent', kind: 'typing', text: '' });
     if (agentId === activeChatAgent) renderMessages();
     return;
   }
 
   if (type === 'agent:responding' && data?.message) {
-    pendingByAgent[agentId] = false;
+    if (isDirectChatEvent) pendingByAgent[agentId] = false;
     removeTypingMessage(historyKey);
     const history = ensureHistory(historyKey);
     const last = history[history.length - 1];
     if (!last || last.text !== data.message || last.kind === 'typing') {
-      addMessage(historyKey, { role: 'agent', kind: 'text', text: data.message });
+      addMessage(historyKey, { role: 'agent', kind: 'text', text: data.message, meta: sourceMeta });
     }
     if (agentId === activeChatAgent) renderMessages();
     return;
   }
 
   if (type === 'agent:error') {
-    pendingByAgent[agentId] = false;
+    if (isDirectChatEvent) pendingByAgent[agentId] = false;
     removeTypingMessage(historyKey);
-    addMessage(historyKey, { role: 'agent', kind: 'error', text: `Error: ${data.message || 'Unknown error'}` });
+    addMessage(historyKey, { role: 'agent', kind: 'error', text: `Error: ${data.message || 'Unknown error'}`, meta: sourceMeta });
     if (agentId === activeChatAgent) renderMessages();
   }
 }

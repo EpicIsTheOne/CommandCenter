@@ -3,7 +3,7 @@ import * as mascot from './mascot.js?v=20260509y';
 import * as office from './office.js?v=20260516-rooms7';
 import * as voice from './voice.js?v=20260515-voicefix2';
 import * as wake from './wake.js?v=20260320l';
-import * as directChat from './direct-chat.js?v=20260518-fairy-chatcall1';
+import * as directChat from './direct-chat.js?v=20260521-roleplay-custom1';
 import * as companions from './companions.js?v=20260515-voicefix2';
 import * as music from './music.js?v=20260514c';
 import * as intro from './intro.js?v=20260514b';
@@ -83,6 +83,83 @@ function setSettingsStatus(text, isError = false) {
   if (!el) return;
   el.textContent = text || '';
   el.style.color = isError ? 'var(--red)' : 'var(--text-dim)';
+}
+
+async function refreshAgentsSettings() {
+  const statusEl = document.getElementById('agents-settings-status');
+  const listEl = document.getElementById('agents-settings-list');
+  const detectOpenClawBtn = document.getElementById('detect-openclaw-agents-btn');
+  const detectHermesBtn = document.getElementById('detect-hermes-agents-btn');
+  if (statusEl) statusEl.textContent = 'Checking agent sources...';
+  try {
+    const data = await fetchJson(`${BASE}/api/settings/agents`);
+    const sources = data.sources || {};
+    const openclaw = sources.openclaw || {};
+    const hermes = sources.hermes || {};
+    if (data.roster?.agents?.length) applyRoster(data.roster);
+    const openclawAgents = Array.isArray(openclaw.activeAgents) ? openclaw.activeAgents : [];
+    const hermesAgents = Array.isArray(hermes.activeAgents) ? hermes.activeAgents : [];
+
+    const showOpenClawBtn = data.actions?.showDetectOpenClaw || openclawAgents.length === 0;
+    const showHermesBtn = data.actions?.showDetectHermes || hermesAgents.length === 0;
+
+    if (detectOpenClawBtn) detectOpenClawBtn.classList.toggle('hidden', !showOpenClawBtn);
+    if (detectHermesBtn) detectHermesBtn.classList.toggle('hidden', !showHermesBtn);
+
+    if (statusEl) {
+      const parts = [];
+      if (openclawAgents.length) parts.push(`${openclawAgents.length} OpenClaw`);
+      if (hermesAgents.length) parts.push(`${hermesAgents.length} Hermes`);
+      statusEl.textContent = parts.length ? `${parts.join(' + ')} agent${(openclawAgents.length + hermesAgents.length) === 1 ? '' : 's'} detected.` : 'No agents detected. Use Detect to add sources.';
+    }
+
+    if (listEl) {
+      const allAgents = [...openclawAgents, ...hermesAgents];
+      if (!allAgents.length) {
+        listEl.innerHTML = '<div class="setting-hint">No agents configured. Click Detect to enable OpenClaw or Hermes agents.</div>';
+      } else {
+        listEl.innerHTML = allAgents.map((agent) => {
+          const sourceLabel = agent.source === 'hermes' ? 'Hermes' : 'OpenClaw';
+          const sourceClass = agent.source === 'hermes' ? 'hermes-agent-badge' : 'openclaw-agent-badge';
+          const bossBadge = agent.isBoss ? ' <span style="color:#FFD700;" title="Primary agent">★</span>' : '';
+          return `<div class="agent-row" style="display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
+            <span class="agent-color-dot" style="width:10px; height:10px; border-radius:50%; background:${escapeHtml(agent.color || '#AA66FF')}; flex-shrink:0;"></span>
+            <span style="font-weight:600;">${escapeHtml(agent.label || agent.id)}</span>
+            ${bossBadge}
+            <span style="color:var(--text-dim); font-size:0.85em;">${escapeHtml(agent.id)}</span>
+            <span class="${sourceClass}" style="margin-left:auto; font-size:0.75em; padding:2px 8px; border-radius:999px; background:${agent.source === 'hermes' ? 'rgba(255,102,196,0.15)' : 'rgba(255,215,0,0.12)'}; color:${agent.source === 'hermes' ? '#FF66C4' : '#FFD700'};">${sourceLabel}</span>
+          </div>`;
+        }).join('');
+      }
+    }
+  } catch (err) {
+    if (statusEl) statusEl.textContent = err.message || 'Failed to load agents.';
+    if (listEl) listEl.innerHTML = `<div class="setting-hint" style="color:var(--red);">${escapeHtml(err.message || 'Failed to load agents.')}</div>`;
+  }
+}
+
+async function detectAgentSource(source = '') {
+  const statusEl = document.getElementById('agents-settings-status');
+  const detectOpenClawBtn = document.getElementById('detect-openclaw-agents-btn');
+  const detectHermesBtn = document.getElementById('detect-hermes-agents-btn');
+  const btn = source === 'openclaw' ? detectOpenClawBtn : detectHermesBtn;
+  if (btn) btn.disabled = true;
+  if (statusEl) statusEl.textContent = `Detecting ${source === 'openclaw' ? 'OpenClaw' : 'Hermes'} agents...`;
+  try {
+    const data = await fetchJson(`${BASE}/api/settings/agents/detect`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ source }),
+    });
+    if (data.roster?.agents?.length) applyRoster(data.roster);
+    await refreshAgentsSettings();
+    const count = (data.sources?.[source]?.activeAgents || []).length;
+    if (statusEl) statusEl.textContent = `Detected ${count} ${source === 'openclaw' ? 'OpenClaw' : 'Hermes'} agent${count === 1 ? '' : 's'}.`;
+  } catch (err) {
+    if (statusEl) statusEl.textContent = err.message || `Failed to detect ${source} agents.`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function formatBytes(bytes = 0) {
@@ -644,6 +721,12 @@ function getAgentLabel(agentId) {
   return roster.agents.find(a => a.id === agentId)?.label || agentId || 'main';
 }
 
+function applyRoster(nextRoster = { agents: [], primaryAgentId: 'main' }) {
+  roster = nextRoster || { agents: [], primaryAgentId: 'main' };
+  office.setRoster?.(roster);
+  directChat.setRoster?.(roster);
+}
+
 function normalizeSpeechText(text = '') {
   return String(text || '')
     .replace(/^\s*\[\[\s*reply_to[^\]]*\]\]\s*/i, '')
@@ -934,7 +1017,7 @@ async function handleEvent(msg) {
   if (type === 'status' || type === 'bridge:connected') {
     const mode = String(data?.mode || 'unknown');
     setConnectionState(mode === 'demo' ? 'disconnected' : 'connected', mode === 'demo' ? 'DEMO MODE' : 'CONNECTED');
-    if (data?.agents?.length) roster = { agents: data.agents, primaryAgentId: data.primaryAgentId || data.agents[0]?.id };
+    if (data?.agents?.length) applyRoster({ agents: data.agents, primaryAgentId: data.primaryAgentId || data.agents[0]?.id });
     terminal.log(`[bridge] Mode: ${mode}`, mode === 'demo' ? 'error' : 'system', true);
     if (mode === 'demo' && data?.fallbackReason) {
       terminal.log(`[bridge] Demo fallback reason: ${data.fallbackReason}`, 'error', true);
@@ -1073,15 +1156,22 @@ async function handleEvent(msg) {
 function formatLogEntry(type, data) {
   const agent = data?.agent || '?';
   const shortType = type.split(':')[1] || type;
+  const source = String(data?.source || '').trim();
+  const platform = String(data?.platform || '').trim();
+  const suffix = source === 'hermes-session-monitor'
+    ? ` [Hermes${platform ? `/${platform}` : ''}]`
+    : source === 'session-monitor'
+      ? ' [OpenClaw]'
+      : '';
   switch (type) {
     case 'agent:tool_use':
-      return `[${agent}] ${shortType}: ${data.tool || '?'}(${data.input || ''})`;
+      return `[${agent}] ${shortType}: ${data.tool || '?'}(${data.input || ''})${suffix}`;
     case 'agent:responding':
-      return `[${agent}] ${data.message || 'responding...'}`;
+      return `[${agent}] ${data.message || 'responding...'}${suffix}`;
     case 'agent:error':
-      return `[${agent}] ERROR: ${data.message || data.status || 'unknown'}`;
+      return `[${agent}] ERROR: ${data.message || data.status || 'unknown'}${suffix}`;
     default:
-      return `[${agent}] ${data.status || shortType}`;
+      return `[${agent}] ${data.status || shortType}${suffix}`;
   }
 }
 
@@ -2150,6 +2240,7 @@ async function openSettings() {
     await refreshFairyDiagnostics();
     await refreshFairyMemoryList();
     await refreshFairyRecordings();
+    await refreshAgentsSettings();
     renderWorkspaceRoomEditor();
     setSetupTestResult('No setup test run yet.', [], 'ok');
     setSettingsStatus('Settings loaded.');
@@ -2554,6 +2645,8 @@ async function main() {
     }
   });
   document.getElementById('run-setup-test-btn')?.addEventListener('click', runSetupTest);
+  document.getElementById('detect-openclaw-agents-btn')?.addEventListener('click', () => detectAgentSource('openclaw'));
+  document.getElementById('detect-hermes-agents-btn')?.addEventListener('click', () => detectAgentSource('hermes'));
   document.getElementById('save-gemini-settings-btn')?.addEventListener('click', saveGeminiSettingsOnly);
   document.getElementById('test-fairy-live-btn')?.addEventListener('click', testFairyLiveSettings);
   document.getElementById('refresh-fairy-memory-btn')?.addEventListener('click', refreshFairyMemoryList);
