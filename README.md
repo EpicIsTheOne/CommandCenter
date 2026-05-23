@@ -36,7 +36,10 @@ Talk to the mascot, talk to individual agents, trigger wake flows, or use direct
 ### 5. Fairy Live realtime calls
 Launch realtime Fairy sessions with mic, screen sharing, camera input, and mobile-friendly camera switching.
 
-### 6. Companion and Codex pet customization
+### 6. Built-in updater and patch flow
+Check for new versions, preview commits/files/diffs, enable automatic updates, and patch the running CommandCenter instance without needing a separate agent workflow.
+
+### 7. Companion and Codex pet customization
 Assign companion visuals, import Codex pets, and give each agent more personality than the average enterprise dashboard could ever survive.
 
 ## Screenshots / Demo
@@ -100,6 +103,7 @@ The UI has three main zones:
 Additional panels and modals provide:
 
 - settings for voice providers and per-agent voices
+- built-in updater controls with auto-update toggle, confirmation modal, commit/file previews, and diff preview
 - companion/pet import and assignment
 - wake-word configuration
 - direct chat with reusable file/link context
@@ -158,6 +162,19 @@ Additional panels and modals provide:
 - Save URL/link references with notes.
 - Attach saved files/links to direct chat requests.
 - Direct chat responses broadcast back into the office/activity system.
+
+### Built-in updater
+
+- Update section inside **Settings**.
+- **Auto update toggle** enabled by default.
+- Manual **Update Now** flow with confirmation modal before applying changes.
+- Git-backed update checks against the configured repo/branch.
+- Pending commit list with commit subjects/body text when available.
+- Changed-file preview with per-file line add/delete counts.
+- Trimmed patch/diff preview so operators can inspect incoming code changes before updating.
+- Dirty-working-tree protection so CommandCenter does not blindly stomp local uncommitted changes.
+- Automatic restart after successful update apply.
+- Post-restart update-state tracking so the UI can report when the update actually landed.
 
 ### Companion visuals and Codex pet imports
 
@@ -335,6 +352,8 @@ You do **not** need separate dashboards just because some agents come from OpenC
 | `settings.js` | Voice/settings persistence and masking helpers |
 | `companions.js` | Companion registry, Codex pet import, animation-map normalization |
 | `agents.js` | Agent roster loading, OpenClaw/Hermes source detection, merge logic, and search helpers |
+| `update-settings.js` | Persistent updater preferences/state storage |
+| `updater.js` | Repo fetch/check/apply logic, diff/commit summaries, restart scheduling, and auto-update loop |
 | `api-auth.js` | Auth middleware for `/api/v1` |
 | `api-chat-runner.js` | API chat turn runner using OpenClaw CLI |
 | `api-session-store.js` | API chat/session persistence |
@@ -415,6 +434,8 @@ See `.env.example` for the full template.
 | `HERMES_AGENT_MODEL` | — | Optional model label override for the primary/default Hermes profile |
 
 Additional voice/wake credentials are usually configured through the settings UI and stored in the app settings files rather than manually editing `.env`.
+
+The built-in updater also stores its durable toggle/state locally under `data/update-settings.json` and `data/update-state.json` instead of requiring manual `.env` editing.
 
 ## Agent Configuration
 

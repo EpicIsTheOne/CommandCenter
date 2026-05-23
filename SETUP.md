@@ -113,6 +113,27 @@ You can run:
 - Hermes only
 - both OpenClaw and Hermes together
 
+## 3.5) Updater behavior
+
+CommandCenter now includes a built-in updater in **Settings → Updates**.
+
+What it gives you:
+- **Auto update toggle** enabled by default
+- manual **Update Now** button
+- confirmation modal before the update actually applies
+- pending commit list
+- changed-file preview
+- trimmed code diff preview
+- latest commit message / release-note style text when available
+
+Important behavior:
+- updates are blocked if the local repo has uncommitted changes
+- applying an update pulls from the repo, installs dependencies if needed, and restarts CommandCenter
+- updater preferences/state are stored locally in `data/update-settings.json` and `data/update-state.json`
+
+If you are preparing an instance for someone else, you usually do **not** need to preconfigure anything in `.env` for updates.
+Just make sure the repo was cloned normally and the host can reach GitHub.
+
 ## 4) Voice setup
 
 Voice is no longer just “paste OpenAI key.” There are separate input and output systems.
@@ -155,6 +176,13 @@ Visit:
 
 Open **Settings** and check the **Setup Status** block.
 
+While you are there, open **Updates** once and make sure it can read the repo cleanly.
+That panel should show whether you are:
+- already up to date
+- waiting on incoming commits
+- blocked by local uncommitted changes
+- or currently applying an update
+
 It should tell you whether you are in:
 - **Demo Mode**
 - **Live Connected**
@@ -183,6 +211,16 @@ Quick checks:
 - If running on the same host as OpenClaw, leave `GATEWAY_TOKEN` blank and restart CommandCenter so auto-detect can run.
 - If setting manually, ensure it matches OpenClaw `gateway.auth.token` exactly.
 - Recheck status using `/api/status` and confirm whether mode is `live` or `demo-fallback`.
+
+### Updates panel says update blocked
+That usually means the repo has local uncommitted changes.
+
+Quick checks:
+- run `git status --short`
+- commit/stash/discard local edits first
+- re-open **Settings → Updates** and refresh status
+
+The updater is intentionally conservative here so it does not overwrite local work.
 
 ### Voice records but no transcript comes back
 Usually one of these:

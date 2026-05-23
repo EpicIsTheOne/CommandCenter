@@ -39,6 +39,7 @@ const VIGNETTE_DIRECTION_STORAGE_KEY = 'commandcenter.vignetteDirectionStrengths
 const DEFAULT_VIGNETTE_STRENGTH = 96;
 const DEFAULT_VIGNETTE_DIRECTIONS = { top: 100, side: 100, bottom: 100 };
 let deferredPwaInstallPrompt = null;
+let updatePayload = null;
 const BUILT_IN_WAKE_WORDS = ['Alexa','Americano','Blueberry','Bumblebee','Computer','Grapefruit','Grasshopper','Hey Google','Hey Siri','Jarvis','Okay Google','Picovoice','Porcupine','Terminator'];
 
 const FAIRY_MOOD_PRESETS = {
@@ -83,6 +84,199 @@ function setSettingsStatus(text, isError = false) {
   if (!el) return;
   el.textContent = text || '';
   el.style.color = isError ? 'var(--red)' : 'var(--text-dim)';
+}
+
+function formatRelativeTime(value) {
+  const ts = Number(value || 0);
+  if (!ts) return 'never';
+  const diff = Date.now() - ts;
+  const mins = Math.round(Math.abs(diff) / 60000);
+  if (mins < 1) return diff >= 0 ? 'just now' : 'in under a minute';
+  if (mins < 60) return diff >= 0 ? `${mins} min ago` : `in ${mins} min`;
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return diff >= 0 ? `${hours}h ago` : `in ${hours}h`;
+  const days = Math.round(hours / 24);
+  return diff >= 0 ? `${days}d ago` : `in ${days}d`;
+}
+
+function renderUpdateSummaryCard(label, value, subvalue = '') {
+  return `
+    <div class="update-summary-card">
+      <div class="update-summary-label">${escapeHtml(label)}</div>
+      <div class="update-summary-value">${escapeHtml(value || '—')}</div>
+      ${subvalue ? `<div class="update-summary-subvalue">${escapeHtml(subvalue)}</div>` : ''}
+    </div>
+  `;
+}
+
+function renderUpdatePayload(data = null) {
+  updatePayload = data || null;
+  const pill = document.getElementById('update-settings-pill');
+  const statusEl = document.getElementById('update-settings-status');
+  const metaEl = document.getElementById('update-meta');
+  const notesEl = document.getElementById('update-release-notes');
+  const commitsEl = document.getElementById('update-commits-list');
+  const filesEl = document.getElementById('update-files-list');
+  const diffEl = document.getElementById('update-diff-preview');
+  const autoUpdate = document.getElementById('auto-update-enabled');
+  const applyBtn = document.getElementById('apply-update-btn');
+  const commitsSummaryEl = document.getElementById('update-commits-summary');
+  const filesSummaryEl = document.getElementById('update-files-summary');
+  const diffSummaryEl = document.getElementById('update-diff-summary');
+  const update = data?.update || {};
+  const settings = data?.settings || {};
+  const state = data?.state || {};
+  const repo = data?.repo || {};
+  const commits = Array.isArray(update.commits) ? update.commits : [];
+  const changedFiles = Array.isArray(update.changedFiles) ? update.changedFiles : [];
+  const dirtyFiles = Array.isArray(update.dirtyFiles) ? update.dirtyFiles : [];
+  const current = update.currentCommit || {};
+  const latest = update.latestCommit || current || {};
+  const pendingCount = Number(update.behind || commits.length || 0) || 0;
+  const statusTone = state.status === 'applying'
+    ? 'Applying update and restarting CommandCenter…'
+    : update.dirty
+      ? 'Update paused. Local repo has uncommitted changes that need attention first.'
+      : update.pending
+        ? `New update ready from ${repo.remote || 'origin'}/${repo.branch || 'main'}.`
+        : state.message || 'CommandCenter is fully up to date.';
+
+  if (autoUpdate) autoUpdate.checked = settings.autoUpdateEnabled !== false;
+  if (pill) {
+    pill.textContent = state.status === 'applying'
+      ? 'Updating…'
+      : update.dirty
+        ? 'Update blocked'
+        : update.pending
+          ? `${pendingCount} update${pendingCount === 1 ? '' : 's'} ready`
+          : 'Up to date';
+    pill.className = `setup-status-pill ${state.status === 'applying' ? 'status-warn' : update.dirty ? 'status-error' : update.pending ? 'status-warn' : 'status-ok'}`;
+  }
+  if (statusEl) statusEl.textContent = statusTone;
+  if (applyBtn) {
+    applyBtn.disabled = !update.pending || state.status === 'applying' || update.dirty;
+    applyBtn.textContent = state.status === 'applying' ? 'UPDATING…' : update.pending ? 'UPDATE NOW' : 'NO UPDATE NEEDED';
+  }
+  if (commitsSummaryEl) commitsSummaryEl.textContent = commits.length ? `${commits.length} commit${commits.length === 1 ? '' : 's'} incoming` : 'No incoming commits';
+  if (filesSummaryEl) filesSummaryEl.textContent = changedFiles.length ? `${changedFiles.length} file${changedFiles.length === 1 ? '' : 's'} changed` : 'No changed files';
+  if (diffSummaryEl) diffSummaryEl.textContent = update.patch ? 'Patch preview loaded' : 'No patch preview';
+
+  if (metaEl) {
+    metaEl.innerHTML = [
+      renderUpdateSummaryCard('Auto update', settings.autoUpdateEnabled !== false ? 'Enabled' : 'Disabled', settings.autoUpdateEnabled !== false ? 'Scheduled background checks are on.' : 'Only manual updates will run.'),
+      renderUpdateSummaryCard('Repo', repo.branch || 'main', repo.remoteUrl || repo.remote || 'unknown remote'),
+      renderUpdateSummaryCard('Current version', current.shortSha || String(repo.localSha || '').slice(0, 7) || 'unknown', current.subject || 'No local commit title found.'),
+      renderUpdateSummaryCard('Latest remote', latest.shortSha || String(state.targetSha || '').slice(0, 7) || 'unknown', latest.subject || 'No remote commit title found.'),
+      renderUpdateSummaryCard('Last check', formatRelativeTime(state.lastCheckedAt || update.checkedAt), update.checkedAtIso || ''),
+      renderUpdateSummaryCard('Last update', formatRelativeTime(state.lastUpdatedAt), state.lastUpdatedAt ? new Date(state.lastUpdatedAt).toLocaleString() : 'No recorded update yet.'),
+    ].join('');
+  }
+
+  if (notesEl) {
+    const note = update.latestCommit?.body || update.latestCommit?.subject || 'No release notes or commit body on the latest remote commit.';
+    notesEl.innerHTML = `<strong>Latest note:</strong> ${escapeHtml(note)}`;
+  }
+
+  if (commitsEl) {
+    if (!commits.length) {
+      commitsEl.innerHTML = '<div class="update-empty-card setting-hint">Nothing new is queued right now. Miraculously, you are caught up.</div>';
+    } else {
+      commitsEl.innerHTML = commits.slice().reverse().map((commit, index) => `
+        <div class="update-commit-card">
+          <div><strong>${index === 0 ? 'Newest' : `Commit ${commits.length - index}`}</strong> · ${escapeHtml(commit.shortSha || '')}</div>
+          <div style="margin-top:4px; color:rgba(236,240,255,0.95);">${escapeHtml(commit.subject || '(no subject)')}</div>
+          <div class="update-commit-meta">${escapeHtml(commit.body || 'No extra release notes in this commit.')}</div>
+        </div>
+      `).join('');
+    }
+  }
+
+  if (filesEl) {
+    const blockedNote = update.dirty && dirtyFiles.length
+      ? `<div class="update-warning-card"><strong>Local changes are blocking update.</strong><div class="update-file-meta">${escapeHtml(dirtyFiles.map((file) => `${file.status} ${file.path}`).join(', '))}</div></div>`
+      : '';
+    if (!changedFiles.length) {
+      filesEl.innerHTML = `${blockedNote}<div class="update-empty-card setting-hint">No incoming file changes to preview.</div>`;
+    } else {
+      filesEl.innerHTML = `${blockedNote}${changedFiles.map((file) => `
+        <div class="update-file-card">
+          <div><strong>${escapeHtml(file.path || '')}</strong></div>
+          <div class="update-file-meta">${escapeHtml(file.status || 'M')} · +${escapeHtml(file.additions ?? 0)} / -${escapeHtml(file.deletions ?? 0)}</div>
+        </div>
+      `).join('')}`;
+    }
+  }
+
+  if (diffEl) diffEl.textContent = update.patch || 'No diff preview available.';
+}
+
+async function refreshUpdateSettings(refresh = true) {
+  const statusEl = document.getElementById('update-settings-status');
+  if (statusEl) statusEl.textContent = refresh ? 'Fetching latest repo status…' : 'Loading saved repo status…';
+  try {
+    const data = await fetchJson(`${BASE}/api/settings/update${refresh ? '?refresh=1' : '?refresh=0'}`);
+    renderUpdatePayload(data);
+  } catch (err) {
+    if (statusEl) statusEl.textContent = err.message || 'Could not load update status.';
+  }
+}
+
+async function saveUpdatePreferences() {
+  const input = document.getElementById('auto-update-enabled');
+  const autoUpdateEnabled = input?.checked !== false;
+  try {
+    const data = await fetchJson(`${BASE}/api/settings/update`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ autoUpdateEnabled }),
+    });
+    if (updatePayload) updatePayload.settings = { ...(updatePayload.settings || {}), ...(data.settings || {}) };
+    setSettingsStatus(`Auto update ${autoUpdateEnabled ? 'enabled' : 'disabled'}.`);
+    await refreshUpdateSettings(false);
+  } catch (err) {
+    setSettingsStatus(err.message || 'Could not save update preference.', true);
+    if (input) input.checked = !autoUpdateEnabled;
+  }
+}
+
+function openUpdateConfirmModal() {
+  const modal = document.getElementById('update-confirm-modal');
+  const summary = document.getElementById('update-confirm-summary');
+  const status = document.getElementById('update-confirm-status');
+  if (!modal) return;
+  const count = Number(updatePayload?.update?.behind || updatePayload?.update?.commits?.length || 0) || 0;
+  const files = Array.isArray(updatePayload?.update?.changedFiles) ? updatePayload.update.changedFiles.length : 0;
+  const latest = updatePayload?.update?.latestCommit || {};
+  if (summary) summary.textContent = count
+    ? `You’re about to apply ${count} pending commit${count === 1 ? '' : 's'} across ${files} changed file${files === 1 ? '' : 's'} and restart CommandCenter. Latest target: ${latest.shortSha || 'unknown'}${latest.subject ? ` — ${latest.subject}` : ''}.`
+    : 'No pending update is currently loaded.';
+  if (status) status.textContent = 'You will lose this settings session for a moment while the server restarts.';
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+}
+
+function closeUpdateConfirmModal() {
+  const modal = document.getElementById('update-confirm-modal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+async function applyUpdateNow() {
+  const status = document.getElementById('update-confirm-status');
+  if (status) status.textContent = 'Applying update and restarting CommandCenter…';
+  try {
+    await fetchJson(`${BASE}/api/settings/update/apply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ confirm: true }),
+    });
+    if (status) status.textContent = 'Update accepted. CommandCenter will restart in a moment.';
+    setSettingsStatus('Update started. Expect a brief reconnect while CommandCenter restarts.');
+    setTimeout(() => closeUpdateConfirmModal(), 1200);
+  } catch (err) {
+    if (status) status.textContent = err.message || 'Could not apply update.';
+  }
 }
 
 async function refreshAgentsSettings() {
@@ -2241,6 +2435,7 @@ async function openSettings() {
     await refreshFairyMemoryList();
     await refreshFairyRecordings();
     await refreshAgentsSettings();
+    await refreshUpdateSettings(true);
     renderWorkspaceRoomEditor();
     setSetupTestResult('No setup test run yet.', [], 'ok');
     setSettingsStatus('Settings loaded.');
@@ -2626,6 +2821,12 @@ async function main() {
   document.getElementById('close-password-modal-btn')?.addEventListener('click', closePasswordModal);
   document.querySelector('[data-close-password-modal="true"]')?.addEventListener('click', closePasswordModal);
   document.getElementById('password-save-btn')?.addEventListener('click', changePasswordFromSettings);
+  document.getElementById('auto-update-enabled')?.addEventListener('change', saveUpdatePreferences);
+  document.getElementById('refresh-update-status-btn')?.addEventListener('click', () => refreshUpdateSettings(true));
+  document.getElementById('apply-update-btn')?.addEventListener('click', openUpdateConfirmModal);
+  document.getElementById('close-update-confirm-btn')?.addEventListener('click', closeUpdateConfirmModal);
+  document.querySelector('[data-close-update-confirm="true"]')?.addEventListener('click', closeUpdateConfirmModal);
+  document.getElementById('confirm-update-btn')?.addEventListener('click', applyUpdateNow);
   document.getElementById('password-current')?.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {
       event.preventDefault();

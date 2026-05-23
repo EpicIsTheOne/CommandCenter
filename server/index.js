@@ -38,6 +38,8 @@ import { runApiChatTurn } from './api-chat-runner.js';
 import { runRoleplayChatTurn } from './roleplay-chat-runner.js';
 import { appendApiSessionMessage, createApiSession, getApiSession, getApiSessionMeta, listApiSessions, saveApiSession, searchApiSessions } from './api-session-store.js';
 import { loadUiAuthConfig, setUiPassword, checkPassword, createSessionToken, createSession, isValidSession, revokeSession } from './ui-auth.js';
+import { loadUpdateSettings, saveUpdateSettings } from './update-settings.js';
+import { applyUpdate, finalizePostRestartUpdateState, getUpdatePayload, startAutoUpdateScheduler } from './updater.js';
 
 function apiAttachmentPayload(files = []) {
   return files.map((file) => ({
@@ -449,6 +451,45 @@ app.post(`${basePath}/api/settings/api-key/rotate`, async (_req, res) => {
 app.get(`${basePath}/api/settings/api-key/reveal`, async (_req, res) => {
   const current = String(config.apiKey || '').trim();
   return res.json({ ok: true, hasApiKey: !!current, apiKey: current });
+});
+
+app.get(`${basePath}/api/settings/update`, async (req, res) => {
+  try {
+    const refresh = String(req.query?.refresh || '1').trim() !== '0';
+    return res.json(await getUpdatePayload({ refresh }));
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message || 'Could not load update status', code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/settings/update`, async (req, res) => {
+  try {
+    const existing = await loadUpdateSettings();
+    const saved = await saveUpdateSettings({
+      ...existing,
+      autoUpdateEnabled: req.body?.autoUpdateEnabled !== false,
+      checkIntervalHours: req.body?.checkIntervalHours !== undefined ? req.body.checkIntervalHours : existing.checkIntervalHours,
+    });
+    return res.json({ ok: true, settings: saved });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message || 'Could not save update settings', code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/settings/update/apply`, async (req, res) => {
+  try {
+    const confirm = req.body?.confirm === true;
+    if (!confirm) {
+      return res.status(400).json({ ok: false, error: 'Confirmation required before applying update', code: 'CONFIRM_REQUIRED' });
+    }
+    const result = await applyUpdate({ requestedBy: 'manual' });
+    if (!result.ok) {
+      return res.status(409).json({ ok: false, error: result?.state?.message || result.reason || 'Could not apply update', code: 'UPDATE_BLOCKED', details: result });
+    }
+    return res.json(result);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message || 'Could not apply update', code: 'INTERNAL_ERROR' });
+  }
 });
 
 app.get(`${basePath}/api/settings/agents`, async (_req, res) => {
@@ -5098,6 +5139,14 @@ app.use((err, req, res, next) => {
 server.listen(config.port, '0.0.0.0', () => {
   console.log(`[server] Command Center listening on :${config.port}${basePath || ''}`);
   console.log(`[server] Protocol: ${useHttps ? 'https' : 'http'}`);
+  finalizePostRestartUpdateState().catch((err) => {
+    console.error('[update] Failed to finalize post-restart update state:', err.message);
+  });
+  startAutoUpdateScheduler().then((info) => {
+    console.log(`[update] Auto-update scheduler ready (${info.settings.autoUpdateEnabled ? 'enabled' : 'disabled'}, every ${Math.round((info.intervalMs || 0) / 3600000) || 0}h)`);
+  }).catch((err) => {
+    console.error('[update] Failed to start auto-update scheduler:', err.message);
+  });
   warmWakeTranscriber().then(() => {
     console.log('[wake] Warm transcriber ready');
   }).catch((err) => {

@@ -2728,6 +2728,109 @@ body[data-font-preset="modern"] {
   background: rgba(154, 122, 204, 0.06);
 }
 
+.update-hero-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(154, 122, 204, 0.24);
+  background: linear-gradient(180deg, rgba(154, 122, 204, 0.12), rgba(154, 122, 204, 0.06));
+}
+
+.update-hero-title {
+  font-weight: 700;
+  color: rgba(236, 240, 255, 0.95);
+  margin-bottom: 4px;
+}
+
+.update-hero-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.update-toggle-row {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.update-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.update-summary-card,
+.update-release-card,
+.update-file-card,
+.update-commit-card,
+.update-empty-card,
+.update-warning-card {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(154, 122, 204, 0.18);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.update-summary-card {
+  min-height: 76px;
+}
+
+.update-summary-label {
+  color: var(--text-dim);
+  font-size: 0.8em;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 6px;
+}
+
+.update-summary-value {
+  color: rgba(236, 240, 255, 0.95);
+  font-weight: 700;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.update-summary-subvalue,
+.update-file-meta,
+.update-commit-meta {
+  color: var(--text-dim);
+  font-size: 0.85em;
+  margin-top: 4px;
+}
+
+.update-release-card {
+  margin-top: 10px;
+  white-space: pre-wrap;
+}
+
+.update-warning-card {
+  border-color: rgba(255, 108, 122, 0.28);
+  background: rgba(255, 108, 122, 0.08);
+}
+
+.update-diff-preview {
+  margin: 8px 0 0;
+  max-height: 420px;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(154, 122, 204, 0.22);
+  background: rgba(9, 12, 24, 0.86);
+  color: rgba(236, 240, 255, 0.92);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Fairy Live compact dock — keep it out of Direct Chat's face. */
 .fairy-live-panel {
   left: 14px;
