@@ -1,4 +1,4 @@
-# OpenClaw Command Center — Living Docs
+# Command Center — Living Docs
 
 ## What changed in this build
 - **Fairy Live text-turn fix**: Fairy live calls no longer get stuck in `thinking` with an empty `lastAssistantText`. Gemini live text turns now use the proper `clientContent.turns` user-turn shape, and server-side transcript parsing now preserves `outputTranscription.text` even when audio/model output arrives in the same packet.

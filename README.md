@@ -1,8 +1,8 @@
-# OpenClaw Command Center
+# Command Center
 
 _A self-hosted AI command center that turns your agent stack into a living pixel-art operations dashboard._
 
-![OpenClaw Command Center](public/docs/command-center-preview.png)
+![Command Center](public/docs/command-center-preview.png)
 
 Command Center is a live visual cockpit for OpenClaw and Hermes. It gives you a pixel-art office where agents show up, move around, speak, react, and surface activity in real time — with voice I/O, direct chat, Fairy Live, and a terminal-style log that makes your local AI system feel alive instead of buried behind another plain chat window.
 

@@ -1,4 +1,4 @@
-# OpenClaw Command Center — Setup Instructions
+# Command Center — Setup Instructions
 
 This is the practical install flow for getting CommandCenter running without mystery failures.
 
