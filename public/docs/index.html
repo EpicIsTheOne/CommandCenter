@@ -96,7 +96,7 @@
           <div class="stats">
             <div class="stat"><strong>Agents</strong><span>List and search available agents</span></div>
             <div class="stat"><strong>Sessions</strong><span>Create, reuse, inspect, and search conversation threads</span></div>
-            <div class="stat"><strong>Streaming</strong><span>SSE lifecycle events for accepted/thinking/response/done</span></div>
+            <div class="stat"><strong>Streaming</strong><span>SSE lifecycle events for accepted/thinking/response/done/error</span></div>
             <div class="stat"><strong>Attachments</strong><span>Pass reusable chat-library file IDs into API turns</span></div>
             <div class="stat"><strong>Voice Audio</strong><span>Return agent speech using the voice assigned in CommandCenter</span></div>
           </div>
@@ -212,6 +212,7 @@ curl http://127.0.0.1:3001/api/v1/agents
         <h2 id="attachments">Attachments</h2>
         <div class="card">
           <p>The API now supports attachments by passing <code>fileIds</code> that refer to files or links stored in CommandCenter’s reusable file library.</p>
+          <p><strong>Response shape note:</strong> <code>GET /api/v1/files</code> currently returns its collection under <code>items</code>.</p>
           <p>You can now manage that file library directly through <code>/api/v1</code> too:</p>
           <ul>
             <li><code>GET /commandcenter/api/v1/files</code></li>
@@ -234,6 +235,10 @@ curl -X POST https://your-domain.example/commandcenter/api/v1/files/link \
 curl -L -X GET https://your-domain.example/commandcenter/api/v1/files/YOUR_FILE_ID/download \
   -H "Authorization: Bearer YOUR_COMMANDCENTER_API_KEY" \
   -o downloaded-file.bin
+
+# note: returned file items currently include a downloadUrl that may point at
+# /commandcenter/api/chat/files/<id>/download — clients can safely follow that URL
+# directly instead of rebuilding it.
 
 # use returned fileIds in a chat request
 {
@@ -266,8 +271,9 @@ curl -X POST https://your-domain.example/commandcenter/api/v1/chat   -H "Authori
 <h2 id="streaming">Streaming</h2>
         <div class="card">
           <p>Streaming uses <strong>Server-Sent Events (SSE)</strong>.</p>
-          <p>V1 streams lifecycle events such as <code>accepted</code>, <code>thinking</code>, <code>response</code>, and <code>done</code>. It is not guaranteed to be token-by-token model streaming.</p>
+          <p>V1 streams lifecycle events such as <code>accepted</code>, <code>thinking</code>, <code>response</code>, <code>done</code>, and <code>error</code>. It is not guaranteed to be token-by-token model streaming.</p>
           <p>For external clients, this is the best endpoint when you want to forward live state into your own WebSocket/event layer without polling like a goblin.</p>
+          <p>Event order is provider/runtime dependent, and failures may emit <code>error</code> before any final <code>response</code> or <code>done</code> event.</p>
 <div class="code-block"><button class="copy-btn" type="button">Copy</button><pre>event: accepted
 data: {"sessionId":"ccs_...","messageId":"msg_...","agent":"anby","files":[]}
 
@@ -279,6 +285,9 @@ data: {"agent":"anby","text":"New Eridu. That's where I'm from."}
 
 event: audio
 data: {"contentType":"audio/mpeg","base64":"...","provider":"fish","voiceId":"..."}
+
+event: error
+data: {"ok":false,"error":"Provider or runtime failure message","code":"INTERNAL_ERROR"}
 
 event: done
 data: {"ok":true,"sessionId":"ccs_...","responseId":"msg_..."}</pre></div>

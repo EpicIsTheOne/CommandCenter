@@ -597,7 +597,7 @@ For local desktop/mobile/device clients, the most useful API surface is:
 - `POST /sessions/:id/messages/stream` — receive SSE lifecycle events for live UI
 - `POST /chat` — convenience wrapper if you do not want to manage session creation yourself
 - `GET/POST /voice` and `GET /voice/options` — optional voice resolution/assignment features
-- `GET/POST /files*` — attachment/link library support
+- `GET/POST /files*` — attachment/link library support (`GET /files` currently returns `items`, not `files`)
 
 ### Stable fields vs presentational fields
 
@@ -643,6 +643,13 @@ Typical event flow:
 - `response`
 - `audio` (when `audio: true`)
 - `done`
+- `error`
+
+Important notes:
+
+- provider/runtime failures can emit `error` instead of reaching `response` or `done`
+- event order is provider-dependent and should be handled defensively by clients
+- this is lifecycle/event streaming, not guaranteed token-by-token model output
 
 This is the best fit for clients that want live UI updates, typing/thinking states, or incremental event forwarding into another WebSocket/app layer.
 
