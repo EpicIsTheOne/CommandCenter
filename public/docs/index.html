@@ -135,6 +135,39 @@ curl -X POST http://127.0.0.1:3001/api/v1/chat \
   -H "Content-Type: application/json" \
   -d '{"agent":"anby","message":"Where are you from?","audio":true}'</pre></div></div>
 
+        <h2 id="agent-discovery">Agent Discovery + Super App Integration</h2>
+        <div class="card">
+          <p><code>GET /agents</code> is the best first call for any companion app, desktop shell, mobile wrapper, or super app.</p>
+          <p>CommandCenter merges agents from two possible sources into one roster:</p>
+          <ul>
+            <li><strong>OpenClaw</strong> — loaded from <code>~/.openclaw/openclaw.json</code> → <code>agents.list</code></li>
+            <li><strong>Hermes</strong> — loaded from <code>hermes profile list</code> plus <code>hermes profile show &lt;profile&gt;</code></li>
+          </ul>
+          <p>Every returned agent includes a <code>source</code> field so your app can tell whether it came from OpenClaw or Hermes without doing silly name-guessing.</p>
+          <p><strong>Recommended app flow:</strong></p>
+          <ol>
+            <li>Call <code>GET /agents</code></li>
+            <li>Use <code>primaryAgentId</code> as the default target</li>
+            <li>Let the user pick an agent by <code>id</code> / <code>label</code></li>
+            <li>Create a session with <code>POST /sessions</code></li>
+            <li>Send turns through <code>POST /sessions/:id/messages</code> or <code>POST /chat</code></li>
+          </ol>
+<div class="code-block"><button class="copy-btn" type="button">Copy</button><pre># local same-machine example
+curl http://127.0.0.1:3001/api/v1/agents
+
+# useful fields to keep in your app model
+# - id
+# - label
+# - name
+# - source
+# - bridge
+# - workspace
+# - model
+# - aliases
+# - primaryAgentId (top-level response)
+</pre></div>
+        </div>
+
         <h2 id="endpoints">Endpoints</h2>
         <div class="grid">
           <div class="card"><span class="endpoint get">GET</span><code>/agents</code><p>List available agents.</p></div>
@@ -232,7 +265,10 @@ data: {"ok":true,"sessionId":"ccs_...","responseId":"msg_..."}</pre></div>
           <div class="card"><h3>List agents</h3><div class="code-block"><button class="copy-btn" type="button">Copy</button><pre>import requests
 BASE = "https://your-domain.example/commandcenter/api/v1"
 HEADERS = {"Authorization": "Bearer YOUR_COMMANDCENTER_API_KEY"}
-print(requests.get(f"{BASE}/agents", headers=HEADERS, timeout=30).json())</pre></div></div>
+roster = requests.get(f"{BASE}/agents", headers=HEADERS, timeout=30).json()
+print(roster)
+print("primary agent:", roster.get("primaryAgentId"))
+print("sources:", [agent.get("source") for agent in roster.get("agents", [])])</pre></div></div>
           <div class="card"><h3>Create a session</h3><div class="code-block"><button class="copy-btn" type="button">Copy</button><pre>import requests
 BASE = "https://your-domain.example/commandcenter/api/v1"
 HEADERS = {"Authorization": "Bearer YOUR_COMMANDCENTER_API_KEY", "Content-Type": "application/json"}

@@ -68,6 +68,12 @@ That gives you:
 - public/network API on `HOST:PORT` that requires `Authorization: Bearer <COMMANDCENTER_API_KEY>`
 - local loopback API on `http://127.0.0.1:3001/api/v1/*` with no bearer token required
 
+For same-machine apps, the usual first calls are:
+- `GET /api/v1/agents`
+- `POST /api/v1/sessions`
+- `POST /api/v1/sessions/:id/messages`
+- or `POST /api/v1/chat` if you want a simpler wrapper
+
 ## 3) Choose your mode first
 
 This is the most important setup decision.
@@ -119,6 +125,13 @@ What this does:
 - CommandCenter asks the Hermes CLI for available profiles
 - Hermes profiles are merged into the same office roster as OpenClaw agents
 - Hermes session activity can be mirrored into the same Activity Log/office state stream
+
+How detection works under the hood:
+- OpenClaw agents come from `~/.openclaw/openclaw.json` → `agents.list`
+- Hermes agents come from `hermes profile list` plus `hermes profile show <profile>`
+- both are normalized into the same roster shape used by `GET /api/v1/agents`
+- each agent includes a `source` field (`openclaw` or `hermes`)
+- `primaryAgentId` is chosen from the merged roster and is the safest default target for automations or super apps
 
 This is additive, not exclusive.
 You can run:

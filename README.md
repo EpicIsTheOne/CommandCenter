@@ -324,6 +324,98 @@ The default/example roster may include agents like:
 
 The actual roster is loaded from the local OpenClaw configuration and/or Hermes profiles, so your local names may differ.
 
+### How agent detection actually works
+
+CommandCenter builds its roster in `server/agents.js`.
+
+#### OpenClaw agent detection
+
+- Reads `~/.openclaw/openclaw.json`
+- Looks for `agents.list`
+- Normalizes each entry into the CommandCenter roster shape
+- Preserves useful fields such as:
+  - `id`
+  - `name`
+  - `workspace`
+  - `model`
+- Marks each detected agent with:
+  - `source: "openclaw"`
+  - `bridge: "openclaw"`
+
+OpenClaw detection is enabled by default unless you explicitly disable it with:
+
+```env
+OPENCLAW_AGENT_SOURCE_ENABLED=false
+```
+
+#### Hermes agent detection
+
+- Runs `hermes profile list`
+- Parses the Hermes profile table output
+- Runs `hermes profile show <profile>` for each profile to gather extra details
+- Uses the Hermes profile path to optionally inspect `SOUL.md` and derive a nicer assistant/display name
+- Normalizes each Hermes profile into the same roster shape used by OpenClaw agents
+- Marks each detected Hermes agent with:
+  - `source: "hermes"`
+  - `bridge: "hermes"`
+
+Hermes detection is enabled only when:
+
+```env
+HERMES_BRIDGE_ENABLED=true
+```
+
+#### Merge behavior
+
+CommandCenter merges OpenClaw and Hermes agents into one roster.
+
+- OpenClaw agents are loaded first
+- Hermes agents are appended after that
+- duplicate `id` values are skipped
+- the primary agent is chosen in this order:
+  1. `orchestrator`
+  2. any agent marked `isBoss`
+  3. the first available agent
+
+If nothing is available, CommandCenter falls back to a minimal placeholder `main` agent so the UI does not fully implode.
+
+#### Roster shape your super app should expect
+
+`GET /api/v1/agents` returns:
+
+```json
+{
+  "ok": true,
+  "agents": [
+    {
+      "id": "orchestrator",
+      "label": "Astra",
+      "name": "Astra / Mission Orchestrator",
+      "source": "openclaw",
+      "bridge": "openclaw",
+      "workspace": "/root/.openclaw/workspaces/orchestrator",
+      "model": "openai-codex/gpt-5.4",
+      "aliases": ["orchestrator", "Astra"],
+      "visual": { "agentId": "orchestrator", "mode": "default" }
+    }
+  ],
+  "primaryAgentId": "orchestrator"
+}
+```
+
+For super-app integration, the safest fields to rely on are:
+
+- `id` — stable command target
+- `label` — short UI label
+- `name` — fuller display name
+- `source` / `bridge` — tells you whether the agent came from OpenClaw or Hermes
+- `workspace` — useful for local tooling / context
+- `model` — display/debug info
+- `aliases` — good for search UX
+- `primaryAgentId` — best default target
+
+Treat `visual`, `color`, and `voice` as presentation metadata, not your core routing contract.
+
 ### Hermes + OpenClaw co-existence
 
 CommandCenter does not force an either/or choice here.
@@ -463,6 +555,33 @@ LOCAL_API_PORT=3001
 ```
 
 This keeps the public API authenticated while giving local desktop/mobile companion software a frictionless loopback-only control surface.
+
+## Super app integration notes
+
+If your super app runs on the **same machine** as CommandCenter, prefer the local listener:
+
+```text
+http://127.0.0.1:<LOCAL_API_PORT>/commandcenter/api/v1
+```
+
+If your app is remote, use the public listener instead:
+
+```text
+https://your-domain.example/commandcenter/api/v1
+```
+
+Recommended integration flow:
+
+1. Call `GET /agents`
+2. Read `primaryAgentId`
+3. Let the user pick an agent by `id` / `label`
+4. Create a session with `POST /sessions`
+5. Send messages with either:
+   - `POST /sessions/:id/messages`
+   - or `POST /chat` if you want the convenience wrapper
+6. Optionally use `GET /sessions`, `GET /sessions/:id/messages`, and `GET /sessions/search` for history/search UX
+
+If you want your app to expose whether an agent is backed by OpenClaw or Hermes, use the `source` field from `/agents` instead of trying to infer it from names.
 
 ## Agent Configuration
 
