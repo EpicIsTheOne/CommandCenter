@@ -65,13 +65,17 @@ const certPath = join(__dirname, 'cert.pem');
 const keyPath = join(__dirname, 'key.pem');
 const useHttps = existsSync(certPath) && existsSync(keyPath);
 let server;
+let localApiServer = null;
 if (useHttps) {
-  server = createHttpsServer({
+  const tlsOptions = {
     cert: readFileSync(certPath),
     key: readFileSync(keyPath),
-  }, app);
+  };
+  server = createHttpsServer(tlsOptions, app);
+  if (config.localApiEnabled) localApiServer = createHttpsServer(tlsOptions, app);
 } else {
   server = createHttpServer(app);
+  if (config.localApiEnabled) localApiServer = createHttpServer(app);
 }
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 const chatLibraryDir = join(__dirname, '..', 'data', 'chat-library');
@@ -5136,8 +5140,8 @@ app.use((err, req, res, next) => {
   return next(err);
 });
 
-server.listen(config.port, '0.0.0.0', () => {
-  console.log(`[server] Command Center listening on :${config.port}${basePath || ''}`);
+server.listen(config.port, config.host, () => {
+  console.log(`[server] Command Center listening on ${config.host}:${config.port}${basePath || ''}`);
   console.log(`[server] Protocol: ${useHttps ? 'https' : 'http'}`);
   finalizePostRestartUpdateState().catch((err) => {
     console.error('[update] Failed to finalize post-restart update state:', err.message);
@@ -5165,3 +5169,9 @@ server.listen(config.port, '0.0.0.0', () => {
     console.error('[bridge] Failed to start:', err.message);
   }
 });
+
+if (config.localApiEnabled && localApiServer) {
+  localApiServer.listen(config.localApiPort, config.localApiHost, () => {
+    console.log(`[server] Local API listener ready on ${config.localApiHost}:${config.localApiPort}${basePath || ''}/api/v1 (loopback-only, no bearer token required)`);
+  });
+}

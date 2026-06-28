@@ -256,7 +256,7 @@ Additional panels and modals provide:
 
 - Static API docs are served from `/docs` when deployed with the bundled docs files.
 - OpenAPI document at `public/docs/openapi.json`.
-- Auth-protected `/api/v1` routes.
+- Auth-protected `/api/v1` routes on the public listener, plus an optional localhost-only API listener for trusted local programs.
 - API support for:
   - agents
   - agent search
@@ -281,7 +281,7 @@ Additional panels and modals provide:
 
 ### Fairy API (`/api/v1/fairy`)
 
-These endpoints are auth-protected by the same API auth used for all `/api/v1/*` routes.
+These endpoints are auth-protected on the public listener and available without a bearer token on the optional localhost-only API listener.
 
 - `GET /api/v1/fairy/config`
   - Returns current Fairy/Gemini live runtime config (model, voice, persona, memory flags, etc).
@@ -418,10 +418,15 @@ See `.env.example` for the full template.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `3000` | Server port |
+| `HOST` | `0.0.0.0` | Public/UI listener host |
+| `PORT` | `3000` | Public/UI listener port |
+| `LOCAL_API_ENABLED` | `false` | Enable a separate localhost-only API listener for local programs |
+| `LOCAL_API_HOST` | `127.0.0.1` | Local API listener host (keep loopback-only) |
+| `LOCAL_API_PORT` | `3001` | Local API listener port for same-machine apps |
 | `DEMO_MODE` | `true` | `true` = no gateway needed; `false` = connect to OpenClaw gateway |
 | `GATEWAY_URL` | `ws://127.0.0.1:18789` | OpenClaw gateway WebSocket URL |
 | `GATEWAY_TOKEN` | — | Gateway auth token, required when `DEMO_MODE=false` |
+| `COMMANDCENTER_API_KEY` | — | Required for the public `/api/v1` API listener; local loopback listener can bypass this |
 | `OPENAI_API_KEY` | — | Enables OpenAI-backed STT/TTS paths if configured |
 | `WEATHER_LOCATION` | `Kingston,Ontario,Canada` | City/region/country for wttr.in weather |
 | `BASE_PATH` | — | Optional mount path, e.g. `/commandcenter` |
@@ -436,6 +441,28 @@ See `.env.example` for the full template.
 Additional voice/wake credentials are usually configured through the settings UI and stored in the app settings files rather than manually editing `.env`.
 
 The built-in updater also stores its durable toggle/state locally under `data/update-settings.json` and `data/update-state.json` instead of requiring manual `.env` editing.
+
+## Public + local API pattern
+
+If you want CommandCenter reachable at `techexplore.us` **and** callable by trusted local programs without an API key, use the dual-surface setup:
+
+- public/UI listener on `HOST:PORT` (for example `0.0.0.0:3000`)
+- local automation listener on `LOCAL_API_HOST:LOCAL_API_PORT` (recommended `127.0.0.1:3001`)
+- set `COMMANDCENTER_API_KEY` for the public `/api/v1` listener
+- enable `LOCAL_API_ENABLED=true` so same-machine apps can call `http://127.0.0.1:3001/api/v1/*` with no bearer token
+
+Example:
+
+```env
+HOST=0.0.0.0
+PORT=3000
+COMMANDCENTER_API_KEY=replace_me_with_a_real_secret
+LOCAL_API_ENABLED=true
+LOCAL_API_HOST=127.0.0.1
+LOCAL_API_PORT=3001
+```
+
+This keeps the public API authenticated while giving local desktop/mobile companion software a frictionless loopback-only control surface.
 
 ## Agent Configuration
 

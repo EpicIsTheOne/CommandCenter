@@ -37,7 +37,11 @@ const resolvedGatewayToken = envGatewayToken || localGateway.token || '';
 const gatewayTokenSource = envGatewayToken ? 'env' : localGateway.source;
 
 export default {
+  host: String(process.env.HOST || '0.0.0.0').trim() || '0.0.0.0',
   port: parseInt(process.env.PORT || '3000', 10),
+  localApiEnabled: String(process.env.LOCAL_API_ENABLED || '').trim() === 'true',
+  localApiHost: String(process.env.LOCAL_API_HOST || '127.0.0.1').trim() || '127.0.0.1',
+  localApiPort: parseInt(process.env.LOCAL_API_PORT || '3001', 10),
   gatewayUrl: process.env.GATEWAY_URL || 'ws://127.0.0.1:18789',
   gatewayToken: resolvedGatewayToken,
   gatewayTokenSource,

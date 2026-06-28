@@ -3,11 +3,16 @@
   "info": {
     "title": "CommandCenter API",
     "version": "1.0.0",
-    "description": "API for agent lookup, session-based chat, optional SSE streaming, optional audio responses using each agent's configured CommandCenter voice, file attachments via reusable chat library IDs, session search, and voice assignment updates, and Fairy live config/session/memory inspection. Use Authorization: Bearer YOUR_COMMANDCENTER_API_KEY in examples."
+    "description": "API for agent lookup, session-based chat, optional SSE streaming, optional audio responses using each agent's configured CommandCenter voice, file attachments via reusable chat library IDs, session search, voice assignment updates, and Fairy live config/session/memory inspection. Public listener requests require Authorization: Bearer YOUR_COMMANDCENTER_API_KEY. When the optional localhost-only local API listener is enabled, same-machine programs can call the same /api/v1 surface without a bearer token via http://127.0.0.1:3001/api/v1."
   },
   "servers": [
     {
-      "url": "https://your-domain.example/commandcenter/api/v1"
+      "url": "https://your-domain.example/commandcenter/api/v1",
+      "description": "Public/network listener (bearer token required)"
+    },
+    {
+      "url": "http://127.0.0.1:3001/api/v1",
+      "description": "Optional localhost-only listener for trusted local programs (no bearer token required)"
     }
   ],
   "components": {

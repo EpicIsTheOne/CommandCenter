@@ -85,9 +85,10 @@
           <span class="badge">LIVE</span>
           <h1>CommandCenter API</h1>
           <p>HTTP API for listing agents, creating chat sessions, sending messages, streaming responses, searching past sessions, and reusing files already stored in CommandCenter’s chat library.</p>
-          <p><strong>Base URL:</strong> <code>https://your-domain.example/commandcenter/api/v1</code></p>
-          <p><strong>Auth:</strong> Bearer token via <code>Authorization: Bearer YOUR_COMMANDCENTER_API_KEY</code>.</p>
-          <div class="note"><strong>Auth required:</strong> the live <code>/api/v1</code> routes now require a bearer token. Every example on this page uses the placeholder <code>YOUR_COMMANDCENTER_API_KEY</code>.</div>
+          <p><strong>Public Base URL:</strong> <code>https://your-domain.example/commandcenter/api/v1</code></p>
+          <p><strong>Local Base URL:</strong> <code>http://127.0.0.1:3001/api/v1</code> <span class="muted">(optional localhost-only listener for same-machine apps)</span></p>
+          <p><strong>Auth:</strong> public listener uses <code>Authorization: Bearer YOUR_COMMANDCENTER_API_KEY</code>; the optional localhost-only listener can be used without a bearer token.</p>
+          <div class="note"><strong>Recommended setup:</strong> keep the public <code>/api/v1</code> listener keyed, and enable the localhost-only listener for trusted local programs like desktop companions, automations, or your own super app.</div>
           <div class="hero-actions">
             <a class="btn btn-primary" href="./openapi.json">OpenAPI JSON</a>
             <a class="btn btn-secondary" href="/commandcenter/">Back to CommandCenter</a>
@@ -115,21 +116,22 @@
         </div>
 
         <h2 id="quickstart">Quick Start</h2>
-        <div class="card"><div class="code-block"><button class="copy-btn" type="button">Copy</button><pre># set your auth header once
+        <div class="card"><div class="code-block"><button class="copy-btn" type="button">Copy</button><pre># public / remote usage (requires bearer token)
 export COMMANDCENTER_API_KEY="YOUR_COMMANDCENTER_API_KEY"
 
 curl https://your-domain.example/commandcenter/api/v1/agents \
   -H "Authorization: Bearer $COMMANDCENTER_API_KEY"
 
-# create a session
-curl -X POST https://your-domain.example/commandcenter/api/v1/sessions \
-  -H "Authorization: Bearer $COMMANDCENTER_API_KEY" \
+# local same-machine usage (no bearer token on localhost-only listener)
+curl http://127.0.0.1:3001/api/v1/agents
+
+# create a session locally
+curl -X POST http://127.0.0.1:3001/api/v1/sessions \
   -H "Content-Type: application/json" \
   -d '{"agent":"anby","title":"Quickstart session"}'
 
-# send a message
-curl -X POST https://your-domain.example/commandcenter/api/v1/chat \
-  -H "Authorization: Bearer $COMMANDCENTER_API_KEY" \
+# send a message locally
+curl -X POST http://127.0.0.1:3001/api/v1/chat \
   -H "Content-Type: application/json" \
   -d '{"agent":"anby","message":"Where are you from?","audio":true}'</pre></div></div>
 

@@ -55,6 +55,19 @@ Expected output (minimum):
 - `setup.gatewayConnected` is `true` for live mode
 - `setup.issues` is empty or only informational
 
+If you want a public CommandCenter plus a same-machine automation API, also set:
+
+```env
+COMMANDCENTER_API_KEY=replace_me_with_a_real_secret
+LOCAL_API_ENABLED=true
+LOCAL_API_HOST=127.0.0.1
+LOCAL_API_PORT=3001
+```
+
+That gives you:
+- public/network API on `HOST:PORT` that requires `Authorization: Bearer <COMMANDCENTER_API_KEY>`
+- local loopback API on `http://127.0.0.1:3001/api/v1/*` with no bearer token required
+
 ## 3) Choose your mode first
 
 This is the most important setup decision.
@@ -211,6 +224,14 @@ Quick checks:
 - If running on the same host as OpenClaw, leave `GATEWAY_TOKEN` blank and restart CommandCenter so auto-detect can run.
 - If setting manually, ensure it matches OpenClaw `gateway.auth.token` exactly.
 - Recheck status using `/api/status` and confirm whether mode is `live` or `demo-fallback`.
+
+### Public API says key required
+If you hit the public/network-facing `/api/v1` listener without configuring `COMMANDCENTER_API_KEY`, CommandCenter now returns `PUBLIC_API_KEY_REQUIRED`.
+
+Quick fix:
+- set `COMMANDCENTER_API_KEY` in `.env`
+- restart CommandCenter
+- keep local automation on `127.0.0.1:3001` if you want no-key same-machine access
 
 ### Updates panel says update blocked
 That usually means the repo has local uncommitted changes.
