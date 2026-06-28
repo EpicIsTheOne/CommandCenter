@@ -301,6 +301,42 @@ data: {"ok":true,"sessionId":"ccs_...","responseId":"msg_..."}</pre></div>
           <p>If both are available on the same device, prefer the local listener for trusted local clients.</p>
         </div>
 
+        <h2 id="websocket">Realtime WebSocket</h2>
+        <div class="card">
+          <p>CommandCenter also exposes a realtime WebSocket feed for live provider status and ambient activity updates.</p>
+          <ul>
+            <li>Local example: <code>ws://127.0.0.1:3001/commandcenter/ws</code></li>
+            <li>Public example: <code>wss://your-domain.example/commandcenter/ws</code></li>
+          </ul>
+          <p>On connect, the server immediately sends a <code>status</code> message with bridge/provider state.</p>
+<div class="code-block"><button class="copy-btn" type="button">Copy</button><pre>{
+  "type": "status",
+  "data": {
+    "connected": true,
+    "mode": "live",
+    "requestedMode": "live",
+    "gatewayUrl": "ws://127.0.0.1:18789",
+    "gatewayTokenConfigured": true,
+    "gatewayTokenSource": "env",
+    "lastError": "",
+    "lastAuthError": "",
+    "lastFallbackReason": "",
+    "configuredDemo": false,
+    "voiceEnabled": true
+  }
+}</pre></div>
+          <p><strong>Core event families:</strong></p>
+          <ul>
+            <li><code>status</code> — initial provider/bridge snapshot</li>
+            <li><code>bridge:*</code> — connectivity updates like <code>bridge:connected</code> and <code>bridge:disconnected</code></li>
+            <li><code>agent:*</code> — normalized agent activity like <code>agent:thinking</code>, <code>agent:responding</code>, <code>agent:error</code>, <code>agent:idle</code>, and <code>agent:tool_use</code></li>
+            <li><code>voice:*</code> — transcription/voice side-channel updates</li>
+            <li><code>live_task:*</code> — background/live task progress</li>
+          </ul>
+          <p><strong>Richer product-specific families:</strong> <code>call:*</code> for Fairy/live-call behavior and <code>agent_comms:*</code> for internal backchannel traffic.</p>
+          <p><strong>Recommended split:</strong> use REST for roster/history/files/voice config, SSE for per-turn chat lifecycle, and WebSocket for ambient status/activity updates.</p>
+        </div>
+
         <h2 id="python">Python Examples</h2>
         <div class="code-grid">
           <div class="card"><h3>List agents</h3><div class="code-block"><button class="copy-btn" type="button">Copy</button><pre>import requests

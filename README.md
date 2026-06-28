@@ -672,6 +672,67 @@ Authorization: Bearer YOUR_COMMANDCENTER_API_KEY
 
 If a client can use the local loopback listener, prefer it.
 
+### Realtime WebSocket surface
+
+CommandCenter also exposes a realtime WebSocket endpoint for live status/activity updates:
+
+```text
+ws://127.0.0.1:<PORT>/commandcenter/ws
+wss://your-domain.example/commandcenter/ws
+```
+
+On connection, the server immediately sends a `status` event describing the current bridge/provider state.
+
+Example initial payload:
+
+```json
+{
+  "type": "status",
+  "data": {
+    "connected": true,
+    "mode": "live",
+    "requestedMode": "live",
+    "gatewayUrl": "ws://127.0.0.1:18789",
+    "gatewayTokenConfigured": true,
+    "gatewayTokenSource": "env",
+    "lastError": "",
+    "lastAuthError": "",
+    "lastFallbackReason": "",
+    "configuredDemo": false,
+    "voiceEnabled": true
+  }
+}
+```
+
+#### Core event families
+
+Most external/local clients will care about these event groups first:
+
+- `status` — initial connection/provider status snapshot
+- `bridge:*` — bridge connectivity changes such as `bridge:connected` and `bridge:disconnected`
+- `agent:*` — normalized agent activity such as:
+  - `agent:thinking`
+  - `agent:responding`
+  - `agent:error`
+  - `agent:idle`
+  - `agent:tool_use`
+- `voice:*` — voice/transcription side-channel events
+- `live_task:*` — background/live task state updates
+
+There are also richer product-specific event families, especially:
+
+- `call:*` — Fairy/live-call state, transcript, audio, screen/camera, and handoff events
+- `agent_comms:*` — internal backchannel/agent-comms events
+
+#### Guidance for external clients
+
+- use REST for roster discovery, sessions, transcripts, files, and voice configuration
+- use SSE (`/sessions/:id/messages/stream`) for per-turn lifecycle updates
+- use WebSocket (`/ws`) for ambient provider status and live activity/presence updates
+- normalize event names into your own internal client model instead of binding your entire app directly to raw CommandCenter event strings
+
+The WebSocket feed is useful, but it is broader and more product-shaped than the core REST chat contract.
+
 ## Agent Configuration
 
 ### Agent config file
