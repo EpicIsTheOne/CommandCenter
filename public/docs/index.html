@@ -168,6 +168,29 @@ curl http://127.0.0.1:3001/api/v1/agents
 </pre></div>
         </div>
 
+        <h2 id="client-contract">External Client Contract</h2>
+        <div class="card">
+          <p>If you are building a local device client, desktop wrapper, companion app, or another app-layer bridge, these are the most useful parts of CommandCenter’s API surface.</p>
+          <ul>
+            <li><code>GET /agents</code> — roster discovery + <code>primaryAgentId</code></li>
+            <li><code>POST /sessions</code> — create a stable chat session</li>
+            <li><code>GET /sessions</code> and <code>GET /sessions/:id/messages</code> — recent history and transcript loading</li>
+            <li><code>POST /sessions/:id/messages</code> — normal chat turns</li>
+            <li><code>POST /sessions/:id/messages/stream</code> — SSE event flow for live UI/state updates</li>
+            <li><code>POST /chat</code> — convenience wrapper if you want less session bookkeeping</li>
+            <li><code>/voice</code> + <code>/voice/options</code> — optional voice resolution and assignment</li>
+            <li><code>/files</code> endpoints — reusable attachment/link workflows</li>
+          </ul>
+          <p><strong>Stable fields worth building against:</strong></p>
+          <ul>
+            <li>Agent: <code>id</code>, <code>label</code>, <code>name</code>, <code>source</code>, <code>bridge</code>, <code>workspace</code>, <code>model</code>, <code>aliases</code></li>
+            <li>Session: <code>id</code>, <code>agent</code>, <code>title</code>, <code>createdAt</code>, <code>updatedAt</code>, <code>messageCount</code>, <code>lastMessagePreview</code>, <code>metadata</code></li>
+            <li>Message: <code>id</code>, <code>role</code>, <code>text</code>, <code>timestamp</code>, <code>meta</code></li>
+            <li>Top-level roster field: <code>primaryAgentId</code></li>
+          </ul>
+          <p><strong>Presentation-only fields:</strong> treat <code>color</code>, <code>voice</code>, and <code>visual</code> as UI metadata, not your routing contract.</p>
+        </div>
+
         <h2 id="endpoints">Endpoints</h2>
         <div class="grid">
           <div class="card"><span class="endpoint get">GET</span><code>/agents</code><p>List available agents.</p></div>
@@ -244,6 +267,7 @@ curl -X POST https://your-domain.example/commandcenter/api/v1/chat   -H "Authori
         <div class="card">
           <p>Streaming uses <strong>Server-Sent Events (SSE)</strong>.</p>
           <p>V1 streams lifecycle events such as <code>accepted</code>, <code>thinking</code>, <code>response</code>, and <code>done</code>. It is not guaranteed to be token-by-token model streaming.</p>
+          <p>For external clients, this is the best endpoint when you want to forward live state into your own WebSocket/event layer without polling like a goblin.</p>
 <div class="code-block"><button class="copy-btn" type="button">Copy</button><pre>event: accepted
 data: {"sessionId":"ccs_...","messageId":"msg_...","agent":"anby","files":[]}
 
@@ -258,6 +282,14 @@ data: {"contentType":"audio/mpeg","base64":"...","provider":"fish","voiceId":"..
 
 event: done
 data: {"ok":true,"sessionId":"ccs_...","responseId":"msg_..."}</pre></div>
+        </div>
+
+        <h2 id="history-auth">History + Auth Notes</h2>
+        <div class="card">
+          <p><strong>History:</strong> use <code>GET /sessions</code> for recent conversations, <code>GET /sessions/:id</code> for metadata, and <code>GET /sessions/:id/messages</code> for the transcript itself.</p>
+          <p><strong>Local auth:</strong> when the localhost-only listener is enabled, same-machine clients can call it without a bearer token.</p>
+          <p><strong>Public auth:</strong> the public/network listener requires <code>Authorization: Bearer YOUR_COMMANDCENTER_API_KEY</code>.</p>
+          <p>If both are available on the same device, prefer the local listener for trusted local clients.</p>
         </div>
 
         <h2 id="python">Python Examples</h2>

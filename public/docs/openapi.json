@@ -49,6 +49,7 @@
         }
       },
       "SessionMeta": {
+        "description": "Stable session metadata shape for external/local clients. Safe fields to build against include id, agent, title, createdAt, updatedAt, messageCount, lastMessagePreview, and metadata.",
         "type": "object",
         "properties": {
           "id": {
@@ -88,6 +89,7 @@
         ]
       },
       "Message": {
+        "description": "Stable transcript message shape for external/local clients. Safe fields to rely on are id, role, text, timestamp, and meta.",
         "type": "object",
         "properties": {
           "id": {
@@ -366,6 +368,7 @@
     "/agents": {
       "get": {
         "summary": "List agents",
+        "description": "Best first call for external/local clients. Returns the merged roster plus primaryAgentId. Build against stable fields like id, label, name, source, bridge, workspace, model, and aliases; treat color/voice/visual as presentation metadata.",
         "responses": {
           "200": {
             "description": "Agent list"
@@ -698,6 +701,7 @@
     "/sessions/{id}/messages/stream": {
       "post": {
         "summary": "Stream a message response over SSE",
+        "description": "Recommended for clients that want live event forwarding into their own UI or WebSocket layer. Typical event flow is accepted -> thinking -> response -> optional audio -> done.",
         "parameters": [
           {
             "name": "id",

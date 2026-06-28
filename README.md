@@ -583,6 +583,88 @@ Recommended integration flow:
 
 If you want your app to expose whether an agent is backed by OpenClaw or Hermes, use the `source` field from `/agents` instead of trying to infer it from names.
 
+### External client contract: what is most useful
+
+For local desktop/mobile/device clients, the most useful API surface is:
+
+- `GET /agents` — discover agents and read `primaryAgentId`
+- `GET /agents/search` — local search UX for picker dialogs
+- `POST /sessions` — create a stable chat session for a chosen agent
+- `GET /sessions` — list recent sessions
+- `GET /sessions/:id` — load session metadata
+- `GET /sessions/:id/messages` — read transcript history
+- `POST /sessions/:id/messages` — send a normal chat turn
+- `POST /sessions/:id/messages/stream` — receive SSE lifecycle events for live UI
+- `POST /chat` — convenience wrapper if you do not want to manage session creation yourself
+- `GET/POST /voice` and `GET /voice/options` — optional voice resolution/assignment features
+- `GET/POST /files*` — attachment/link library support
+
+### Stable fields vs presentational fields
+
+Safe fields for external clients to rely on:
+
+- top-level: `primaryAgentId`
+- agent: `id`, `label`, `name`, `source`, `bridge`, `workspace`, `model`, `aliases`
+- session: `id`, `agent`, `title`, `createdAt`, `updatedAt`, `messageCount`, `lastMessagePreview`, `metadata`
+- message: `id`, `role`, `text`, `timestamp`, `meta`
+
+Treat these as presentational and subject to UI-driven changes:
+
+- `color`
+- `voice`
+- `visual`
+- office/presence layout details
+
+### Chat, history, and events
+
+There are two main chat paths:
+
+#### Session-first path
+
+Use this when your client wants explicit control over history/state:
+
+1. `POST /sessions`
+2. `POST /sessions/:id/messages`
+3. `GET /sessions/:id/messages`
+4. optionally `POST /sessions/:id/messages/stream` for SSE updates
+
+#### Convenience path
+
+Use `POST /chat` when you want CommandCenter to create or reuse a session for you with less client-side bookkeeping.
+
+### Streaming / event model
+
+`POST /sessions/:id/messages/stream` returns **Server-Sent Events (SSE)**.
+
+Typical event flow:
+
+- `accepted`
+- `thinking`
+- `response`
+- `audio` (when `audio: true`)
+- `done`
+
+This is the best fit for clients that want live UI updates, typing/thinking states, or incremental event forwarding into another WebSocket/app layer.
+
+### Local auth behavior
+
+When `LOCAL_API_ENABLED=true`, same-machine clients can call the local listener without a bearer token.
+
+Recommended local pattern:
+
+```text
+http://127.0.0.1:<LOCAL_API_PORT>/commandcenter/api/v1
+```
+
+Recommended public/remote pattern:
+
+```text
+https://your-domain.example/commandcenter/api/v1
+Authorization: Bearer YOUR_COMMANDCENTER_API_KEY
+```
+
+If a client can use the local loopback listener, prefer it.
+
 ## Agent Configuration
 
 ### Agent config file
