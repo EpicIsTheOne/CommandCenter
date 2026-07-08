@@ -3,7 +3,7 @@ import * as mascot from './mascot.js?v=20260509y';
 import * as office from './office.js?v=20260516-rooms7';
 import * as voice from './voice.js?v=20260515-voicefix2';
 import * as wake from './wake.js?v=20260320l';
-import * as directChat from './direct-chat.js?v=20260521-roleplay-custom1';
+import * as directChat from './direct-chat.js?v=20260708-relay1';
 import * as companions from './companions.js?v=20260515-voicefix2';
 import * as music from './music.js?v=20260514c';
 import * as intro from './intro.js?v=20260514b';
@@ -26,6 +26,7 @@ let isFullscreen = false;
 let playbackToken = 0;
 let availableVoices = [];
 let currentWakeSettings = { wakeWords: {} };
+let currentDirectChatSettings = { relayEnabled: false, relayUrl: '', relayShowDeviceLabels: true };
 let currentCompanionSettings = { agentVisuals: {} };
 let availableCompanions = [];
 let wakeDesired = false;
@@ -290,9 +291,11 @@ async function refreshAgentsSettings() {
     const sources = data.sources || {};
     const openclaw = sources.openclaw || {};
     const hermes = sources.hermes || {};
+    const relay = sources.relay || {};
     if (data.roster?.agents?.length) applyRoster(data.roster);
     const openclawAgents = Array.isArray(openclaw.activeAgents) ? openclaw.activeAgents : [];
     const hermesAgents = Array.isArray(hermes.activeAgents) ? hermes.activeAgents : [];
+    const relayAgents = Array.isArray(relay.activeAgents) ? relay.activeAgents : [];
 
     const showOpenClawBtn = data.actions?.showDetectOpenClaw || openclawAgents.length === 0;
     const showHermesBtn = data.actions?.showDetectHermes || hermesAgents.length === 0;
@@ -304,24 +307,26 @@ async function refreshAgentsSettings() {
       const parts = [];
       if (openclawAgents.length) parts.push(`${openclawAgents.length} OpenClaw`);
       if (hermesAgents.length) parts.push(`${hermesAgents.length} Hermes`);
-      statusEl.textContent = parts.length ? `${parts.join(' + ')} agent${(openclawAgents.length + hermesAgents.length) === 1 ? '' : 's'} detected.` : 'No agents detected. Use Detect to add sources.';
+      if (relayAgents.length) parts.push(`${relayAgents.length} Relay`);
+      const totalAgents = openclawAgents.length + hermesAgents.length + relayAgents.length;
+      statusEl.textContent = parts.length ? `${parts.join(' + ')} agent${totalAgents === 1 ? '' : 's'} detected.` : 'No agents detected. Use Detect to add sources.';
     }
 
     if (listEl) {
-      const allAgents = [...openclawAgents, ...hermesAgents];
+      const allAgents = [...openclawAgents, ...hermesAgents, ...relayAgents];
       if (!allAgents.length) {
         listEl.innerHTML = '<div class="setting-hint">No agents configured. Click Detect to enable OpenClaw or Hermes agents.</div>';
       } else {
         listEl.innerHTML = allAgents.map((agent) => {
-          const sourceLabel = agent.source === 'hermes' ? 'Hermes' : 'OpenClaw';
-          const sourceClass = agent.source === 'hermes' ? 'hermes-agent-badge' : 'openclaw-agent-badge';
+          const sourceLabel = agent.source === 'relay' ? (agent.relayDeviceName || 'Relay') : (agent.source === 'hermes' ? 'Hermes' : 'OpenClaw');
+          const sourceClass = agent.source === 'relay' ? 'relay-agent-badge' : (agent.source === 'hermes' ? 'hermes-agent-badge' : 'openclaw-agent-badge');
           const bossBadge = agent.isBoss ? ' <span style="color:#FFD700;" title="Primary agent">★</span>' : '';
           return `<div class="agent-row" style="display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
             <span class="agent-color-dot" style="width:10px; height:10px; border-radius:50%; background:${escapeHtml(agent.color || '#AA66FF')}; flex-shrink:0;"></span>
             <span style="font-weight:600;">${escapeHtml(agent.label || agent.id)}</span>
             ${bossBadge}
             <span style="color:var(--text-dim); font-size:0.85em;">${escapeHtml(agent.id)}</span>
-            <span class="${sourceClass}" style="margin-left:auto; font-size:0.75em; padding:2px 8px; border-radius:999px; background:${agent.source === 'hermes' ? 'rgba(255,102,196,0.15)' : 'rgba(255,215,0,0.12)'}; color:${agent.source === 'hermes' ? '#FF66C4' : '#FFD700'};">${sourceLabel}</span>
+            <span class="${sourceClass}" style="margin-left:auto; font-size:0.75em; padding:2px 8px; border-radius:999px; background:${agent.source === 'relay' ? 'rgba(126,231,255,0.14)' : (agent.source === 'hermes' ? 'rgba(255,102,196,0.15)' : 'rgba(255,215,0,0.12)')}; color:${agent.source === 'relay' ? '#7EE7FF' : (agent.source === 'hermes' ? '#FF66C4' : '#FFD700')};">${sourceLabel}</span>
           </div>`;
         }).join('');
       }
@@ -330,6 +335,26 @@ async function refreshAgentsSettings() {
     if (statusEl) statusEl.textContent = err.message || 'Failed to load agents.';
     if (listEl) listEl.innerHTML = `<div class="setting-hint" style="color:var(--red);">${escapeHtml(err.message || 'Failed to load agents.')}</div>`;
   }
+}
+
+async function loadDirectChatSettings() {
+  try {
+    const data = await fetchJson(`${BASE}/api/settings/direct-chat`);
+    currentDirectChatSettings = data.settings || currentDirectChatSettings;
+    return currentDirectChatSettings;
+  } catch (err) {
+    terminal.log(`[settings] Direct Chat settings unavailable: ${err.message}`, 'error', true);
+    return currentDirectChatSettings;
+  }
+}
+
+function populateDirectChatSettings(settings = currentDirectChatSettings) {
+  const relayEnabled = document.getElementById('direct-chat-relay-enabled');
+  const relayUrl = document.getElementById('direct-chat-relay-url');
+  const relayShowDeviceLabels = document.getElementById('direct-chat-relay-show-device-labels');
+  if (relayEnabled) relayEnabled.checked = settings.relayEnabled === true;
+  if (relayUrl) relayUrl.value = settings.relayUrl || '';
+  if (relayShowDeviceLabels) relayShowDeviceLabels.checked = settings.relayShowDeviceLabels !== false;
 }
 
 async function detectAgentSource(source = '') {
@@ -1229,6 +1254,23 @@ async function handleEvent(msg) {
     return;
   }
 
+  if (type === 'relay:connected') {
+    terminal.log(`[relay] Connected (${data?.agentCount || 0} agent${Number(data?.agentCount || 0) === 1 ? '' : 's'})`, 'system', true);
+    loadRoster().catch(() => {});
+    return;
+  }
+
+  if (type === 'relay:disconnected') {
+    terminal.log('[relay] Disconnected', 'error', true);
+    loadRoster().catch(() => {});
+    return;
+  }
+
+  if (type === 'relay:roster_updated') {
+    loadRoster().catch(() => {});
+    return;
+  }
+
   if (type === 'voice:transcription') return;
 
   if (type?.startsWith?.('call:') && fairyLive.isLiveCallActive?.()) {
@@ -1352,11 +1394,14 @@ function formatLogEntry(type, data) {
   const shortType = type.split(':')[1] || type;
   const source = String(data?.source || '').trim();
   const platform = String(data?.platform || '').trim();
+  const relayDevice = String(data?.relayDeviceName || '').trim();
   const suffix = source === 'hermes-session-monitor'
     ? ` [Hermes${platform ? `/${platform}` : ''}]`
     : source === 'session-monitor'
       ? ' [OpenClaw]'
-      : '';
+      : source === 'direct-chat' && relayDevice
+        ? ` [Relay/${relayDevice}]`
+        : '';
   switch (type) {
     case 'agent:tool_use':
       return `[${agent}] ${shortType}: ${data.tool || '?'}(${data.input || ''})${suffix}`;
@@ -2420,6 +2465,7 @@ async function openSettings() {
       fetchJson(`${BASE}/api/settings/wake`),
       fetchJson(`${BASE}/api/settings/companions`),
       fetchJson(`${BASE}/api/settings/gemini`),
+      loadDirectChatSettings(),
       appearance.refresh(),
       branding.refresh(),
       layoutSettings.refresh(),
@@ -2431,6 +2477,7 @@ async function openSettings() {
     companions.setCompanionData({ visuals: companionData.resolved || {}, items: availableCompanions });
     populateSettingsForm(voiceData.settings || {}, wakeData.settings || {});
     populateGeminiSettingsForm(geminiData.settings || {});
+    populateDirectChatSettings(currentDirectChatSettings);
     await refreshFairyDiagnostics();
     await refreshFairyMemoryList();
     await refreshFairyRecordings();
@@ -2557,6 +2604,9 @@ async function saveSettings() {
   const fishPlaybackMode = document.getElementById('fish-playback-mode')?.value?.trim() || 'auto';
   const fishAutoStreamMinChars = Number(document.getElementById('fish-auto-stream-min-chars')?.value || 260);
   const fishIncludeAsteriskNarration = document.getElementById('fish-include-narration').checked;
+  const relayEnabled = document.getElementById('direct-chat-relay-enabled')?.checked === true;
+  const relayUrl = document.getElementById('direct-chat-relay-url')?.value?.trim() || '';
+  const relayShowDeviceLabels = document.getElementById('direct-chat-relay-show-device-labels')?.checked !== false;
   const porcupineAccessKey = document.getElementById('porcupine-access-key').value.trim();
   const vignetteStrength = clampVignetteStrength(document.getElementById('vignette-strength')?.value || DEFAULT_VIGNETTE_STRENGTH);
   const directionalVignette = {
@@ -2625,6 +2675,13 @@ async function saveSettings() {
       body: JSON.stringify({ porcupineAccessKey, wakeWords }),
     });
 
+    const directChatData = await fetchJson(`${BASE}/api/settings/direct-chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ relayEnabled, relayUrl, relayShowDeviceLabels }),
+    });
+    currentDirectChatSettings = directChatData.settings || currentDirectChatSettings;
+
     await appearance.saveSettings();
     await branding.saveSettings();
     await layoutSettings.saveSettings();
@@ -2636,12 +2693,15 @@ async function saveSettings() {
       fetchJson(`${BASE}/api/settings/wake`),
       fetchJson(`${BASE}/api/settings/companions`),
       fetchJson(`${BASE}/api/settings/gemini`),
+      loadDirectChatSettings(),
     ]);
     currentCompanionSettings = companionData.settings || { agentVisuals: {} };
     availableCompanions = companionData.items || [];
     companions.setCompanionData({ visuals: companionData.resolved || {}, items: availableCompanions });
     populateSettingsForm(voiceData.settings || {}, wakeData.settings || {});
     populateGeminiSettingsForm(geminiData.settings || {});
+    populateDirectChatSettings(currentDirectChatSettings);
+    await loadRoster();
     fairyLive.refreshConfig?.().catch(() => {});
     office.setAgentVisuals(companionData.resolved || {}, availableCompanions || []);
     directChat.setCompanionData(companionData.resolved || {}, availableCompanions || []);
