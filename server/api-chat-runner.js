@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { getHermesAgent, loadAgentRoster } from './agents.js';
+import relayAgentSource from './relay-agent-source.js';
 
 const MAX_CONTEXT_MESSAGES = 40;
 
@@ -100,10 +101,26 @@ export function runApiChatTurn({ session, latestMessage, attachmentContext = '',
     const openclawBin = process.env.OPENCLAW_BIN || 'openclaw';
     const hermesBin = getHermesBin();
     const thinkingLevel = target === 'orchestrator' || target === 'main' ? 'low' : 'off';
-    const useHermes = isHermesTarget(session);
+    const useRelay = relayAgentSource.isRelaySession(session);
+    const useHermes = !useRelay && isHermesTarget(session);
     const resolvedHermesAgent = useHermes ? getHermesTarget(session) : null;
 
-    try { onEvent?.({ type: 'thinking', data: { agent: target, status: useHermes ? 'Routing to Hermes...' : 'Processing...' } }); } catch {}
+    try { onEvent?.({ type: 'thinking', data: { agent: target, status: useRelay ? 'Routing to relay...' : (useHermes ? 'Routing to Hermes...' : 'Processing...') } }); } catch {}
+
+    if (useRelay) {
+      relayAgentSource.runRelayChatTurn({ session, latestMessage: prompt, onEvent })
+        .then((result) => resolve({
+          text: result.text,
+          prompt,
+          hermesSessionId: '',
+          hermesProfile: '',
+          relayProviderSessionId: result.providerSessionId || '',
+          relayRemoteSessionId: result.sessionId || '',
+          runtime: result.runtime || 'relay',
+        }))
+        .catch(reject);
+      return;
+    }
 
     const openClawSessionId = getOpenClawSessionId(session);
     const args = useHermes

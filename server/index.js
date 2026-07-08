@@ -35,10 +35,12 @@ import { GeminiLiveSession, FAIRY_LIVE_VOICE_NAME, buildFairyLiveSystemPrompt } 
 import { addFairyMemoryEntry, buildFairyMemoryContext, loadFairyMemory, removeFairyMemoryEntry, selectRelevantFairyMemory, updateFairyMemoryEntry } from './fairy-memory.js';
 import { requireApiAuth } from './api-auth.js';
 import { runApiChatTurn } from './api-chat-runner.js';
+import relayAgentSource from './relay-agent-source.js';
 import { runRoleplayChatTurn } from './roleplay-chat-runner.js';
 import { appendApiSessionMessage, createApiSession, getApiSession, getApiSessionMeta, listApiSessions, saveApiSession, searchApiSessions } from './api-session-store.js';
 import { loadUiAuthConfig, setUiPassword, checkPassword, createSessionToken, createSession, isValidSession, revokeSession } from './ui-auth.js';
 import { loadUpdateSettings, saveUpdateSettings } from './update-settings.js';
+import { loadDirectChatSettings, publicDirectChatSettings, saveDirectChatSettings } from './direct-chat-settings.js';
 import { applyUpdate, finalizePostRestartUpdateState, getUpdatePayload, startAutoUpdateScheduler } from './updater.js';
 
 function apiAttachmentPayload(files = []) {
@@ -496,6 +498,29 @@ app.get(`${basePath}/api/settings/agents`, async (_req, res) => {
   return res.json({ ok: true, ...(buildAgentSettingsPayload()) });
 });
 
+app.get(`${basePath}/api/settings/direct-chat`, async (_req, res) => {
+  try {
+    const settings = await loadDirectChatSettings();
+    return res.json({ ok: true, settings: publicDirectChatSettings(settings) });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message || 'Could not load direct chat settings' });
+  }
+});
+
+app.post(`${basePath}/api/settings/direct-chat`, async (req, res) => {
+  try {
+    const settings = await saveDirectChatSettings({
+      relayEnabled: req.body?.relayEnabled,
+      relayUrl: req.body?.relayUrl,
+      relayShowDeviceLabels: req.body?.relayShowDeviceLabels,
+    });
+    await relayAgentSource.configure(settings);
+    return res.json({ ok: true, settings: publicDirectChatSettings(settings) });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message || 'Could not save direct chat settings' });
+  }
+});
+
 app.post(`${basePath}/api/settings/agents/detect`, async (req, res) => {
   try {
     const source = String(req.body?.source || '').trim().toLowerCase();
@@ -591,6 +616,7 @@ function buildAgentSettingsPayload() {
   const bySource = {
     openclaw: roster.agents.filter((agent) => agent.source === 'openclaw' || agent.bridge === 'openclaw'),
     hermes: roster.agents.filter((agent) => agent.source === 'hermes' || agent.bridge === 'hermes'),
+    relay: roster.agents.filter((agent) => agent.source === 'relay' || agent.bridge === 'relay'),
   };
   return {
     roster,
@@ -605,21 +631,39 @@ function buildAgentSettingsPayload() {
         activeAgents: bySource.hermes,
         showDetectButton: bySource.hermes.length === 0,
       },
+      relay: {
+        ...detected.relay,
+        activeAgents: bySource.relay,
+        showDetectButton: false,
+      },
     },
     actions: {
       showDetectOpenClaw: bySource.openclaw.length === 0,
       showDetectHermes: bySource.hermes.length === 0,
+      showDetectRelay: false,
     },
+  };
+}
+
+function mergeAgentTransportMetadata(agentId = '', metadata = {}) {
+  const relayMeta = relayAgentSource.buildSessionMetadata(agentId);
+  return {
+    ...(metadata && typeof metadata === 'object' ? metadata : {}),
+    ...relayMeta,
   };
 }
 
 async function maybePersistHermesSession(session, result) {
   const hermesSessionId = String(result?.hermesSessionId || '').trim();
   const hermesProfile = String(result?.hermesProfile || '').trim();
-  if (!session?.id || (!hermesSessionId && !hermesProfile)) return session;
+  const relayProviderSessionId = String(result?.relayProviderSessionId || '').trim();
+  const relayRemoteSessionId = String(result?.relayRemoteSessionId || '').trim();
+  if (!session?.id || (!hermesSessionId && !hermesProfile && !relayProviderSessionId && !relayRemoteSessionId)) return session;
   if (
     String(session?.metadata?.hermesSessionId || '').trim() === hermesSessionId
     && String(session?.metadata?.hermesProfile || '').trim() === hermesProfile
+    && String(session?.metadata?.relayProviderSessionId || '').trim() === relayProviderSessionId
+    && String(session?.metadata?.relayRemoteSessionId || '').trim() === relayRemoteSessionId
   ) return session;
   return await saveApiSession({
     ...session,
@@ -627,6 +671,8 @@ async function maybePersistHermesSession(session, result) {
       ...(session.metadata || {}),
       ...(hermesSessionId ? { hermesSessionId } : {}),
       ...(hermesProfile ? { hermesProfile } : {}),
+      ...(relayProviderSessionId ? { relayProviderSessionId } : {}),
+      ...(relayRemoteSessionId ? { relayRemoteSessionId } : {}),
     },
   });
 }
@@ -4897,15 +4943,17 @@ app.post(`${basePath}/api/chat/sessions`, async (req, res) => {
   try {
     const agent = String(req.body?.agent || '').trim();
     const title = String(req.body?.title || '').trim();
-    const mode = String(req.body?.mode || 'agent').trim() === 'roleplay' ? 'roleplay' : 'agent';
+    const requestedMode = String(req.body?.mode || 'agent').trim() === 'roleplay' ? 'roleplay' : 'agent';
+    const mode = relayAgentSource.getAgent(agent) ? 'agent' : requestedMode;
     const model = String(req.body?.model || '').trim();
-    const metadata = req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {};
+    const metadata = mergeAgentTransportMetadata(agent, req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {});
     const roleplayProvider = req.body?.roleplayProvider && typeof req.body.roleplayProvider === 'object' ? req.body.roleplayProvider : null;
     if (mode === 'roleplay' && roleplayProvider) metadata.roleplayProvider = roleplayProvider;
     if (!agent) return res.status(400).json({ ok: false, error: 'agent is required' });
-    const exists = roster.agents.some((item) => item.id === agent);
+    const currentRoster = getRoster();
+    const exists = currentRoster.agents.some((item) => item.id === agent);
     if (!exists) return res.status(404).json({ ok: false, error: 'Agent not found' });
-    const session = await createApiSession({ agent, title, metadata, mode, model });
+    const session = await createApiSession({ agent, title, metadata, mode, model: mode === 'roleplay' ? model : '' });
     res.json({ ok: true, session: getApiSessionMeta(session) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -4946,15 +4994,16 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
       const target = requestedAgent || roster.primaryAgentId || 'main';
       const exists = roster.agents.some((item) => item.id === target);
       if (!exists) return res.status(404).json({ error: 'Agent not found' });
+      const createdMode = relayAgentSource.getAgent(target) ? 'agent' : requestedMode;
       session = await createApiSession({
         agent: target,
         title,
-        metadata: {
+        metadata: mergeAgentTransportMetadata(target, {
           ...(req.body?.metadata || {}),
-          ...(requestedMode === 'roleplay' && requestedRoleplayProvider ? { roleplayProvider: requestedRoleplayProvider } : {}),
-        },
-        mode: requestedMode,
-        model: requestedMode === 'roleplay' ? requestedModel : '',
+          ...(createdMode === 'roleplay' && requestedRoleplayProvider ? { roleplayProvider: requestedRoleplayProvider } : {}),
+        }),
+        mode: createdMode,
+        model: createdMode === 'roleplay' ? requestedModel : '',
       });
     }
 
@@ -4976,8 +5025,9 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
     const userAppend = await appendApiSessionMessage(session.id, { role: 'user', text: userText, meta: { files: attachmentPayload } });
     session = userAppend.session;
     const sessionMode = String(session.mode || 'agent') === 'roleplay' ? 'roleplay' : 'agent';
+    const usesRelayTransport = session?.metadata?.chatTransport === 'relay';
 
-    broadcast({
+    if (!usesRelayTransport) broadcast({
       type: 'agent:thinking',
       data: {
         agent: session.agent,
@@ -4998,7 +5048,7 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
     const assistantMeta = { files: [], mode: sessionMode, model: result.model || session.model || '' };
     const assistantAppend = await appendApiSessionMessage(session.id, { role: 'assistant', text: result.text, meta: assistantMeta });
 
-    broadcast({
+    if (!usesRelayTransport) broadcast({
       type: 'agent:responding',
       data: {
         agent: session.agent,
@@ -5034,6 +5084,8 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+await relayAgentSource.configure(await loadDirectChatSettings().catch(() => ({})));
 
 const wss = new WebSocketServer({ server, path: `${basePath || ''}/ws` || '/ws' });
 
@@ -5108,6 +5160,28 @@ const stopHermesSessionMonitor = startHermesSessionMonitor({ broadcast });
 
 app.get(`${basePath}/api/session-monitor/debug`, (req, res) => {
   res.json({ ok: true, agents: typeof stopSessionMonitor.getDebugState === 'function' ? stopSessionMonitor.getDebugState() : [] });
+});
+
+relayAgentSource.on('connected', (info) => {
+  broadcast({ type: 'relay:connected', data: info });
+  broadcast({ type: 'relay:roster_updated', data: { status: info } });
+});
+
+relayAgentSource.on('disconnected', (info) => {
+  broadcast({ type: 'relay:disconnected', data: info });
+  broadcast({ type: 'relay:roster_updated', data: { status: info } });
+});
+
+relayAgentSource.on('roster-updated', (info) => {
+  broadcast({ type: 'relay:roster_updated', data: info });
+});
+
+relayAgentSource.on('event', (event) => {
+  broadcast(event);
+});
+
+relayAgentSource.on('error', (error) => {
+  console.warn('[relay] error:', error?.message || error);
 });
 
 bridge.on('connected', (info) => {

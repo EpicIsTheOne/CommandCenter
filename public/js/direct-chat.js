@@ -63,10 +63,12 @@ let isFileLibraryExpanded = false;
 let isSessionMenuOpen = false;
 let companionVisuals = {};
 let companionItems = [];
+let directChatSettings = { relayEnabled: false, relayUrl: '', relayShowDeviceLabels: true };
 
 export function init() {
   createLauncher();
   createPanel();
+  loadDirectChatSettings();
   loadRoster();
   loadFileLibrary();
   window.addEventListener('commandcenter:fairy-directchat-update', syncFairyLiveAgent);
@@ -215,6 +217,14 @@ function createPanel() {
   syncModeToggle();
 }
 
+async function loadDirectChatSettings() {
+  try {
+    const res = await fetch(`${BASE}/api/settings/direct-chat`);
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.settings) directChatSettings = { ...directChatSettings, ...data.settings };
+  } catch (_) {}
+}
+
 async function loadRoster() {
   try {
     const res = await fetch(`${BASE}/api/agents`);
@@ -275,6 +285,14 @@ function getRosterWithFairy() {
   return baseAgents;
 }
 
+function getAgentSubtitle(agent = {}) {
+  if (agent?.source === 'relay' || agent?.relay) {
+    if (directChatSettings.relayShowDeviceLabels === false) return 'Relay Agent';
+    return String(agent.subtitle || agent.deviceLabel || agent.relayDeviceName || 'Relay Agent');
+  }
+  return `Text ${agent.label || agent.id}`;
+}
+
 function renderAgentList() {
   if (!agentListEl) return;
   const agents = getRosterWithFairy();
@@ -285,7 +303,7 @@ function renderAgentList() {
         : `<div class="dc-agent-avatar">${escapeHtml((agent.label || agent.id).charAt(0).toUpperCase())}</div>`}
       <div class="dc-agent-info">
         <div class="dc-agent-label">${escapeHtml(agent.label || agent.id)}</div>
-        <div class="dc-agent-status">Text ${escapeHtml(agent.label || agent.id)}</div>
+        <div class="dc-agent-status">${escapeHtml(getAgentSubtitle(agent))}</div>
       </div>
     </div>
   `).join('');
@@ -303,6 +321,7 @@ function openChatPanel() {
   launcherEl?.classList.add('active');
   isChatOpen = true;
   syncModeToggle();
+  loadDirectChatSettings().then(() => renderAgentList());
   loadRoster();
   loadFileLibrary();
 }
@@ -580,8 +599,12 @@ function renderMessages() {
 function formatEventSourceLabel(data = {}) {
   const source = String(data?.source || '').trim();
   const platform = String(data?.platform || '').trim();
+  const relayDevice = String(data?.relayDeviceName || data?.deviceLabel || '').trim();
   if (!source) return '';
-  if (source === 'direct-chat') return 'Direct Chat';
+  if (source === 'direct-chat') {
+    if (relayDevice && directChatSettings.relayShowDeviceLabels !== false) return `Direct Chat · ${relayDevice}`;
+    return 'Direct Chat';
+  }
   if (source === 'hermes-session-monitor') return platform ? `Hermes · ${platform}` : 'Hermes';
   if (source === 'session-monitor') return 'OpenClaw';
   return platform ? `${source} · ${platform}` : source;

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import relayAgentSource from './relay-agent-source.js';
 
 const DEFAULT_COLORS = ['#FFD700', '#00DDFF', '#AA66FF', '#FF7A59', '#7CFF6B', '#FF66C4', '#66FFD9', '#FFA726'];
 const VOICES = ['onyx', 'echo', 'fable', 'nova', 'shimmer', 'alloy'];
@@ -196,17 +197,37 @@ export function detectHermesAgents() {
   }
 }
 
+export function detectRelayAgents() {
+  const agents = relayAgentSource.getAgents();
+  const status = relayAgentSource.getStatus();
+  return {
+    source: 'relay',
+    label: 'Relay',
+    enabled: status.enabled,
+    available: status.enabled && agents.length > 0,
+    connected: status.connected,
+    url: status.url,
+    agents,
+    error: status.lastError || '',
+  };
+}
+
 export function detectAgentSources() {
   const openclaw = detectOpenClawAgents();
   const hermes = detectHermesAgents();
+  const relay = detectRelayAgents();
   return {
     openclaw,
     hermes,
+    relay,
     summary: {
       hasOpenClaw: openclaw.enabled && openclaw.agents.length > 0,
       hasHermes: hermes.enabled && hermes.agents.length > 0,
+      hasRelay: relay.enabled && relay.agents.length > 0,
       openclawAvailable: openclaw.available,
       hermesAvailable: hermes.available,
+      relayAvailable: relay.available,
+      relayConnected: relay.connected,
     },
   };
 }
@@ -215,9 +236,13 @@ export function loadAgentRoster() {
   const sources = detectAgentSources();
   const openclawAgents = sources.openclaw.enabled ? sources.openclaw.agents : [];
   const hermesAgents = sources.hermes.enabled ? sources.hermes.agents : [];
+  const relayAgents = sources.relay.enabled ? sources.relay.agents : [];
   const agents = [...openclawAgents];
   for (const hermesAgent of hermesAgents) {
     if (!agents.some((agent) => agent.id === hermesAgent.id)) agents.push(hermesAgent);
+  }
+  for (const relayAgent of relayAgents) {
+    if (!agents.some((agent) => agent.id === relayAgent.id)) agents.push(relayAgent);
   }
   if (!agents.length) {
     return {

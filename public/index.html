@@ -273,6 +273,34 @@
           </div>
         </details>
 
+        <details id="direct-chat-settings-group" class="setting-group collapsible-setting">
+          <summary class="collapsible-setting-summary">
+            <span>Direct Chat</span>
+            <span class="setting-hint">Relay-backed agents</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <div class="setting-group nested-setting-group">
+              <label style="display:flex; align-items:center; gap:8px;">
+                <input id="direct-chat-relay-enabled" type="checkbox">
+                <span>Enable relay agents</span>
+              </label>
+              <div class="setting-hint">Pulls remote/device agents from a Project Reika relay.</div>
+            </div>
+            <div class="setting-group nested-setting-group">
+              <label for="direct-chat-relay-url">Relay URL</label>
+              <input id="direct-chat-relay-url" type="text" placeholder="wss://relay.example.com/v1/app or https://relay.example.com">
+              <div class="setting-hint">CommandCenter connects server-side. Paste a base URL or full <code>/v1/app</code> websocket URL.</div>
+            </div>
+            <div class="setting-group nested-setting-group">
+              <label style="display:flex; align-items:center; gap:8px;">
+                <input id="direct-chat-relay-show-device-labels" type="checkbox" checked>
+                <span>Show device labels for relay agents</span>
+              </label>
+              <div class="setting-hint">Hide this if you want relay agents to blend into the normal CommandCenter roster.</div>
+            </div>
+          </div>
+        </details>
+
         <details id="app-install-settings-group" class="setting-group collapsible-setting">
           <summary class="collapsible-setting-summary">
             <span>Install App</span>
@@ -1134,6 +1162,6 @@
 
   <script src="vendor/picovoice/web-voice-processor.js"></script>
   <script src="vendor/picovoice/porcupine-web.js"></script>
-  <script type="module" src="js/app.js?v=20260520-fairy-callmode1"></script>
+  <script type="module" src="js/app.js?v=20260708-relay1"></script>
 </body>
 </html>
