@@ -3,7 +3,7 @@
   "info": {
     "title": "CommandCenter API",
     "version": "1.0.0",
-    "description": "API for agent lookup, session-based chat, optional SSE streaming, optional audio responses using each agent's configured CommandCenter voice, file attachments via reusable chat library IDs, session search, voice assignment updates, and Fairy live config/session/memory inspection. Public listener requests require Authorization: Bearer YOUR_COMMANDCENTER_API_KEY. When the optional localhost-only local API listener is enabled, same-machine programs can call the same /api/v1 surface without a bearer token via http://127.0.0.1:3001/api/v1. Agent discovery comes from a merged roster: OpenClaw agents are loaded from ~/.openclaw/openclaw.json -> agents.list, and Hermes agents are loaded from hermes profile list/profile show. Use GET /agents and primaryAgentId as the starting point for super-app integrations. For realtime ambient status/activity updates, pair the REST API with the WebSocket feed at /commandcenter/ws; the socket sends an initial status event and then broadcasts bridge:*, agent:*, voice:*, live_task:*, and richer product-specific call:* / agent_comms:* events."
+    "description": "API for agent lookup, session-based chat, SSE streaming, audio responses, bounded model-readable attachments, session search, voice assignment updates, and Fairy live inspection. Public listener requests require Authorization: Bearer YOUR_COMMANDCENTER_API_KEY. The optional no-key local API bypass is accepted only for a loopback peer connected to the configured local listener. Attachment responses include per-file attachmentStatuses; text/source content is bounded and inlined, PDFs are extracted server-side, and images are passed only when the selected backend has a verified image-input mechanism. The realtime WebSocket at /commandcenter/ws requires either a valid UI session cookie (with browser Origin validation) or an Authorization bearer header; credentials are not accepted in query strings."
   },
   "servers": [
     {
@@ -676,6 +676,7 @@
                   },
                   "fileIds": {
                     "type": "array",
+                    "description": "Reusable managed attachment IDs. The response reports per-file consumed, truncated, unsupported, or rejected status.",
                     "items": {
                       "type": "string"
                     }
@@ -725,6 +726,7 @@
                   },
                   "fileIds": {
                     "type": "array",
+                    "description": "Reusable managed attachment IDs. The final SSE event reports per-file attachment status.",
                     "items": {
                       "type": "string"
                     }
@@ -779,6 +781,7 @@
                   },
                   "fileIds": {
                     "type": "array",
+                    "description": "Reusable managed attachment IDs. The response reports per-file consumed, truncated, unsupported, or rejected status.",
                     "items": {
                       "type": "string"
                     }

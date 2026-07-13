@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { join } from 'node:path';
+import { readJsonStore, updateJsonStore, writeJsonStore } from './json-store.js';
 
 const DATA_DIR = join(process.cwd(), 'data', 'api-sessions');
 const SESSIONS_DIR = join(DATA_DIR, 'sessions');
@@ -18,28 +19,14 @@ function sessionPath(id) {
 async function ensureStore() {
   await fsp.mkdir(SESSIONS_DIR, { recursive: true });
   if (!existsSync(INDEX_PATH)) {
-    await fsp.writeFile(INDEX_PATH, JSON.stringify({ sessions: [] }, null, 2));
-  }
-}
-
-function safeJsonParse(text, fallback) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return fallback;
+    await writeJsonStore(INDEX_PATH, { sessions: [] });
   }
 }
 
 async function readIndex() {
   await ensureStore();
-  const raw = await fsp.readFile(INDEX_PATH, 'utf8').catch(() => '');
-  const parsed = safeJsonParse(raw, { sessions: [] });
+  const parsed = await readJsonStore(INDEX_PATH, { defaultValue: { sessions: [] } });
   return Array.isArray(parsed?.sessions) ? parsed : { sessions: [] };
-}
-
-async function writeIndex(index) {
-  await ensureStore();
-  await fsp.writeFile(INDEX_PATH, JSON.stringify({ sessions: index.sessions || [] }, null, 2));
 }
 
 function summarize(text = '', max = 160) {
@@ -87,10 +74,8 @@ export async function createApiSession({ agent, title = '', metadata = {}, mode 
     updatedAt: now,
     messages: [],
   };
-  await fsp.writeFile(sessionPath(id), JSON.stringify(session, null, 2));
-  const index = await readIndex();
-  index.sessions.unshift(sessionMeta(session));
-  await writeIndex(index);
+  await writeJsonStore(sessionPath(id), session);
+  await updateJsonStore(INDEX_PATH, { defaultValue: { sessions: [] } }, (index) => ({ sessions: [sessionMeta(session), ...(index.sessions || []).filter((item) => item.id !== id)] }));
   return session;
 }
 
@@ -99,8 +84,7 @@ export async function getApiSession(id) {
   if (!id) return null;
   const path = sessionPath(String(id));
   if (!existsSync(path)) return null;
-  const raw = await fsp.readFile(path, 'utf8').catch(() => '');
-  const parsed = safeJsonParse(raw, null);
+  const parsed = await readJsonStore(path, { defaultValue: null });
   if (!parsed || typeof parsed !== 'object') return null;
   if (!Array.isArray(parsed.messages)) parsed.messages = [];
   parsed.mode = String(parsed.mode || 'agent').trim() === 'roleplay' ? 'roleplay' : 'agent';
@@ -111,20 +95,17 @@ export async function getApiSession(id) {
 export async function saveApiSession(session) {
   await ensureStore();
   const next = { ...session, updatedAt: nowIso() };
-  await fsp.writeFile(sessionPath(next.id), JSON.stringify(next, null, 2));
-  const index = await readIndex();
-  const meta = sessionMeta(next);
-  const existingIdx = index.sessions.findIndex((item) => item.id === next.id);
-  if (existingIdx === -1) index.sessions.unshift(meta);
-  else index.sessions[existingIdx] = meta;
-  index.sessions.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-  await writeIndex(index);
+  await writeJsonStore(sessionPath(next.id), next);
+  await updateJsonStore(INDEX_PATH, { defaultValue: { sessions: [] } }, (index) => {
+    const sessions = (index.sessions || []).filter((item) => item.id !== next.id);
+    sessions.push(sessionMeta(next));
+    sessions.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    return { sessions };
+  });
   return next;
 }
 
 export async function appendApiSessionMessage(id, { role, text, meta = {} } = {}) {
-  const session = await getApiSession(id);
-  if (!session) return null;
   const message = {
     id: `msg_${randomUUID().replace(/-/g, '').slice(0, 18)}`,
     role: role === 'assistant' ? 'assistant' : 'user',
@@ -132,8 +113,20 @@ export async function appendApiSessionMessage(id, { role, text, meta = {} } = {}
     timestamp: nowIso(),
     meta: meta && typeof meta === 'object' ? meta : {},
   };
-  session.messages.push(message);
-  const saved = await saveApiSession(session);
+  let saved = null;
+  await updateJsonStore(sessionPath(String(id)), { defaultValue: null }, (session) => {
+    if (!session) return session;
+    const messages = Array.isArray(session.messages) ? [...session.messages, message] : [message];
+    saved = { ...session, messages, updatedAt: nowIso() };
+    return saved;
+  });
+  if (!saved) return null;
+  await updateJsonStore(INDEX_PATH, { defaultValue: { sessions: [] } }, (index) => {
+    const sessions = (index.sessions || []).filter((item) => item.id !== saved.id);
+    sessions.push(sessionMeta(saved));
+    sessions.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    return { sessions };
+  });
   return { session: saved, message };
 }
 

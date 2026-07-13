@@ -54,7 +54,7 @@ function getHermesBin() {
   return process.env.HERMES_BIN || 'hermes';
 }
 
-function buildHermesArgs(prompt, session) {
+export function buildHermesArgs(prompt, session, attachmentImages = []) {
   const provider = String(process.env.HERMES_INFERENCE_PROVIDER || '').trim();
   const resolvedAgent = getHermesTarget(session);
   const model = String(process.env.HERMES_INFERENCE_MODEL || resolvedAgent?.model || process.env.HERMES_AGENT_MODEL || '').trim();
@@ -69,6 +69,17 @@ function buildHermesArgs(prompt, session) {
     ...(resumeSessionId ? ['--resume', resumeSessionId] : []),
     ...(model ? ['--model', model] : []),
     ...(provider ? ['--provider', provider] : []),
+    ...(attachmentImages[0]?.path ? ['--image', attachmentImages[0].path] : []),
+  ];
+}
+
+export function buildOpenClawArgs(prompt, session, target, thinkingLevel) {
+  const openClawSessionId = getOpenClawSessionId(session);
+  return [
+    'agent', '--agent', target,
+    ...(openClawSessionId ? ['--session-id', openClawSessionId] : []),
+    '--thinking', thinkingLevel,
+    '--message', prompt,
   ];
 }
 
@@ -90,7 +101,7 @@ function parseHermesOutput(stdout = '') {
   return { text, hermesSessionId };
 }
 
-export function runApiChatTurn({ session, latestMessage, attachmentContext = '', onEvent } = {}) {
+export function runApiChatTurn({ session, latestMessage, attachmentContext = '', attachmentImages = [], attachmentStatuses = [], onEvent } = {}) {
   return new Promise((resolve, reject) => {
     const target = String(session?.agent || '').trim();
     const userText = String(latestMessage || '').trim();
@@ -117,20 +128,24 @@ export function runApiChatTurn({ session, latestMessage, attachmentContext = '',
           relayProviderSessionId: result.providerSessionId || '',
           relayRemoteSessionId: result.sessionId || '',
           runtime: result.runtime || 'relay',
+          attachmentStatuses: attachmentStatuses.map((item) => (
+            item.status === 'consumed' && attachmentImages.some((image) => image.id === item.id)
+              ? { ...item, status: 'unsupported', detail: 'Relay image input is not configured; the image was not shown to the model.' }
+              : item
+          )),
         }))
         .catch(reject);
       return;
     }
 
-    const openClawSessionId = getOpenClawSessionId(session);
     const args = useHermes
-      ? buildHermesArgs(prompt, session)
-      : [
-          'agent', '--agent', target,
-          ...(openClawSessionId ? ['--session-id', openClawSessionId] : []),
-          '--thinking', thinkingLevel,
-          '--message', prompt,
-        ];
+      ? buildHermesArgs(prompt, session, attachmentImages)
+      : buildOpenClawArgs(prompt, session, target, thinkingLevel);
+    const effectiveStatuses = attachmentStatuses.map((item) => (
+      item.status === 'consumed' && attachmentImages.some((image) => image.id === item.id) && !useHermes
+        ? { ...item, status: 'unsupported', detail: `${useRelay ? 'Relay' : 'OpenClaw CLI'} image input is not configured; the image was not shown to the model.` }
+        : item
+    ));
 
     execFile(useHermes ? hermesBin : openclawBin, args, {
       timeout: 120000,
@@ -148,6 +163,7 @@ export function runApiChatTurn({ session, latestMessage, attachmentContext = '',
         hermesSessionId: result.hermesSessionId,
         hermesProfile: resolvedHermesAgent?.hermesProfile || '',
         runtime: useHermes ? 'hermes' : 'openclaw',
+        attachmentStatuses: effectiveStatuses,
       });
     });
   });

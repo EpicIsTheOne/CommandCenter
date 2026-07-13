@@ -3,10 +3,17 @@ import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadUpdateSettings, loadUpdateState, saveUpdateState } from './update-settings.js';
+import { updaterCapability } from './platform-capabilities.js';
 
 const execFileAsync = promisify(execFile);
 const REPO_DIR = process.cwd();
 const TMP_LOG = join(REPO_DIR, 'tmp-commandcenter.log');
+
+function redactSecrets(value = '') {
+  return String(value || '')
+    .replace(/(https?:\/\/)[^/@\s]+@/gi, '$1[redacted]@')
+    .replace(/([?&](?:token|key|secret|password)=)[^&\s]+/gi, '$1[redacted]');
+}
 
 function toIso(ts = 0) {
   return ts ? new Date(ts).toISOString() : '';
@@ -27,7 +34,7 @@ async function safeGit(args = [], options = {}) {
   try {
     return { ok: true, stdout: await git(args, options), error: '' };
   } catch (err) {
-    return { ok: false, stdout: '', error: err?.stderr || err?.message || 'git command failed' };
+    return { ok: false, stdout: '', error: redactSecrets(err?.stderr || err?.message || 'git command failed') };
   }
 }
 
@@ -83,7 +90,7 @@ async function getOriginName() {
 
 async function getRemoteUrl(remote = 'origin') {
   const url = await safeGit(['remote', 'get-url', remote]);
-  return url.ok ? url.stdout : '';
+  return url.ok ? redactSecrets(url.stdout) : '';
 }
 
 async function fetchRemote(remote = 'origin', branch = 'main') {
@@ -182,9 +189,9 @@ async function getUpdateSummary({ refresh = true } = {}) {
   };
 }
 
-function buildRestartScript({ branch, remote, currentPid, runInstall }) {
+export function buildRestartScript({ branch, remote, currentPid, runInstall, previousSha }) {
   const installStep = runInstall
-    ? `npm install --no-fund --no-audit || npm install`
+    ? (existsSync(join(REPO_DIR, 'package-lock.json')) ? 'npm ci --no-fund --no-audit' : 'npm install --no-fund --no-audit')
     : `echo '[update] package install skipped'`;
   return `
 set -e
@@ -194,7 +201,12 @@ git fetch ${JSON.stringify(remote)} ${JSON.stringify(branch)} --tags >> ${JSON.s
 echo "[update] pulling ${remote}/${branch}" >> ${JSON.stringify(TMP_LOG)}
 git pull --ff-only ${JSON.stringify(remote)} ${JSON.stringify(branch)} >> ${JSON.stringify(TMP_LOG)} 2>&1
 echo "[update] installing dependencies" >> ${JSON.stringify(TMP_LOG)}
-${installStep} >> ${JSON.stringify(TMP_LOG)} 2>&1
+if ! ${installStep} >> ${JSON.stringify(TMP_LOG)} 2>&1; then
+  echo "[update] install failed; rolling back" >> ${JSON.stringify(TMP_LOG)}
+  git reset --hard ${JSON.stringify(previousSha)} >> ${JSON.stringify(TMP_LOG)} 2>&1
+  ${installStep} >> ${JSON.stringify(TMP_LOG)} 2>&1 || true
+  exit 1
+fi
 sleep 1
 kill ${Number(currentPid) || process.pid} >/dev/null 2>&1 || true
 nohup npm start >> ${JSON.stringify(TMP_LOG)} 2>&1 &
@@ -202,6 +214,11 @@ nohup npm start >> ${JSON.stringify(TMP_LOG)} 2>&1 &
 }
 
 export async function applyUpdate({ requestedBy = 'manual' } = {}) {
+  const capability = updaterCapability();
+  if (!capability.supported) {
+    const state = await saveUpdateState({ ...(await loadUpdateState()), status: 'blocked', phase: 'platform-gate', message: capability.reason, lastErrorAt: Date.now() });
+    return { ok: false, applied: false, reason: 'unsupported-platform', capability, state };
+  }
   const status = await getUpdateSummary({ refresh: true });
   const priorState = await loadUpdateState();
   const pendingCommits = Array.isArray(status.summary?.commits) ? status.summary.commits : [];
@@ -251,6 +268,7 @@ export async function applyUpdate({ requestedBy = 'manual' } = {}) {
     remote: status.repo.remote,
     currentPid: process.pid,
     runInstall,
+    previousSha: status.repo.localSha,
   });
   const child = spawn('bash', ['-lc', script], {
     cwd: REPO_DIR,
@@ -345,5 +363,6 @@ export async function getUpdatePayload({ refresh = true } = {}) {
     state: await loadUpdateState(),
     repo: summary.repo,
     update: summary.summary,
+    capability: updaterCapability(),
   };
 }

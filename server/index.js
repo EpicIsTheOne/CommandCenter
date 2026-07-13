@@ -1,7 +1,7 @@
 import express from 'express';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +42,12 @@ import { loadUiAuthConfig, setUiPassword, checkPassword, createSessionToken, cre
 import { loadUpdateSettings, saveUpdateSettings } from './update-settings.js';
 import { loadDirectChatSettings, publicDirectChatSettings, saveDirectChatSettings } from './direct-chat-settings.js';
 import { applyUpdate, finalizePostRestartUpdateState, getUpdatePayload, startAutoUpdateScheduler } from './updater.js';
+import { buildAttachmentBundle } from './attachment-bundle.js';
+import { authorizeWebSocketRequest, createRateLimiter, isVerifiedLoopback, securityHeaders } from './request-security.js';
+import { getPlatformCapabilities } from './platform-capabilities.js';
+import { readJsonStore, updateJsonStore, writeJsonStore } from './json-store.js';
+import { createUiApiPolicy } from './route-policy.js';
+import { enforceUploadBudget, uploadedFiles } from './upload-policy.js';
 
 function apiAttachmentPayload(files = []) {
   return files.map((file) => ({
@@ -79,7 +85,15 @@ if (useHttps) {
   server = createHttpServer(app);
   if (config.localApiEnabled) localApiServer = createHttpServer(app);
 }
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+const uploadTmpDir = join(__dirname, '..', 'data', '.tmp-uploads');
+mkdirSync(uploadTmpDir, { recursive: true, mode: 0o700 });
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, uploadTmpDir),
+    filename: (_req, _file, cb) => cb(null, `${Date.now()}-${randomUUID()}.upload`),
+  }),
+  limits: { fileSize: 10 * 1024 * 1024, files: 100, fields: 50 },
+});
 const chatLibraryDir = join(__dirname, '..', 'data', 'chat-library');
 const chatFilesDir = join(chatLibraryDir, 'files');
 const chatManifestPath = join(chatLibraryDir, 'manifest.json');
@@ -104,6 +118,26 @@ function isAllowedIntroExt(ext = '') {
 
 function isAllowedBackgroundExt(ext = '') {
   return ['.png', '.jpg', '.jpeg', '.webp'].includes(String(ext || '').toLowerCase());
+}
+
+async function validateExtractedTree(root, { maxFiles = 1000, maxBytes = 250 * 1024 * 1024 } = {}) {
+  let files = 0;
+  let bytes = 0;
+  async function walk(dir) {
+    for (const entry of await fsp.readdir(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      const info = await fsp.lstat(path);
+      if (info.isSymbolicLink()) throw new Error('ZIP packages may not contain symbolic links');
+      if (info.isDirectory()) await walk(path);
+      else if (info.isFile()) {
+        files += 1;
+        bytes += info.size;
+        if (files > maxFiles || bytes > maxBytes) throw new Error('ZIP expanded file count or byte limit exceeded');
+      }
+    }
+  }
+  await walk(root);
+  return { files, bytes };
 }
 
 async function listMusicTracks() {
@@ -174,45 +208,45 @@ async function listWorkspaceBackgrounds() {
 async function ensureChatLibrary() {
   await fsp.mkdir(chatFilesDir, { recursive: true });
   if (!existsSync(chatManifestPath)) {
-    await fsp.writeFile(chatManifestPath, JSON.stringify({ items: [] }, null, 2));
+    await writeJsonStore(chatManifestPath, { items: [] });
   }
   if (!existsSync(chatHistoryPath)) {
-    await fsp.writeFile(chatHistoryPath, JSON.stringify({ agents: {} }, null, 2));
+    await writeJsonStore(chatHistoryPath, { agents: {} });
   }
 }
 
 async function readChatManifest() {
   await ensureChatLibrary();
   try {
-    const raw = await fsp.readFile(chatManifestPath, 'utf8');
-    const parsed = JSON.parse(raw);
+    const parsed = await readJsonStore(chatManifestPath, { defaultValue: { items: [] } });
     return Array.isArray(parsed.items) ? parsed : { items: [] };
-  } catch {
-    return { items: [] };
+  } catch (err) {
+    console.error('[chat-library] Manifest error:', err.message);
+    throw err;
   }
 }
 
 async function writeChatManifest(manifest) {
   await ensureChatLibrary();
-  await fsp.writeFile(chatManifestPath, JSON.stringify({ items: manifest.items || [] }, null, 2));
+  await writeJsonStore(chatManifestPath, { items: manifest.items || [] });
 }
 
 async function readChatHistoryStore() {
   await ensureChatLibrary();
   try {
-    const raw = await fsp.readFile(chatHistoryPath, 'utf8');
-    const parsed = JSON.parse(raw);
+    const parsed = await readJsonStore(chatHistoryPath, { defaultValue: { agents: {} } });
     return parsed && typeof parsed === 'object' && parsed.agents && typeof parsed.agents === 'object'
       ? parsed
       : { agents: {} };
-  } catch {
-    return { agents: {} };
+  } catch (err) {
+    console.error('[chat-library] History error:', err.message);
+    throw err;
   }
 }
 
 async function writeChatHistoryStore(store) {
   await ensureChatLibrary();
-  await fsp.writeFile(chatHistoryPath, JSON.stringify({ agents: store.agents || {} }, null, 2));
+  await writeJsonStore(chatHistoryPath, { agents: store.agents || {} });
 }
 
 function sanitizeChatMessage(message = {}) {
@@ -243,14 +277,14 @@ async function getChatHistory(agentId) {
 }
 
 async function appendChatHistory(agentId, message) {
-  const store = await readChatHistoryStore();
-  if (!Array.isArray(store.agents[agentId])) store.agents[agentId] = [];
-  store.agents[agentId].push(sanitizeChatMessage(message));
-  if (store.agents[agentId].length > MAX_CHAT_HISTORY_MESSAGES) {
-    store.agents[agentId] = store.agents[agentId].slice(-MAX_CHAT_HISTORY_MESSAGES);
-  }
-  await writeChatHistoryStore(store);
-  return store.agents[agentId];
+  let history = [];
+  await updateJsonStore(chatHistoryPath, { defaultValue: { agents: {} } }, (store) => {
+    const agents = { ...(store.agents || {}) };
+    history = [...(Array.isArray(agents[agentId]) ? agents[agentId] : []), sanitizeChatMessage(message)].slice(-MAX_CHAT_HISTORY_MESSAGES);
+    agents[agentId] = history;
+    return { agents };
+  });
+  return history;
 }
 
 function buildConversationContext(history = []) {
@@ -291,18 +325,32 @@ async function resolveChatFiles(ids = []) {
   return manifest.items.filter((item) => wanted.has(String(item.id)));
 }
 
-function buildAttachmentContext(files = []) {
-  if (!files.length) return '';
-  const lines = files.map((file) => {
-    if (file.kind === 'link') {
-      return `- ${file.name} [link]: ${file.sourceUrl}${file.notes ? ` | notes: ${file.notes}` : ''}`;
-    }
-    return `- ${file.originalName || file.name}: local path ${file.path} | mime ${file.mimeType} | download ${basePath}/api/chat/files/${file.id}/download`;
-  });
-  return `\n\nAttached files and reusable references:\n${lines.join('\n')}\nUse these files if relevant to the request.`;
+async function resolveAttachmentBundle(fileIds = []) {
+  const files = await resolveChatFiles(fileIds);
+  const bundle = await buildAttachmentBundle(files, { libraryDir: chatLibraryDir, requestedIds: fileIds });
+  return { files, bundle };
 }
 
-app.use(express.json());
+app.disable('x-powered-by');
+app.use(securityHeaders);
+app.use(express.json({ limit: '1mb' }));
+
+async function uploadedBuffer(file) {
+  if (file?.buffer) return file.buffer;
+  if (!file?.path) return Buffer.alloc(0);
+  return fsp.readFile(file.path);
+}
+
+app.use((req, res, next) => {
+  const cleanup = () => {
+    const files = uploadedFiles(req);
+    for (const file of files) if (file?.path) fsp.unlink(file.path).catch(() => {});
+  };
+  res.once('finish', cleanup);
+  res.once('close', cleanup);
+  req.once('aborted', cleanup);
+  next();
+});
 
 function parseCookies(req) {
   const header = String(req.headers.cookie || '');
@@ -375,11 +423,14 @@ app.get(`${basePath}/api/auth/status`, async (req, res) => {
   res.json({ ok: true, passwordSet: auth.enabled, authenticated });
 });
 
-app.post(`${basePath}/api/auth/setup`, async (req, res) => {
+const authAttemptLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 8 });
+
+app.post(`${basePath}/api/auth/setup`, authAttemptLimiter, async (req, res) => {
+  if (!isVerifiedLoopback(req)) return res.status(403).json({ ok: false, error: 'Initial setup is available only from this machine.', code: 'LOOPBACK_SETUP_REQUIRED' });
   const auth = await loadUiAuthConfig();
   if (auth.enabled) return res.status(400).json({ ok: false, error: 'Password already set' });
   const password = String(req.body?.password || '');
-  if (password.length < 6) return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters' });
+  if (password.length < 12) return res.status(400).json({ ok: false, error: 'Password must be at least 12 characters' });
   await setUiPassword(password);
   const token = createSessionToken();
   createSession(token);
@@ -387,11 +438,11 @@ app.post(`${basePath}/api/auth/setup`, async (req, res) => {
   res.json({ ok: true });
 });
 
-app.post(`${basePath}/api/auth/login`, async (req, res) => {
+app.post(`${basePath}/api/auth/login`, authAttemptLimiter, async (req, res) => {
   const auth = await loadUiAuthConfig();
   if (!auth.enabled) return res.json({ ok: true, passwordSet: false });
   const password = String(req.body?.password || '');
-  if (!checkPassword(password, auth.passwordHash)) return res.status(401).json({ ok: false, error: 'Invalid password' });
+  if (!checkPassword(password, auth.passwordHash)) return res.status(401).json({ ok: false, error: 'Authentication failed' });
   const token = createSessionToken();
   createSession(token);
   setAuthCookie(res, token);
@@ -404,9 +455,12 @@ app.post(`${basePath}/api/auth/change-password`, async (req, res) => {
   if (auth.enabled && !isValidSession(token)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
   const currentPassword = String(req.body?.currentPassword || '');
   const newPassword = String(req.body?.newPassword || '');
-  if (auth.enabled && !checkPassword(currentPassword, auth.passwordHash)) return res.status(401).json({ ok: false, error: 'Current password is incorrect' });
-  if (newPassword.length < 6) return res.status(400).json({ ok: false, error: 'New password must be at least 6 characters' });
+  if (auth.enabled && !checkPassword(currentPassword, auth.passwordHash)) return res.status(401).json({ ok: false, error: 'Authentication failed' });
+  if (newPassword.length < 12) return res.status(400).json({ ok: false, error: 'New password must be at least 12 characters' });
   await setUiPassword(newPassword);
+  const nextToken = createSessionToken();
+  createSession(nextToken);
+  setAuthCookie(res, nextToken);
   res.json({ ok: true });
 });
 
@@ -417,18 +471,15 @@ app.post(`${basePath}/api/auth/logout`, async (req, res) => {
   res.json({ ok: true });
 });
 
-app.use(async (req, res, next) => {
-  if (!req.path.startsWith(`${basePath}/api/`)) return next();
-  if (req.path.startsWith(`${basePath}/api/auth/`)) return next();
-  if (req.path.startsWith(`${basePath}/api/v1/`)) return next();
-  if (req.path.startsWith(`${basePath}/api/fairy/`)) return next();
-  if (req.path.startsWith(`${basePath}/api/call/`)) return next();
-  if (req.path.startsWith(`${basePath}/api/live/`)) return next();
-  const auth = await loadUiAuthConfig();
-  if (!auth.enabled) return next();
-  const token = parseCookies(req).cc_auth;
-  if (!isValidSession(token)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  return next();
+app.use(createUiApiPolicy({
+  basePath,
+  loadAuth: loadUiAuthConfig,
+  readSessionToken: (req) => parseCookies(req).cc_auth,
+  validateSession: isValidSession,
+}));
+
+app.get(`${basePath}/api/setup/capabilities`, async (_req, res) => {
+  res.json({ ok: true, capabilities: await getPlatformCapabilities() });
 });
 
 
@@ -1737,7 +1788,7 @@ app.get(`${basePath}/api/v1/files`, async (req, res) => {
   }
 });
 
-app.post(`${basePath}/api/v1/files/upload`, upload.array('files', 10), async (req, res) => {
+app.post(`${basePath}/api/v1/files/upload`, upload.array('files', 10), enforceUploadBudget({ maxFiles: 10, maxBytes: 25 * 1024 * 1024 }), async (req, res) => {
   try {
     await ensureChatLibrary();
     const files = Array.isArray(req.files) ? req.files : [];
@@ -1752,14 +1803,14 @@ app.post(`${basePath}/api/v1/files/upload`, upload.array('files', 10), async (re
       const safeOriginal = sanitizeName(file.originalname || `upload${ext}`);
       const savedName = `${id}${ext}`;
       const savedPath = join(chatFilesDir, savedName);
-      await fsp.writeFile(savedPath, file.buffer);
+      await fsp.writeFile(savedPath, await uploadedBuffer(file));
       const item = {
         id,
         kind: 'file',
         name: safeOriginal,
         originalName: file.originalname || safeOriginal,
         mimeType: file.mimetype || 'application/octet-stream',
-        size: file.size || file.buffer?.length || 0,
+        size: file.size || 0,
         createdAt: Date.now(),
         path: savedPath,
         ext,
@@ -2033,19 +2084,29 @@ app.post(`${basePath}/api/companions/import`, async (req, res) => {
   }
 });
 
-app.post(`${basePath}/api/companions/import-zip`, upload.single('package'), async (req, res) => {
+app.post(`${basePath}/api/companions/import-zip`, upload.single('package'), enforceUploadBudget({ maxFiles: 1, maxBytes: 25 * 1024 * 1024 }), async (req, res) => {
+  let tempDir = '';
   try {
     const file = req.file;
-    if (!file?.buffer?.length) {
+    if (!file?.size) {
       return res.status(400).json({ ok: false, error: 'No zip package uploaded', code: 'BAD_REQUEST' });
     }
     const agentId = String(req.body?.agentId || '').trim();
-    const tempDir = await fsp.mkdtemp(join(os.tmpdir(), 'cc-pet-import-'));
+    const zipBuffer = await uploadedBuffer(file);
+    if (!(zipBuffer[0] === 0x50 && zipBuffer[1] === 0x4b)) throw new Error('Uploaded package is not a ZIP file');
+    tempDir = await fsp.mkdtemp(join(os.tmpdir(), 'cc-pet-import-'));
     const zipPath = join(tempDir, 'package.zip');
-    await fsp.writeFile(zipPath, file.buffer);
+    await fsp.writeFile(zipPath, zipBuffer);
+    const entries = await new Promise((resolve, reject) => {
+      execFile('unzip', ['-Z1', zipPath], { maxBuffer: 1024 * 1024 }, (err, stdout) => err ? reject(err) : resolve(String(stdout || '').split(/\r?\n/).filter(Boolean)));
+    });
+    if (entries.length > 1000 || entries.some((name) => /(^|[\\/])\.\.([\\/]|$)/.test(name) || /^[\\/]/.test(name) || /^[A-Za-z]:/.test(name))) {
+      throw new Error('Unsafe or excessive ZIP contents');
+    }
     await new Promise((resolve, reject) => {
       execFile('unzip', ['-o', zipPath, '-d', tempDir], (err) => err ? reject(err) : resolve());
     });
+    await validateExtractedTree(tempDir);
     const imported = await importCodexPetPackageFromDir(tempDir, basePath);
     const items = await loadCompanionRegistry(basePath);
     let assigned = null;
@@ -2063,10 +2124,13 @@ app.post(`${basePath}/api/companions/import-zip`, upload.single('package'), asyn
     res.json({ ok: true, item: imported.item, items, assigned });
   } catch (err) {
     res.status(400).json({ ok: false, error: err.message, code: 'IMPORT_FAILED' });
+  } finally {
+    if (tempDir) await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
 });
 
-app.post(`${basePath}/api/companions/import-folder`, upload.array('files', 500), async (req, res) => {
+app.post(`${basePath}/api/companions/import-folder`, upload.array('files', 100), enforceUploadBudget({ maxFiles: 100, maxBytes: 100 * 1024 * 1024 }), async (req, res) => {
+  let tempDir = '';
   try {
     const files = Array.isArray(req.files) ? req.files : [];
     if (!files.length) {
@@ -2075,13 +2139,13 @@ app.post(`${basePath}/api/companions/import-folder`, upload.array('files', 500),
     const uploadedPaths = files.map((file) => String(file.originalname || '').replace(/\\/g, '/')).filter(Boolean);
     console.log('[companions] import-folder upload received', { count: uploadedPaths.length, first: uploadedPaths[0], paths: uploadedPaths.slice(0, 20) });
     const agentId = String(req.body?.agentId || '').trim();
-    const tempDir = await fsp.mkdtemp(join(os.tmpdir(), 'cc-pet-folder-import-'));
+    tempDir = await fsp.mkdtemp(join(os.tmpdir(), 'cc-pet-folder-import-'));
     for (const file of files) {
       const relativePath = String(file.originalname || '').replace(/\\/g, '/').replace(/^\/+/, '');
       if (!relativePath || relativePath.includes('..')) continue;
       const destPath = join(tempDir, relativePath);
       await fsp.mkdir(dirname(destPath), { recursive: true });
-      await fsp.writeFile(destPath, file.buffer);
+      await fsp.writeFile(destPath, await uploadedBuffer(file));
     }
     const imported = await importCodexPetPackageFromDir(tempDir, basePath);
     const items = await loadCompanionRegistry(basePath);
@@ -2101,6 +2165,8 @@ app.post(`${basePath}/api/companions/import-folder`, upload.array('files', 500),
   } catch (err) {
     console.error('[companions] import-folder failed:', err?.message || err);
     res.status(400).json({ ok: false, error: err.message, code: 'IMPORT_FAILED' });
+  } finally {
+    if (tempDir) await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
 });
 
@@ -2175,7 +2241,7 @@ app.post(`${basePath}/api/settings/appearance/theme`, async (req, res) => {
 
 app.post(`${basePath}/api/settings/appearance/background`, upload.single('background'), async (req, res) => {
   try {
-    if (!req.file?.buffer?.length) return res.status(400).json({ ok: false, error: 'No background image uploaded', code: 'BAD_REQUEST' });
+    if (!req.file?.size) return res.status(400).json({ ok: false, error: 'No background image uploaded', code: 'BAD_REQUEST' });
     const ext = extname(String(req.file.originalname || '')).toLowerCase();
     if (!isAllowedBackgroundExt(ext)) return res.status(400).json({ ok: false, error: 'Unsupported background format', code: 'BAD_REQUEST' });
     const dir = getAppearanceBackgroundDir();
@@ -2188,7 +2254,7 @@ app.post(`${basePath}/api/settings/appearance/background`, upload.single('backgr
       fullPath = join(dir, fileName);
       counter += 1;
     }
-    await fsp.writeFile(fullPath, req.file.buffer);
+    await fsp.writeFile(fullPath, await uploadedBuffer(req.file));
     const backgrounds = await listWorkspaceBackgrounds();
     const uploaded = backgrounds.find((bg) => bg.filename === fileName) || null;
     const saved = await saveAppearanceSettings({ ...(await loadAppearanceSettings()), workspaceBackgroundId: uploaded?.id || DEFAULT_WORKSPACE_ID });
@@ -2218,11 +2284,11 @@ app.post(`${basePath}/api/settings/branding`, async (req, res) => {
 
 app.post(`${basePath}/api/settings/branding/logo`, upload.single('logo'), async (req, res) => {
   try {
-    if (!req.file?.buffer?.length) return res.status(400).json({ ok: false, error: 'No logo uploaded', code: 'BAD_REQUEST' });
+    if (!req.file?.size) return res.status(400).json({ ok: false, error: 'No logo uploaded', code: 'BAD_REQUEST' });
     const ext = extname(String(req.file.originalname || '')).toLowerCase();
     if (!['.png', '.jpg', '.jpeg', '.webp', '.svg'].includes(ext)) return res.status(400).json({ ok: false, error: 'Unsupported logo format', code: 'BAD_REQUEST' });
     const name = `logo-${Date.now()}${ext}`;
-    await fsp.writeFile(join(getBrandingDir(), name), req.file.buffer);
+    await fsp.writeFile(join(getBrandingDir(), name), await uploadedBuffer(req.file));
     const saved = await saveBrandingSettings({ ...(await loadBrandingSettings()), logoUrl: `${basePath}/media/branding/${encodeURIComponent(name)}` });
     res.json({ ok: true, settings: saved });
   } catch (err) { res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' }); }
@@ -2230,11 +2296,11 @@ app.post(`${basePath}/api/settings/branding/logo`, upload.single('logo'), async 
 
 app.post(`${basePath}/api/settings/branding/favicon`, upload.single('favicon'), async (req, res) => {
   try {
-    if (!req.file?.buffer?.length) return res.status(400).json({ ok: false, error: 'No favicon uploaded', code: 'BAD_REQUEST' });
+    if (!req.file?.size) return res.status(400).json({ ok: false, error: 'No favicon uploaded', code: 'BAD_REQUEST' });
     const ext = extname(String(req.file.originalname || '')).toLowerCase();
     if (!['.ico', '.png', '.svg'].includes(ext)) return res.status(400).json({ ok: false, error: 'Unsupported favicon format', code: 'BAD_REQUEST' });
     const name = `favicon-${Date.now()}${ext}`;
-    await fsp.writeFile(join(getBrandingDir(), name), req.file.buffer);
+    await fsp.writeFile(join(getBrandingDir(), name), await uploadedBuffer(req.file));
     const saved = await saveBrandingSettings({ ...(await loadBrandingSettings()), faviconUrl: `${basePath}/media/branding/${encodeURIComponent(name)}` });
     res.json({ ok: true, settings: saved });
   } catch (err) { res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' }); }
@@ -2324,7 +2390,7 @@ app.get(`${basePath}/api/intro/videos`, async (req, res) => {
 
 app.post(`${basePath}/api/intro/upload`, upload.single('intro'), async (req, res) => {
   try {
-    if (!req.file?.buffer?.length) {
+    if (!req.file?.size) {
       return res.status(400).json({ ok: false, error: 'No intro video uploaded', code: 'BAD_REQUEST' });
     }
     const ext = extname(String(req.file.originalname || '')).toLowerCase();
@@ -2341,7 +2407,7 @@ app.post(`${basePath}/api/intro/upload`, upload.single('intro'), async (req, res
       fullPath = join(introDir, fileName);
       counter += 1;
     }
-    await fsp.writeFile(fullPath, req.file.buffer);
+    await fsp.writeFile(fullPath, await uploadedBuffer(req.file));
     const intros = await listIntroVideos();
     const uploaded = intros.find((intro) => intro.filename === fileName) || null;
     const saved = await saveIntroSettings({ ...(await loadIntroSettings()), selectedIntroId: uploaded?.id || '' });
@@ -2396,7 +2462,7 @@ app.get(`${basePath}/api/music/tracks`, async (req, res) => {
 
 app.post(`${basePath}/api/music/upload`, upload.single('track'), async (req, res) => {
   try {
-    if (!req.file?.buffer?.length) {
+    if (!req.file?.size) {
       return res.status(400).json({ ok: false, error: 'No audio file uploaded', code: 'BAD_REQUEST' });
     }
     const ext = extname(String(req.file.originalname || '')).toLowerCase();
@@ -2413,7 +2479,7 @@ app.post(`${basePath}/api/music/upload`, upload.single('track'), async (req, res
       fullPath = join(musicDir, fileName);
       counter += 1;
     }
-    await fsp.writeFile(fullPath, req.file.buffer);
+    await fsp.writeFile(fullPath, await uploadedBuffer(req.file));
     const tracks = await listMusicTracks();
     const uploaded = tracks.find((track) => track.filename === fileName) || null;
     const saved = await saveMusicSettings({ ...(await loadMusicSettings()), selectedTrackId: uploaded?.id || '' });
@@ -2803,7 +2869,7 @@ app.post(`${basePath}/api/settings/wake/keyword`, upload.single('keyword'), asyn
     const fs = await import('node:fs/promises');
     const targetDir = join(__dirname, '..', 'public', 'wakewords');
     await fs.mkdir(targetDir, { recursive: true });
-    await fs.writeFile(join(targetDir, safeName), req.file.buffer);
+    await fs.writeFile(join(targetDir, safeName), await uploadedBuffer(req.file));
 
     const existing = await loadWakeSettings();
     const saved = await saveWakeSettings({
@@ -2972,7 +3038,7 @@ app.post(`${basePath}/api/voice/transcribe`, upload.single('audio'), async (req,
     const roster = getRoster();
     const targetAgent = req.body?.targetAgent || roster.primaryAgentId || 'main';
     console.log(`[voice] Transcribing ${req.file.size} bytes for agent: ${targetAgent}`);
-    const text = await transcribe(req.file.buffer, req.file.originalname || 'audio.webm');
+    const text = await transcribe(await uploadedBuffer(req.file), req.file.originalname || 'audio.webm');
     console.log(`[voice] Transcribed: "${text}"`);
 
     if (!String(text || '').trim()) {
@@ -3062,7 +3128,8 @@ app.post(`${basePath}/api/wake/detect`, upload.single('audio'), async (req, res)
   try {
     if (!req.file) return res.status(400).json({ error: 'No audio file provided' });
 
-    const keywordMatch = await detectWakeKeyword(req.file.buffer, req.file.originalname || 'wake.webm').catch(() => null);
+    const audioBuffer = await uploadedBuffer(req.file);
+    const keywordMatch = await detectWakeKeyword(audioBuffer, req.file.originalname || 'wake.webm').catch(() => null);
     if (keywordMatch?.agentId && String(keywordMatch.alias || '').length > 3) {
       const agent = buildWakeAliases().find((a) => a.agentId === keywordMatch.agentId);
       return res.json({
@@ -3076,7 +3143,7 @@ app.post(`${basePath}/api/wake/detect`, upload.single('audio'), async (req, res)
       });
     }
 
-    const text = await transcribeWakeAudio(req.file.buffer, req.file.originalname || 'wake.webm');
+    const text = await transcribeWakeAudio(audioBuffer, req.file.originalname || 'wake.webm');
     const match = detectWakeAgent(text);
     res.json({ ok: true, text, match });
   } catch (err) {
@@ -3113,7 +3180,7 @@ app.get(`${basePath}/api/chat/files`, async (req, res) => {
   }
 });
 
-app.post(`${basePath}/api/chat/files/upload`, upload.array('files', 10), async (req, res) => {
+app.post(`${basePath}/api/chat/files/upload`, upload.array('files', 10), enforceUploadBudget({ maxFiles: 10, maxBytes: 25 * 1024 * 1024 }), async (req, res) => {
   try {
     await ensureChatLibrary();
     const files = Array.isArray(req.files) ? req.files : [];
@@ -3128,14 +3195,14 @@ app.post(`${basePath}/api/chat/files/upload`, upload.array('files', 10), async (
       const safeOriginal = sanitizeName(file.originalname || `upload${ext}`);
       const savedName = `${id}${ext}`;
       const savedPath = join(chatFilesDir, savedName);
-      await fsp.writeFile(savedPath, file.buffer);
+      await fsp.writeFile(savedPath, await uploadedBuffer(file));
       const item = {
         id,
         kind: 'file',
         name: safeOriginal,
         originalName: file.originalname || safeOriginal,
         mimeType: file.mimetype || 'application/octet-stream',
-        size: file.size || file.buffer?.length || 0,
+        size: file.size || 0,
         createdAt: Date.now(),
         path: savedPath,
         ext,
@@ -3366,9 +3433,9 @@ app.post(`${basePath}/api/call/:id/recording`, upload.single('video'), async (re
   try {
     const sessionId = String(req.params.id || '').trim();
     if (!sessionId) return res.status(400).json({ ok: false, error: 'Missing session id' });
-    if (!req.file?.buffer?.length) return res.status(400).json({ ok: false, error: 'Missing recording video' });
+    if (!req.file?.size) return res.status(400).json({ ok: false, error: 'Missing recording video' });
     const record = await saveFairyRecording({
-      buffer: req.file.buffer,
+      buffer: await uploadedBuffer(req.file),
       mimeType: String(req.body?.mimeType || req.file.mimetype || 'video/webm').trim(),
       sessionId,
       startedAt: String(req.body?.startedAt || '').trim(),
@@ -4737,9 +4804,9 @@ app.post(`${basePath}/api/v1/sessions/:id/messages`, async (req, res) => {
     let session = await getApiSession(sessionId);
     if (!session) return res.status(404).json({ ok: false, error: 'Session not found', code: 'SESSION_NOT_FOUND' });
 
-    const attachedFiles = await resolveChatFiles(fileIds);
+    const { files: attachedFiles, bundle: attachmentBundle } = await resolveAttachmentBundle(fileIds);
     const attachmentPayload = apiAttachmentPayload(attachedFiles.map(toChatFileRecord));
-    const attachmentContext = buildAttachmentContext(attachedFiles);
+    const attachmentContext = attachmentBundle.context;
 
     const userAppend = await appendApiSessionMessage(session.id, { role: 'user', text, meta: { files: attachmentPayload } });
     session = userAppend.session;
@@ -4747,7 +4814,7 @@ app.post(`${basePath}/api/v1/sessions/:id/messages`, async (req, res) => {
     const sessionMode = String(session.mode || 'agent') === 'roleplay' ? 'roleplay' : 'agent';
     const result = sessionMode === 'roleplay'
       ? await runRoleplayChatTurn({ session, latestMessage: text, attachmentContext, model: session.model || String(req.body?.model || '').trim() })
-      : await runApiChatTurn({ session, latestMessage: text, attachmentContext });
+      : await runApiChatTurn({ session, latestMessage: text, attachmentContext, attachmentImages: attachmentBundle.images, attachmentStatuses: attachmentBundle.statuses });
     session = await maybePersistHermesSession(session, result);
     const assistantMeta = { files: [], mode: sessionMode, model: result.model || session.model || '' };
     let audioPayload = null;
@@ -4774,6 +4841,7 @@ app.post(`${basePath}/api/v1/sessions/:id/messages`, async (req, res) => {
       message: userAppend.message,
       response: assistantAppend.message,
       files: attachmentPayload,
+      attachmentStatuses: result.attachmentStatuses || attachmentBundle.statuses,
       audio: audioPayload,
     });
   } catch (err) {
@@ -4801,9 +4869,9 @@ app.post(`${basePath}/api/v1/sessions/:id/messages/stream`, async (req, res) => 
       return;
     }
 
-    const attachedFiles = await resolveChatFiles(fileIds);
+    const { files: attachedFiles, bundle: attachmentBundle } = await resolveAttachmentBundle(fileIds);
     const attachmentPayload = apiAttachmentPayload(attachedFiles.map(toChatFileRecord));
-    const attachmentContext = buildAttachmentContext(attachedFiles);
+    const attachmentContext = attachmentBundle.context;
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -4821,12 +4889,16 @@ app.post(`${basePath}/api/v1/sessions/:id/messages/stream`, async (req, res) => 
           latestMessage: text,
           attachmentContext,
           model: session.model || String(req.body?.model || '').trim(),
+          attachmentImages: attachmentBundle.images,
+          attachmentStatuses: attachmentBundle.statuses,
           onEvent: (event) => sendEvent(event.type, event.data || {}),
         })
       : await runApiChatTurn({
           session,
           latestMessage: text,
           attachmentContext,
+          attachmentImages: attachmentBundle.images,
+          attachmentStatuses: attachmentBundle.statuses,
           onEvent: (event) => sendEvent(event.type, event.data || {}),
         });
     session = await maybePersistHermesSession(session, result);
@@ -4848,7 +4920,7 @@ app.post(`${basePath}/api/v1/sessions/:id/messages/stream`, async (req, res) => 
       sendEvent('audio', audioEvent);
     }
     const assistantAppend = await appendApiSessionMessage(session.id, { role: 'assistant', text: result.text, meta: assistantMeta });
-    sendEvent('done', { ok: true, sessionId: session.id, responseId: assistantAppend.message.id, audio: !!audioEvent });
+    sendEvent('done', { ok: true, sessionId: session.id, responseId: assistantAppend.message.id, audio: !!audioEvent, attachmentStatuses: result.attachmentStatuses || attachmentBundle.statuses });
     res.end();
   } catch (err) {
     if (!res.headersSent) {
@@ -4880,13 +4952,13 @@ app.post(`${basePath}/api/v1/chat`, async (req, res) => {
       session = await createApiSession({ agent: requestedAgent, title, metadata: req.body?.metadata || {} });
     }
 
-    const attachedFiles = await resolveChatFiles(fileIds);
+    const { files: attachedFiles, bundle: attachmentBundle } = await resolveAttachmentBundle(fileIds);
     const attachmentPayload = apiAttachmentPayload(attachedFiles.map(toChatFileRecord));
-    const attachmentContext = buildAttachmentContext(attachedFiles);
+    const attachmentContext = attachmentBundle.context;
 
     const userAppend = await appendApiSessionMessage(session.id, { role: 'user', text: message, meta: { files: attachmentPayload } });
     session = userAppend.session;
-    const result = await runApiChatTurn({ session, latestMessage: message, attachmentContext });
+    const result = await runApiChatTurn({ session, latestMessage: message, attachmentContext, attachmentImages: attachmentBundle.images, attachmentStatuses: attachmentBundle.statuses });
     session = await maybePersistHermesSession(session, result);
     const assistantMeta = { files: [] };
     let audioPayload = null;
@@ -4912,6 +4984,7 @@ app.post(`${basePath}/api/v1/chat`, async (req, res) => {
       message: userAppend.message,
       response: assistantAppend.message,
       files: attachmentPayload,
+      attachmentStatuses: result.attachmentStatuses || attachmentBundle.statuses,
       audio: audioPayload,
     });
   } catch (err) {
@@ -5022,9 +5095,9 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
       });
     }
 
-    const attachedFiles = await resolveChatFiles(fileIds);
+    const { files: attachedFiles, bundle: attachmentBundle } = await resolveAttachmentBundle(fileIds);
     const attachmentPayload = apiAttachmentPayload(attachedFiles.map(toChatFileRecord));
-    const attachmentContext = buildAttachmentContext(attachedFiles);
+    const attachmentContext = attachmentBundle.context;
 
     const userAppend = await appendApiSessionMessage(session.id, { role: 'user', text: userText, meta: { files: attachmentPayload } });
     session = userAppend.session;
@@ -5047,7 +5120,7 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
 
     const result = sessionMode === 'roleplay'
       ? await runRoleplayChatTurn({ session, latestMessage: userText, attachmentContext, model: session.model || requestedModel, roleplayProvider: requestedRoleplayProvider })
-      : await runApiChatTurn({ session, latestMessage: userText, attachmentContext });
+      : await runApiChatTurn({ session, latestMessage: userText, attachmentContext, attachmentImages: attachmentBundle.images, attachmentStatuses: attachmentBundle.statuses });
     session = await maybePersistHermesSession(session, result);
     const assistantMeta = { files: [], mode: sessionMode, model: result.model || session.model || '' };
     const assistantAppend = await appendApiSessionMessage(session.id, { role: 'assistant', text: result.text, meta: assistantMeta });
@@ -5073,6 +5146,7 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
       model: result.model || session.model || '',
       text: userText,
       fileIds: attachedFiles.map((file) => file.id),
+      attachmentStatuses: result.attachmentStatuses || attachmentBundle.statuses,
       message: userAppend.message,
       response: assistantAppend.message,
       agentMessage: {
@@ -5091,7 +5165,28 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
 
 await relayAgentSource.configure(await loadDirectChatSettings().catch(() => ({})));
 
-const wss = new WebSocketServer({ server, path: `${basePath || ''}/ws` || '/ws' });
+const wsPath = `${basePath || ''}/ws` || '/ws';
+const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+
+server.on('upgrade', async (req, socket, head) => {
+  try {
+    const pathname = new URL(req.url || '/', `${useHttps ? 'https' : 'http'}://localhost`).pathname;
+    if (pathname !== wsPath) {
+      socket.destroy();
+      return;
+    }
+    const authorization = authorizeWebSocketRequest(req, { validateSession: isValidSession });
+    if (!authorization.ok) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  } catch {
+    socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    socket.destroy();
+  }
+});
 
 wss.on('connection', (ws) => {
   console.log(`[ws] Client connected (total: ${wss.clients.size})`);
@@ -5225,17 +5320,17 @@ server.listen(config.port, config.host, () => {
   }).catch((err) => {
     console.error('[update] Failed to start auto-update scheduler:', err.message);
   });
-  warmWakeTranscriber().then(() => {
-    console.log('[wake] Warm transcriber ready');
-  }).catch((err) => {
-    console.error('[wake] Failed to warm transcriber:', err.message);
-  });
-
-  warmWakeKeywordDetector().then(() => {
-    console.log('[wake] Keyword detector ready');
-  }).catch((err) => {
-    console.error('[wake] Failed to warm keyword detector:', err.message);
-  });
+  loadWakeSettings().then((settings) => {
+    const enabled = !!settings.porcupineAccessKey || Object.keys(settings.wakeWords || {}).length > 0;
+    if (!enabled) {
+      console.log('[wake] Optional wake workers disabled by configuration');
+      return;
+    }
+    warmWakeTranscriber().then(() => console.log('[wake] Warm transcriber ready'))
+      .catch((err) => console.warn('[wake] Transcriber unavailable:', err.message));
+    warmWakeKeywordDetector().then(() => console.log('[wake] Keyword detector ready'))
+      .catch((err) => console.warn('[wake] Keyword detector unavailable:', err.message));
+  }).catch((err) => console.warn('[wake] Could not read wake settings:', err.message));
 
   try {
     bridge.start();

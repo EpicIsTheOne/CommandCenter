@@ -1,5 +1,7 @@
 # Command Center
 
+> Security release note (July 2026): browser control APIs and realtime WebSockets now require operator authentication. First-time password setup is loopback-only, passwords require at least 12 characters, the public `/api/v1` surface requires a bearer token, and the optional no-key API bypass is accepted only from a loopback peer on the configured local listener.
+
 _A self-hosted AI command center that turns your agent stack into a living pixel-art operations dashboard._
 
 ![Command Center](public/docs/command-center-preview.png)
@@ -676,6 +678,8 @@ If a client can use the local loopback listener, prefer it.
 
 CommandCenter also exposes a realtime WebSocket endpoint for live status/activity updates:
 
+The WebSocket upgrade must include either the authenticated `cc_auth` UI cookie or `Authorization: Bearer <COMMANDCENTER_API_KEY>`. Browser cookie connections are Origin-checked. Bearer tokens are never accepted in query strings.
+
 ```text
 ws://127.0.0.1:<PORT>/commandcenter/ws
 wss://your-domain.example/commandcenter/ws
@@ -732,6 +736,14 @@ There are also richer product-specific event families, especially:
 - normalize event names into your own internal client model instead of binding your entire app directly to raw CommandCenter event strings
 
 The WebSocket feed is useful, but it is broader and more product-shaped than the core REST chat contract.
+
+### Attachment behavior
+
+Reusable `fileIds` are resolved only through the managed chat-library manifest. Bounded text/source content is inlined, PDFs are extracted with `pdf-parse`, and PNG/JPEG/WebP/GIF images are passed to Hermes through its native `--image` argument. If the chosen OpenClaw or relay CLI has no verified image-input mechanism, the response reports that image as `unsupported` instead of claiming it was inspected. Responses expose per-file `attachmentStatuses` (`consumed`, `truncated`, `unsupported`, or `rejected`).
+
+### Platform and updater safety
+
+Optional Python workers resolve `PYTHON_BIN`, the project virtual environment, the Windows `py -3` launcher, `python3`, then `python`. Missing Python/wake dependencies disable those optional features without terminating the server. Update application remains Linux-only and reports an explicit unsupported capability on Windows; unattended auto-update is opt-in.
 
 ## Agent Configuration
 

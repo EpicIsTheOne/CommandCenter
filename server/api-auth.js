@@ -1,12 +1,8 @@
 import config from './config.js';
+import { isLoopbackAddress, validBearer } from './request-security.js';
 
 function normalizeAddress(value = '') {
   return String(value || '').trim();
-}
-
-function isLoopbackAddress(value = '') {
-  const addr = normalizeAddress(value);
-  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
 }
 
 export function apiAuthEnabled() {
@@ -35,9 +31,7 @@ export function requireApiAuth(req, res, next) {
     });
   }
 
-  const auth = String(req.headers.authorization || '').trim();
-  const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-  if (!token || token !== configured) {
+  if (!validBearer(req)) {
     return res.status(401).json({ ok: false, error: 'Unauthorized', code: 'UNAUTHORIZED' });
   }
   res.setHeader('X-CommandCenter-Auth-Mode', 'bearer');

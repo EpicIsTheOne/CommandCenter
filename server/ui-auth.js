@@ -1,10 +1,9 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { readJsonStore, writeJsonStore } from './json-store.js';
 
 const ROOT = process.cwd();
-const DATA_DIR = join(ROOT, 'data');
+const DATA_DIR = String(process.env.COMMANDCENTER_DATA_DIR || '').trim() || join(ROOT, 'data');
 const AUTH_FILE = join(DATA_DIR, 'ui-auth.json');
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 
@@ -25,22 +24,21 @@ function verifyPassword(password, stored = '') {
 
 export async function loadUiAuthConfig() {
   try {
-    if (!existsSync(AUTH_FILE)) return { passwordHash: '', enabled: false };
-    const raw = await readFile(AUTH_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
+    const parsed = await readJsonStore(AUTH_FILE, { defaultValue: { passwordHash: '' } });
     return {
       passwordHash: String(parsed.passwordHash || ''),
       enabled: !!parsed.passwordHash,
     };
-  } catch {
-    return { passwordHash: '', enabled: false };
+  } catch (err) {
+    console.error('[auth] Could not load UI auth configuration:', err.message);
+    throw err;
   }
 }
 
 export async function setUiPassword(password) {
   const passwordHash = hashPassword(password);
-  await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(AUTH_FILE, JSON.stringify({ passwordHash }, null, 2) + '\n', { mode: 0o600 });
+  await writeJsonStore(AUTH_FILE, { passwordHash }, { mode: 0o600, backup: true });
+  revokeAllSessions();
   return { enabled: true };
 }
 
@@ -65,6 +63,24 @@ export function isValidSession(token) {
 export function revokeSession(token) {
   sessions.delete(String(token || ''));
 }
+
+export function revokeAllSessions() {
+  sessions.clear();
+}
+
+export function pruneExpiredSessions(now = Date.now()) {
+  let pruned = 0;
+  for (const [token, expiresAt] of sessions) {
+    if (now > expiresAt) {
+      sessions.delete(token);
+      pruned += 1;
+    }
+  }
+  return pruned;
+}
+
+const pruneTimer = setInterval(() => pruneExpiredSessions(), 15 * 60_000);
+pruneTimer.unref?.();
 
 export function checkPassword(password, passwordHash) {
   return verifyPassword(password, passwordHash);
