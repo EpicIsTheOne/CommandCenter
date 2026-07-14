@@ -31,6 +31,12 @@ export function validBearer(req) {
   return expected.length > 0 && expected.length === supplied.length && timingSafeEqual(expected, supplied);
 }
 
+export function validReikaEmbedToken(req) {
+  const expected = Buffer.from(String(config.reikaEmbedToken || '').trim());
+  const supplied = Buffer.from(String(req.headers?.['x-reika-embed-token'] || '').trim());
+  return expected.length >= 32 && expected.length === supplied.length && timingSafeEqual(expected, supplied);
+}
+
 export function allowedBrowserOrigin(req) {
   const origin = String(req.headers.origin || '').trim();
   if (!origin) return true;

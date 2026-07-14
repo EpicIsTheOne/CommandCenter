@@ -4,6 +4,7 @@ export function classifyApiRoute(pathname, basePath = '') {
     `${basePath}/api/auth/status`,
     `${basePath}/api/auth/login`,
     `${basePath}/api/auth/setup`,
+    `${basePath}/api/auth/reika`,
   ]);
   if (!path.startsWith(`${basePath}/api/`)) return 'non-api';
   if (publicRoutes.has(path)) return 'public';

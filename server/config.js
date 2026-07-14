@@ -49,5 +49,6 @@ export default {
   openaiApiKey: process.env.OPENAI_API_KEY || '',
   weatherLocation: process.env.WEATHER_LOCATION || 'Kingston,Ontario,Canada',
   apiKey: process.env.COMMANDCENTER_API_KEY || '',
+  reikaEmbedToken: process.env.REIKA_EMBED_TOKEN || '',
   basePath,
 };

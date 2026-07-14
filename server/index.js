@@ -43,7 +43,7 @@ import { loadUpdateSettings, saveUpdateSettings } from './update-settings.js';
 import { loadDirectChatSettings, publicDirectChatSettings, saveDirectChatSettings } from './direct-chat-settings.js';
 import { applyUpdate, finalizePostRestartUpdateState, getUpdatePayload, startAutoUpdateScheduler } from './updater.js';
 import { buildAttachmentBundle } from './attachment-bundle.js';
-import { authorizeWebSocketRequest, createRateLimiter, isVerifiedLoopback, securityHeaders } from './request-security.js';
+import { authorizeWebSocketRequest, createRateLimiter, isVerifiedLoopback, securityHeaders, validReikaEmbedToken } from './request-security.js';
 import { getPlatformCapabilities } from './platform-capabilities.js';
 import { readJsonStore, updateJsonStore, writeJsonStore } from './json-store.js';
 import { createUiApiPolicy } from './route-policy.js';
@@ -480,6 +480,14 @@ app.use(createUiApiPolicy({
 
 app.get(`${basePath}/api/setup/capabilities`, async (_req, res) => {
   res.json({ ok: true, capabilities: await getPlatformCapabilities() });
+});
+
+app.post(`${basePath}/api/auth/reika`, authAttemptLimiter, async (req, res) => {
+  if (!validReikaEmbedToken(req)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  const token = createSessionToken();
+  createSession(token);
+  setAuthCookie(res, token);
+  res.json({ ok: true });
 });
 
 

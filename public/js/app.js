@@ -1088,11 +1088,21 @@ function waitForAuthSubmit() {
 }
 
 async function ensureUiAuth() {
+  let reikaExchangeAttempted = false;
   while (true) {
     const status = await fetchJson(`${BASE}/api/auth/status`);
     if (status?.authenticated) {
       closeAuthModal();
       return;
+    }
+    if (!reikaExchangeAttempted) {
+      reikaExchangeAttempted = true;
+      try {
+        await fetchJson(`${BASE}/api/auth/reika`, { method: 'POST' });
+        continue;
+      } catch {
+        // Normal browsers continue to password auth.
+      }
     }
     openAuthModal({ mode: status?.passwordSet ? 'login' : 'setup' });
     // eslint-disable-next-line no-await-in-loop

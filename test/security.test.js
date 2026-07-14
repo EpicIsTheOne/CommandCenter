@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyApiRoute, createUiApiPolicy } from '../server/route-policy.js';
-import { isLoopbackAddress, createRateLimiter, securityHeaders } from '../server/request-security.js';
+import { isLoopbackAddress, createRateLimiter, securityHeaders, validReikaEmbedToken } from '../server/request-security.js';
 import config from '../server/config.js';
 import { isLocalApiRequest } from '../server/api-auth.js';
 import { enforceUploadBudget } from '../server/upload-policy.js';
@@ -9,10 +9,20 @@ import { enforceUploadBudget } from '../server/upload-policy.js';
 test('route authorization matrix protects sensitive browser APIs', () => {
   assert.equal(classifyApiRoute('/api/auth/status'), 'public');
   assert.equal(classifyApiRoute('/api/auth/login'), 'public');
+  assert.equal(classifyApiRoute('/api/auth/reika'), 'public');
   assert.equal(classifyApiRoute('/api/v1/chat'), 'api-token');
   for (const path of ['/api/fairy/memory', '/api/call/start', '/api/live/tasks', '/api/settings/voice', '/api/chat/direct']) {
     assert.equal(classifyApiRoute(path), 'ui-session', path);
   }
+});
+
+test('Reika embed token is separate and timing-safe', () => {
+  const prior = config.reikaEmbedToken;
+  config.reikaEmbedToken = 'r'.repeat(48);
+  try {
+    assert.equal(validReikaEmbedToken({ headers: { 'x-reika-embed-token': 'r'.repeat(48) } }), true);
+    assert.equal(validReikaEmbedToken({ headers: { 'x-reika-embed-token': 'wrong' } }), false);
+  } finally { config.reikaEmbedToken = prior; }
 });
 
 test('UI policy rejects missing setup and invalid sessions', async () => {
