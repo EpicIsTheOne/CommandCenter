@@ -83,4 +83,5 @@ test('security headers include nosniff, referrer, frame, and CSP controls', () =
   assert.equal(headers['Referrer-Policy'], 'no-referrer');
   assert.equal(headers['X-Frame-Options'], 'SAMEORIGIN');
   assert.match(headers['Content-Security-Policy'], /frame-ancestors 'self'/);
+  assert.doesNotMatch(headers['Content-Security-Policy'], /script-src[^;]*'unsafe-inline'/);
 });
