@@ -85,7 +85,8 @@ if (useHttps) {
   server = createHttpServer(app);
   if (config.localApiEnabled) localApiServer = createHttpServer(app);
 }
-const uploadTmpDir = join(__dirname, '..', 'data', '.tmp-uploads');
+const commandCenterDataDir = String(process.env.COMMANDCENTER_DATA_DIR || '').trim() || join(process.cwd(), 'data');
+const uploadTmpDir = join(commandCenterDataDir, '.tmp-uploads');
 mkdirSync(uploadTmpDir, { recursive: true, mode: 0o700 });
 const upload = multer({
   storage: multer.diskStorage({
@@ -94,7 +95,7 @@ const upload = multer({
   }),
   limits: { fileSize: 10 * 1024 * 1024, files: 100, fields: 50 },
 });
-const chatLibraryDir = join(__dirname, '..', 'data', 'chat-library');
+const chatLibraryDir = join(commandCenterDataDir, 'chat-library');
 const chatFilesDir = join(chatLibraryDir, 'files');
 const chatManifestPath = join(chatLibraryDir, 'manifest.json');
 const chatHistoryPath = join(chatLibraryDir, 'history.json');
@@ -2182,7 +2183,7 @@ app.get(`${basePath}/api/companions/imports/:slug/*`, async (req, res) => {
   const slug = basename(String(req.params.slug || ''));
   const file = String(req.params[0] || '').replace(/\\/g, '/').replace(/^\/+/, '');
   if (!file || file.includes('..')) return res.status(400).json({ ok: false, error: 'Invalid import asset path', code: 'BAD_REQUEST' });
-  const fullPath = join(__dirname, '..', 'data', 'companions', 'imports', slug, file);
+  const fullPath = join(commandCenterDataDir, 'companions', 'imports', slug, file);
   if (!existsSync(fullPath)) return res.status(404).json({ ok: false, error: 'Imported companion asset not found', code: 'NOT_FOUND' });
   res.sendFile(fullPath);
 });
