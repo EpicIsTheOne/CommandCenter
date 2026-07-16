@@ -46,6 +46,7 @@ export default {
   gatewayToken: resolvedGatewayToken,
   gatewayTokenSource,
   demoMode: process.env.DEMO_MODE !== 'false',
+  relayOnlyMode: ['1', 'true', 'yes', 'on'].includes(String(process.env.COMMANDCENTER_RELAY_ONLY || process.env.RELAY_ONLY_MODE || '').trim().toLowerCase()),
   openaiApiKey: process.env.OPENAI_API_KEY || '',
   weatherLocation: process.env.WEATHER_LOCATION || 'Kingston,Ontario,Canada',
   apiKey: process.env.COMMANDCENTER_API_KEY || '',

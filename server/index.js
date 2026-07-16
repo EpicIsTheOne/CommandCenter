@@ -1704,20 +1704,23 @@ app.get(`${basePath}/api/status`, async (req, res) => {
   const voiceSettings = await loadVoiceSettings();
   const issues = [];
   const configuredDemo = !!bridgeStatus.configuredDemo;
-  const fellBackToDemo = !configuredDemo && bridgeStatus.mode === 'demo';
-  const liveConnected = !configuredDemo && bridgeStatus.mode === 'live' && bridgeStatus.connected;
+  const relayOnlyMode = !!bridgeStatus.relayOnlyMode;
+  const fellBackToDemo = !configuredDemo && !relayOnlyMode && bridgeStatus.mode === 'demo';
+  const liveConnected = !configuredDemo && !relayOnlyMode && bridgeStatus.mode === 'live' && bridgeStatus.connected;
 
-  if (configuredDemo) {
+  if (relayOnlyMode) {
+    issues.push({ level: 'info', code: 'RELAY_ONLY_MODE_ENABLED', message: 'CommandCenter is running in relay-only mode. Local OpenClaw gateway connectivity is intentionally disabled.' });
+  } else if (configuredDemo) {
     issues.push({ level: 'info', code: 'DEMO_MODE_ENABLED', message: 'CommandCenter is running in demo mode. Agent activity may be simulated.' });
   } else if (fellBackToDemo) {
     issues.push({ level: 'warn', code: 'FALLBACK_TO_DEMO', message: `Live gateway connection failed, so CommandCenter fell back to demo mode${bridgeStatus.lastFallbackReason ? ` (${bridgeStatus.lastFallbackReason})` : ''}.` });
   }
 
-  if (!configuredDemo && !bridgeStatus.gatewayTokenConfigured) {
+  if (!configuredDemo && !relayOnlyMode && !bridgeStatus.gatewayTokenConfigured) {
     issues.push({ level: 'warn', code: 'GATEWAY_TOKEN_MISSING', message: 'No gateway token is configured for live OpenClaw mode.' });
   }
 
-  if (bridgeStatus.lastAuthError) {
+  if (!relayOnlyMode && bridgeStatus.lastAuthError) {
     issues.push({ level: 'error', code: 'GATEWAY_AUTH_FAILED', message: `Gateway authentication failed: ${bridgeStatus.lastAuthError}` });
   }
 
@@ -1733,9 +1736,10 @@ app.get(`${basePath}/api/status`, async (req, res) => {
     agents: roster.agents,
     primaryAgentId: roster.primaryAgentId,
     setup: {
-      mode: configuredDemo ? 'demo' : fellBackToDemo ? 'demo-fallback' : liveConnected ? 'live' : 'connecting',
-      modeLabel: configuredDemo ? 'Demo mode' : fellBackToDemo ? 'Demo fallback' : liveConnected ? 'Live OpenClaw' : 'Connecting to OpenClaw',
+      mode: relayOnlyMode ? 'relay-only' : configuredDemo ? 'demo' : fellBackToDemo ? 'demo-fallback' : liveConnected ? 'live' : 'connecting',
+      modeLabel: relayOnlyMode ? 'Relay-only mode' : configuredDemo ? 'Demo mode' : fellBackToDemo ? 'Demo fallback' : liveConnected ? 'Live OpenClaw' : 'Connecting to OpenClaw',
       demoMode: configuredDemo,
+      relayOnlyMode,
       requestedMode: bridgeStatus.requestedMode,
       actualMode: bridgeStatus.mode,
       gatewayConnected: bridgeStatus.connected,
@@ -2700,7 +2704,7 @@ app.post(`${basePath}/api/setup/test`, async (req, res) => {
     });
   }
 
-  if (bridgeStatus.lastAuthError) {
+  if (!relayOnlyMode && bridgeStatus.lastAuthError) {
     checks.push({
       key: 'gateway-auth',
       ok: false,

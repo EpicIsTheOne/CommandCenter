@@ -255,7 +255,7 @@ export class RelayAgentSource extends EventEmitter {
     if (!remoteAgentId) throw new Error('Relay session is missing relayAgentId.');
 
     const requestId = `cc_relay_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-    const providerSessionId = cleanText(metadata.relayProviderSessionId) || `commandcenter_api_${cleanText(session?.id) || Date.now().toString(36)}`;
+    const providerSessionId = cleanText(metadata.relayProviderSessionId);
     const remoteSessionId = cleanText(metadata.relayRemoteSessionId);
 
     const request = {
@@ -270,7 +270,7 @@ export class RelayAgentSource extends EventEmitter {
         providerId,
         agent: remoteAgentId,
         ...(remoteSessionId ? { sessionId: remoteSessionId } : {}),
-        providerSessionId,
+        ...(providerSessionId ? { providerSessionId } : {}),
         message: cleanText(latestMessage),
       },
     };
