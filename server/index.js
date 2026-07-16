@@ -5058,7 +5058,7 @@ app.get(`${basePath}/api/chat/sessions/:id/messages`, async (req, res) => {
   }
 });
 
-app.post(`${basePath}/api/chat/direct`, async (req, res) => {
+app.post([`${basePath}/api/chat/direct`, `${basePath}/api/v1/chat/direct`], async (req, res) => {
   try {
     const incomingText = req.body?.message ?? req.body?.text;
     const userText = String(incomingText || '').trim();
