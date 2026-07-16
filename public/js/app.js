@@ -1119,13 +1119,15 @@ async function loadSetupStatus() {
     const hasError = issues.some((issue) => issue.level === 'error');
     const hasWarn = issues.some((issue) => issue.level === 'warn');
     const tone = hasError ? 'error' : hasWarn ? 'warn' : 'ok';
-    const pillText = setup.demoMode
-      ? 'Demo Mode'
-      : bridge.mode === 'live'
-        ? 'Live Connected'
-        : bridge.mode === 'demo'
-          ? 'Demo Fallback'
-          : 'Connecting';
+    const pillText = setup.relayOnlyMode || bridge.relayOnlyMode || bridge.mode === 'relay-only'
+      ? 'Relay Connected'
+      : setup.demoMode
+        ? 'Demo Mode'
+        : bridge.mode === 'live'
+          ? 'Live Connected'
+          : bridge.mode === 'demo'
+            ? 'Demo Fallback'
+            : 'Connecting';
     const summary = `${setup.modeLabel || 'Unknown mode'} • STT: ${String(setup.sttMode || 'api').toUpperCase()}${setup.sttMode === 'api' ? ` → ${setup.sttProvider || 'fish'}` : ''} • TTS: ${setup.ttsProvider || 'elevenlabs'}${bridge.gatewayTokenSource ? ` • Gateway token: ${bridge.gatewayTokenSource}` : ''}`;
     setSetupStatus(summary, issues, tone, pillText);
     return data;
@@ -1167,7 +1169,10 @@ async function requestFullscreen() {
   }
 }
 
-function bootSequence() {
+function bootSequence(status = null) {
+  const bridge = status?.bridge || {};
+  const setup = status?.setup || {};
+  const relayOnly = setup.relayOnlyMode || bridge.relayOnlyMode || bridge.mode === 'relay-only';
   const lines = [
     ['[sys] OpenClaw Command Center v1.0', 'system'],
     ['[sys] Initializing display modules...', 'system'],
@@ -1177,7 +1182,7 @@ function bootSequence() {
     [`[sys] Voice: tap mascot for ${getAgentLabel(getPrimaryAgent())}, tap any agent in office`, 'agent'],
     ['[sys] Wake mode: local whisper name detection', 'agent'],
     [`[sys] Agents: ${roster.agents.map(a => `${a.id}(${a.label})`).join(' | ') || 'main(Main)'}`, 'info'],
-    ['[sys] Connecting to OpenClaw gateway...', 'system'],
+    [relayOnly ? '[sys] Connecting to Reika Relay...' : '[sys] Connecting to OpenClaw gateway...', 'system'],
   ];
 
   let i = 0;
@@ -3065,8 +3070,8 @@ async function main() {
   terminal.log('[wake] Wake mode: local whisper name detection', 'info', true);
   setConnectionState('connecting', 'CONNECTING');
   setWakeButtonState('off');
-  bootSequence();
-  loadSetupStatus().catch(() => {});
+  const initialSetupStatus = await loadSetupStatus().catch(() => null);
+  bootSequence(initialSetupStatus);
   setSetupTestResult('No setup test run yet.', [], 'ok');
   connect();
 
