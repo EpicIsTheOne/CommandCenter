@@ -43,7 +43,7 @@ import { appendApiSessionMessage, createApiSession, getApiSession, getApiSession
 import { loadUiAuthConfig, setUiPassword, checkPassword, createSessionToken, createSession, isValidSession, revokeSession } from './ui-auth.js';
 import { loadUpdateSettings, saveUpdateSettings } from './update-settings.js';
 import { loadDirectChatSettings, publicDirectChatSettings, saveDirectChatSettings } from './direct-chat-settings.js';
-import { applyUpdate, finalizePostRestartUpdateState, getUpdatePayload, startAutoUpdateScheduler } from './updater.js';
+import { applyUpdate, finalizePostRestartUpdateState, getUpdatePayload, startAutoUpdateScheduler, verifyUpdateHealth } from './updater.js';
 import { buildAttachmentBundle } from './attachment-bundle.js';
 import { authorizeWebSocketRequest, createRateLimiter, isVerifiedLoopback, securityHeaders, validReikaEmbedToken } from './request-security.js';
 import { getPlatformCapabilities } from './platform-capabilities.js';
@@ -5245,7 +5245,10 @@ app.use((err, req, res, next) => {
 server.listen(config.port, config.host, () => {
   console.log(`[server] Command Center listening on ${config.host}:${config.port}${basePath || ''}`);
   console.log(`[server] Protocol: ${useHttps ? 'https' : 'http'}`);
-  finalizePostRestartUpdateState().catch((err) => {
+  finalizePostRestartUpdateState({
+    serverInfo: { port: config.port, host: config.host, basePath, secure: useHttps },
+    verify: (opts) => verifyUpdateHealth({ ...opts, timeoutMs: Number(process.env.UPDATE_HEALTHCHECK_TIMEOUT_MS) || 30000 }),
+  }).catch((err) => {
     console.error('[update] Failed to finalize post-restart update state:', err.message);
   });
   startAutoUpdateScheduler().then((info) => {

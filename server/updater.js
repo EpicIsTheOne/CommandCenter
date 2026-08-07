@@ -1,5 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import http from 'node:http';
+import https from 'node:https';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadUpdateSettings, loadUpdateState, saveUpdateState } from './update-settings.js';
@@ -8,6 +10,10 @@ import { updaterCapability } from './platform-capabilities.js';
 const execFileAsync = promisify(execFile);
 const REPO_DIR = process.cwd();
 const TMP_LOG = join(REPO_DIR, 'tmp-commandcenter.log');
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function redactSecrets(value = '') {
   return String(value || '')
@@ -257,8 +263,10 @@ export async function applyUpdate({ requestedBy = 'manual' } = {}) {
     phase: requestedBy === 'auto' ? 'auto-update' : 'manual-update',
     message: `Applying ${pendingCommits.length || status.summary.behind} update${(pendingCommits.length || status.summary.behind) === 1 ? '' : 's'} from ${status.repo.remote}/${status.repo.branch}...`,
     localSha: status.repo.localSha,
+    previousSha: status.repo.localSha,
     targetSha: status.state.targetSha,
     branch: status.repo.branch,
+    runInstall,
     commitsApplied: pendingCommits,
     changedFiles: status.summary.changedFiles,
   });
@@ -297,20 +305,131 @@ export async function applyUpdate({ requestedBy = 'manual' } = {}) {
 let autoUpdateTimer = null;
 let autoUpdateRunning = false;
 
-export async function finalizePostRestartUpdateState() {
+// Probe a local HTTP(S) endpoint until it returns a 2xx, or until timeout.
+// `check` is injectable for testing without a live server.
+export async function verifyUpdateHealth({
+  port, host = '127.0.0.1', basePath = '', secure = false,
+  path: healthPath = '/api/health', timeoutMs = 30000, intervalMs = 1000,
+  check,
+} = {}) {
+  const deadline = Date.now() + Math.max(1000, timeoutMs);
+  if (typeof check === 'function') {
+    // eslint-disable-next-line no-await-in-loop
+    while (Date.now() < deadline) {
+      try {
+        const res = await check();
+        if (res && (res.ok || (res.status >= 200 && res.status < 400))) return { healthy: true, checkedAt: Date.now() };
+      } catch { /* keep polling */ }
+      // eslint-disable-next-line no-await-in-loop
+      if (Date.now() < deadline) await sleep(intervalMs);
+    }
+    return { healthy: false, checkedAt: Date.now() };
+  }
+  const lib = secure ? https : http;
+  const url = `${secure ? 'https' : 'http'}://${host}:${port}${basePath}${healthPath}`;
+  while (Date.now() < deadline) {
+    try {
+      const ok = await new Promise((resolve) => {
+        const req = lib.get(url, { timeout: Math.min(5000, intervalMs) }, (res) => {
+          res.resume();
+          resolve(res.statusCode >= 200 && res.statusCode < 400);
+        });
+        req.on('error', () => resolve(false));
+        req.on('timeout', () => { req.destroy(); resolve(false); });
+      });
+      if (ok) return { healthy: true, checkedAt: Date.now() };
+    } catch { /* keep polling */ }
+    if (Date.now() < deadline) await sleep(intervalMs);
+  }
+  return { healthy: false, checkedAt: Date.now() };
+}
+
+// Revert the working tree to a known-good SHA and (optionally) reinstall deps.
+// `runner` is injectable for testing; defaults to real git + npm.
+export async function performRollback({ previousSha, runInstall = true, runner } = {}) {
+  if (!previousSha) return { ok: false, reason: 'no-previous-sha' };
+  const exec = typeof runner === 'function'
+    ? runner
+    : async (cmd, args) => { await execFileAsync(cmd, args, { cwd: REPO_DIR, timeout: 120000, maxBuffer: 1024 * 1024 * 8, env: { ...process.env } }); return true; };
+  try {
+    await exec('git', ['reset', '--hard', previousSha]);
+    if (runInstall) {
+      const installStep = existsSync(join(REPO_DIR, 'package-lock.json')) ? 'npm ci --no-fund --no-audit' : 'npm install --no-fund --no-audit';
+      await exec('bash', ['-lc', installStep]);
+    }
+    return { ok: true, rolledBackTo: previousSha };
+  } catch (err) {
+    return { ok: false, reason: redactSecrets(err?.stderr || err?.message || 'rollback command failed') };
+  }
+}
+
+export async function finalizePostRestartUpdateState({ verify = verifyUpdateHealth, rollback = performRollback, getHead, serverInfo } = {}) {
   const state = await loadUpdateState();
   if (state.status !== 'applying') return state;
-  const head = await safeGit(['rev-parse', 'HEAD']);
-  const currentSha = head.ok ? head.stdout : '';
-  const success = !!currentSha && !!state.targetSha && currentSha === state.targetSha;
+  const headSha = typeof getHead === 'function' ? await getHead() : (await safeGit(['rev-parse', 'HEAD'])).stdout;
+  const currentSha = String(headSha || '').trim();
+  const shaMatches = !!currentSha && !!state.targetSha && currentSha === state.targetSha;
+
+  // SHA check alone isn't enough: the new process must actually boot healthy.
+  // Without this, a code change that crashes on startup leaves the server
+  // permanently down with no recovery.
+  let health = { healthy: true, checkedAt: Date.now() };
+  if (shaMatches) {
+    if (serverInfo?.port) {
+      const probe = await verify({
+        port: serverInfo.port, host: serverInfo.host || '127.0.0.1', basePath: serverInfo.basePath || '', secure: !!serverInfo.secure,
+      });
+      const healthy = !!(probe && (probe.healthy ?? probe.ok ?? (typeof probe.status === 'number' && probe.status >= 200 && probe.status < 400)));
+      health = { healthy, checkedAt: Date.now() };
+    } else {
+      // No listening server info available (unit/scenario test) — treat SHA match as success.
+      health = { healthy: true, checkedAt: Date.now() };
+    }
+  }
+
+  if (shaMatches && health.healthy) {
+    return await saveUpdateState({
+      ...state,
+      status: 'ok',
+      phase: 'completed',
+      message: 'CommandCenter updated successfully and restarted.',
+      lastUpdatedAt: Date.now(),
+      localSha: currentSha || state.localSha,
+    });
+  }
+
+  // Boot failed (SHA mismatch or unhealthy) — roll back to the previous SHA.
+  const target = state.previousSha;
+  if (!target) {
+    return await saveUpdateState({
+      ...state,
+      status: 'error',
+      phase: 'verification-failed',
+      message: `Update verification failed${health.healthy ? '' : ' (health check did not pass)'} and no previous SHA was recorded for rollback.`,
+      lastErrorAt: Date.now(),
+      localSha: currentSha || state.localSha,
+    });
+  }
+  const result = await rollback({ previousSha: target, runInstall: state.runInstall !== false });
+  if (!result.ok) {
+    return await saveUpdateState({
+      ...state,
+      status: 'error',
+      phase: 'rollback-failed',
+      message: `Update verification failed and automatic rollback failed: ${result.reason}`,
+      lastErrorAt: Date.now(),
+      localSha: currentSha || state.localSha,
+    });
+  }
+  // Record a pending restart-rollback so the next boot (old code) finalizes cleanly.
   return await saveUpdateState({
     ...state,
-    status: success ? 'ok' : 'error',
-    phase: success ? 'completed' : 'verification-failed',
-    message: success ? 'CommandCenter updated successfully and restarted.' : 'CommandCenter restarted, but update verification did not match the expected target commit.',
-    lastUpdatedAt: success ? Date.now() : state.lastUpdatedAt,
-    lastErrorAt: success ? state.lastErrorAt : Date.now(),
-    localSha: currentSha || state.localSha,
+    status: 'rolling-back',
+    phase: 'rollback',
+    message: `Update verification failed (${health.healthy ? 'SHA mismatch' : 'health check did not pass'}); rolled back to ${target.slice(0, 7)} and restarting.`,
+    lastErrorAt: Date.now(),
+    localSha: target,
+    targetSha: target,
   });
 }
 
