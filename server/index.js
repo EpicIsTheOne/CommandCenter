@@ -28,7 +28,7 @@ import { detectWakeKeyword, warmWakeKeywordDetector } from './wake-keyword-detec
 import { startSessionMonitor } from './session-monitor.js';
 import { startHermesSessionMonitor } from './hermes-session-monitor.js';
 import { FAIRY_CALL_MODE_OPTIONS, GEMINI_LIVE_VOICE_OPTIONS, loadGeminiRuntimeConfig, loadGeminiSettings, saveGeminiSettings, normalizeCallMode } from './gemini-config.js';
-import { createLiveTask, getLiveTask, listLiveTasks, looksComplexRequest, runLiveTask } from './live-tasks.js';
+import { createLiveTask, getLiveTask, listLiveTasks, looksComplexRequest, pruneLiveTasks, runLiveTask } from './live-tasks.js';
 import { createCallSession, endCallSession, getCallSession, listCallSessions, updateCallSession } from './call-session-store.js';
 import { cleanupFairyRecordingIndex, getFairyRecording, getFairyRecordingPath, listFairyRecordings, saveFairyRecording } from './fairy-recordings.js';
 import { GeminiLiveSession, FAIRY_LIVE_VOICE_NAME, buildFairyLiveSystemPrompt } from './gemini-live.js';
@@ -4332,6 +4332,11 @@ app.get(`${basePath}/api/live/tasks/:id`, async (req, res) => {
   res.json({ ok: true, task });
 });
 
+app.post(`${basePath}/api/live/tasks/prune`, async (req, res) => {
+  const pruned = await pruneLiveTasks();
+  res.json({ ok: true, pruned });
+});
+
 app.post(`${basePath}/api/live/tasks`, async (req, res) => {
   try {
     const { text, title, agent } = req.body || {};
@@ -5272,3 +5277,13 @@ if (config.localApiEnabled && localApiServer) {
     console.log(`[server] Local API listener ready on ${config.localApiHost}:${config.localApiPort}${basePath || ''}/api/v1 (loopback-only, no bearer token required)`);
   });
 }
+
+// Periodic retention sweep so live-task history cannot grow without bound.
+// Runs daily; the actual limits come from LIVE_TASK_RETENTION_DAYS /
+// LIVE_TASK_MAX_COUNT (see server/live-tasks.js).
+const retentionTimer = setInterval(() => {
+  pruneLiveTasks().then((pruned) => {
+    if (pruned > 0) console.log(`[retention] Pruned ${pruned} live task(s) past retention window.`);
+  }).catch((err) => console.error('[retention] Live task prune failed:', err.message));
+}, 24 * 60 * 60 * 1000);
+if (typeof retentionTimer.unref === 'function') retentionTimer.unref();

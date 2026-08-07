@@ -2,9 +2,14 @@ import { join } from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { getHermesAgent } from './agents.js';
 import { readJsonStore, updateJsonStore } from './json-store.js';
+import { applyRetention, parseRetention } from './retention.js';
 
-const ROOT = process.cwd();
-const TASKS_FILE = join(ROOT, 'data', 'live-tasks.v1.json');
+const DATA_DIR = String(process.env.COMMANDCENTER_DATA_DIR || '').trim() || join(process.cwd(), 'data');
+const TASKS_FILE = join(DATA_DIR, 'live-tasks.v1.json');
+
+const LIVE_TASK_RETENTION_DAYS = parseRetention(process.env.LIVE_TASK_RETENTION_DAYS, 90);
+const LIVE_TASK_MAX_COUNT = parseRetention(process.env.LIVE_TASK_MAX_COUNT, 500);
+const LIVE_TASK_RETENTION_MS = LIVE_TASK_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 
 function nowIso() {
   return new Date().toISOString();
@@ -23,6 +28,23 @@ export async function listLiveTasks() {
 export async function getLiveTask(taskId) {
   const store = await readStore();
   return store.tasks.find((task) => task.id === taskId) || null;
+}
+
+// Enforce retention (age + count) on stored tasks. Returns the number of
+// pruned tasks. Safe to call on a schedule or manually via the settings UI.
+export async function pruneLiveTasks() {
+  let pruned = 0;
+  await updateJsonStore(TASKS_FILE, { defaultValue: { tasks: [] } }, (store) => {
+    const before = (store.tasks || []).length;
+    const kept = applyRetention(store.tasks || [], {
+      maxCount: LIVE_TASK_MAX_COUNT,
+      maxAgeMs: LIVE_TASK_RETENTION_MS,
+      getTimestamp: (task) => task.updated_at || task.created_at,
+    });
+    pruned = before - kept.length;
+    return { tasks: kept };
+  });
+  return pruned;
 }
 
 export async function createLiveTask({ title, summary, prompt, agent = 'orchestrator', runtime = '' }) {
