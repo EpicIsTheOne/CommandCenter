@@ -2,6 +2,9 @@
 
 > Security release note (July 2026): browser control APIs and realtime WebSockets now require operator authentication. First-time password setup is loopback-only, passwords require at least 12 characters, the public `/api/v1` surface requires a bearer token, and the optional no-key API bypass is accepted only from a loopback peer on the configured local listener.
 
+- **Security model & vulnerability history:** [SECURITY.md](./SECURITY.md)
+- **Contributing & test discipline:** [CONTRIBUTING.md](./CONTRIBUTING.md)
+
 _A self-hosted AI command center that turns your agent stack into a living pixel-art operations dashboard._
 
 ![Command Center](public/docs/command-center-preview.png)
