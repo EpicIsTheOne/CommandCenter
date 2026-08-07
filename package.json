@@ -1,7 +1,7 @@
 {
   "name": "openclaw-command-center",
   "version": "1.0.0",
-  "description": "OpenClaw AI Command Center for Raspberry Pi 5 + 7\" LCD",
+  "description": "Self-hosted AI command center for OpenClaw / Hermes agents — dashboard, voice, live tasks, and kiosk UI (Raspberry Pi 5 + 7\" LCD supported).",
   "type": "module",
   "main": "server/index.js",
   "scripts": {
