@@ -34,6 +34,7 @@ import { cleanupFairyRecordingIndex, getFairyRecording, getFairyRecordingPath, l
 import { GeminiLiveSession, FAIRY_LIVE_VOICE_NAME, buildFairyLiveSystemPrompt } from './gemini-live.js';
 import { addFairyMemoryEntry, buildFairyMemoryContext, loadFairyMemory, removeFairyMemoryEntry, selectRelevantFairyMemory, updateFairyMemoryEntry } from './fairy-memory.js';
 import { requireApiAuth } from './api-auth.js';
+import { registerGracefulShutdown } from './shutdown.js';
 import { runApiChatTurn } from './api-chat-runner.js';
 import relayAgentSource from './relay-agent-source.js';
 import { runRoleplayChatTurn } from './roleplay-chat-runner.js';
@@ -5269,6 +5270,10 @@ export { broadcast, wss };
 const bridge = new OpenClawBridge();
 const stopSessionMonitor = startSessionMonitor({ broadcast, roster, emitResponses: true });
 const stopHermesSessionMonitor = startHermesSessionMonitor({ broadcast });
+
+// Graceful shutdown: Docker/systemd send SIGTERM; drain WS + HTTP before exit
+// so live calls, WebSocket clients, and timers are not dropped mid-flight.
+registerGracefulShutdown({ server, wss, localApiServer: config.localApiEnabled ? localApiServer : null, bridge });
 
 app.get(`${basePath}/api/session-monitor/debug`, (req, res) => {
   res.json({ ok: true, agents: typeof stopSessionMonitor.getDebugState === 'function' ? stopSessionMonitor.getDebugState() : [] });
