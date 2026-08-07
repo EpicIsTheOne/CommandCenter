@@ -6,6 +6,22 @@ const MAX_CONTEXT_MESSAGES = 40;
 const DEFAULT_OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const DEFAULT_ROLEPLAY_MODEL = process.env.OPENROUTER_ROLEPLAY_MODEL || 'z-ai/glm-5';
 
+// Ordered fallback chain. The request tries each model in turn and uses the
+// first that returns a non-empty response. Configure via
+// OPENROUTER_ROLEPLAY_MODEL_FALLBACKS (comma-separated). Falls back to a
+// reasonable default so a single provider outage does not break roleplay.
+export function resolveRoleplayModelChain(model, providerModel) {
+  const explicit = String(model || providerModel || process.env.OPENROUTER_ROLEPLAY_MODEL || '').trim();
+  const primary = explicit || DEFAULT_ROLEPLAY_MODEL;
+  const fallbackEnv = String(process.env.OPENROUTER_ROLEPLAY_MODEL_FALLBACKS || '').trim();
+  const fallbacks = fallbackEnv
+    ? fallbackEnv.split(',').map((m) => m.trim()).filter(Boolean)
+    : ['anthropic/claude-3.5-sonnet', 'openai/gpt-4o-mini', 'meta-llama/llama-3.1-8b-instruct'];
+  const chain = [primary, ...fallbacks.filter((m) => m && m !== primary)];
+  // De-duplicate while preserving order.
+  return [...new Set(chain)];
+}
+
 function summarizeMessageLine(message) {
   const role = message.role === 'assistant' ? 'assistant' : 'user';
   return {
@@ -133,40 +149,52 @@ function normalizeRoleplayProvider(input = {}) {
   return { baseURL, apiKey, model };
 }
 
-export async function runRoleplayChatTurn({ session, latestMessage, attachmentContext = '', model, roleplayProvider = null, onEvent } = {}) {
+export async function runRoleplayChatTurn({ session, latestMessage, attachmentContext = '', model, roleplayProvider = null, onEvent, createClient } = {}) {
   const provider = normalizeRoleplayProvider(roleplayProvider || session?.metadata?.roleplayProvider || {});
-  const chosenModel = String(model || provider.model || process.env.OPENROUTER_ROLEPLAY_MODEL || DEFAULT_ROLEPLAY_MODEL).trim() || DEFAULT_ROLEPLAY_MODEL;
+  const modelChain = resolveRoleplayModelChain(model, provider.model);
   const baseURL = String(provider.baseURL || process.env.OPENROUTER_BASE_URL || DEFAULT_OPENROUTER_BASE_URL).trim();
   const apiKey = String(provider.apiKey || process.env.OPENROUTER_API_KEY || '').trim();
   const isOpenRouter = /openrouter\.ai\/api\/v1\/?$/i.test(baseURL);
   if (isOpenRouter && !apiKey) throw new Error('OPENROUTER_API_KEY is not configured');
 
-  const client = new OpenAI({
-    apiKey: apiKey || 'not-needed',
-    baseURL,
-  });
+  const makeClient = typeof createClient === 'function'
+    ? createClient
+    : (opts) => new OpenAI(opts);
 
   const messages = buildMessages(session, latestMessage, attachmentContext);
 
-  try { onEvent?.({ type: 'thinking', data: { mode: 'roleplay', model: chosenModel, status: 'Processing...' } }); } catch {}
+  let lastError = null;
+  for (const chosenModel of modelChain) {
+    try {
+      const client = makeClient({ apiKey: apiKey || 'not-needed', baseURL });
+      try { onEvent?.({ type: 'thinking', data: { mode: 'roleplay', model: chosenModel, status: 'Processing...' } }); } catch {}
+      const requestOptions = isOpenRouter
+        ? {
+            headers: {
+              'HTTP-Referer': process.env.OPENROUTER_HTTP_REFERER || 'https://techexplore.us/commandcenter/',
+              'X-Title': process.env.OPENROUTER_APP_TITLE || 'OpenClaw Command Center',
+            },
+          }
+        : undefined;
 
-  const requestOptions = isOpenRouter
-    ? {
-        headers: {
-          'HTTP-Referer': process.env.OPENROUTER_HTTP_REFERER || 'https://techexplore.us/commandcenter/',
-          'X-Title': process.env.OPENROUTER_APP_TITLE || 'OpenClaw Command Center',
-        },
+      const response = await client.chat.completions.create({
+        model: chosenModel,
+        messages,
+        temperature: 0.9,
+      }, requestOptions);
+
+      const text = String(response.choices?.[0]?.message?.content || '').trim();
+      if (!text) {
+        lastError = new Error(`Roleplay model ${chosenModel} returned an empty response`);
+        continue;
       }
-    : undefined;
-
-  const response = await client.chat.completions.create({
-    model: chosenModel,
-    messages,
-    temperature: 0.9,
-  }, requestOptions);
-
-  const text = String(response.choices?.[0]?.message?.content || '').trim();
-  if (!text) throw new Error('Roleplay model returned an empty response');
-  try { onEvent?.({ type: 'response', data: { mode: 'roleplay', model: chosenModel, text } }); } catch {}
-  return { text, model: chosenModel };
+      try { onEvent?.({ type: 'response', data: { mode: 'roleplay', model: chosenModel, text } }); } catch {}
+      return { text, model: chosenModel };
+    } catch (err) {
+      lastError = err;
+      // Try the next model in the chain.
+      try { onEvent?.({ type: 'model-fallback', data: { from: chosenModel, error: String(err?.message || err) } }); } catch {}
+    }
+  }
+  throw new Error(`Roleplay generation failed across all models (${modelChain.join(', ')}): ${lastError?.message || 'unknown error'}`);
 }
