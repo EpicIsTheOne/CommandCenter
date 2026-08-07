@@ -35,6 +35,7 @@ import { GeminiLiveSession, FAIRY_LIVE_VOICE_NAME, buildFairyLiveSystemPrompt } 
 import { addFairyMemoryEntry, buildFairyMemoryContext, loadFairyMemory, removeFairyMemoryEntry, selectRelevantFairyMemory, updateFairyMemoryEntry } from './fairy-memory.js';
 import { requireApiAuth } from './api-auth.js';
 import { registerGracefulShutdown } from './shutdown.js';
+import { createAuthRouter } from './routes/auth.js';
 import { runApiChatTurn } from './api-chat-runner.js';
 import relayAgentSource from './relay-agent-source.js';
 import { runRoleplayChatTurn } from './roleplay-chat-runner.js';
@@ -47,7 +48,7 @@ import { buildAttachmentBundle } from './attachment-bundle.js';
 import { authorizeWebSocketRequest, createRateLimiter, isVerifiedLoopback, securityHeaders, validReikaEmbedToken } from './request-security.js';
 import { getPlatformCapabilities } from './platform-capabilities.js';
 import { readJsonStore, updateJsonStore, writeJsonStore } from './json-store.js';
-import { createUiApiPolicy } from './route-policy.js';
+import { parseCookies } from './cookie-helpers.js';
 import { enforceUploadBudget, uploadedFiles } from './upload-policy.js';
 
 function apiAttachmentPayload(files = []) {
@@ -354,31 +355,6 @@ app.use((req, res, next) => {
   next();
 });
 
-function parseCookies(req) {
-  const header = String(req.headers.cookie || '');
-  const out = {};
-  for (const part of header.split(';')) {
-    const [k, ...rest] = part.trim().split('=');
-    if (!k) continue;
-    out[k] = decodeURIComponent(rest.join('=') || '');
-  }
-  return out;
-}
-
-function setAuthCookie(res, token) {
-  const secure = process.env.NODE_ENV === 'production' || useHttps;
-  const attrs = [`cc_auth=${encodeURIComponent(token)}`, 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Max-Age=604800'];
-  if (secure) attrs.push('Secure');
-  res.setHeader('Set-Cookie', attrs.join('; '));
-}
-
-function clearAuthCookie(res) {
-  const secure = process.env.NODE_ENV === 'production' || useHttps;
-  const attrs = ['cc_auth=', 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Max-Age=0'];
-  if (secure) attrs.push('Secure');
-  res.setHeader('Set-Cookie', attrs.join('; '));
-}
-
 async function requireUiAuthPage(req, res, next) {
   const auth = await loadUiAuthConfig();
   if (!auth.enabled) return next();
@@ -418,79 +394,13 @@ async function setEnvKeyInDotenv(key, value) {
   await fsp.writeFile(envPath, normalized, 'utf8');
 }
 
-app.get(`${basePath}/api/auth/status`, async (req, res) => {
-  const auth = await loadUiAuthConfig();
-  const token = parseCookies(req).cc_auth;
-  const authenticated = auth.enabled ? isValidSession(token) : true;
-  res.json({ ok: true, passwordSet: auth.enabled, authenticated });
-});
-
-const authAttemptLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 8 });
-
-app.post(`${basePath}/api/auth/setup`, authAttemptLimiter, async (req, res) => {
-  if (!isVerifiedLoopback(req)) return res.status(403).json({ ok: false, error: 'Initial setup is available only from this machine.', code: 'LOOPBACK_SETUP_REQUIRED' });
-  const auth = await loadUiAuthConfig();
-  if (auth.enabled) return res.status(400).json({ ok: false, error: 'Password already set' });
-  const password = String(req.body?.password || '');
-  if (password.length < 12) return res.status(400).json({ ok: false, error: 'Password must be at least 12 characters' });
-  await setUiPassword(password);
-  const token = createSessionToken();
-  createSession(token);
-  setAuthCookie(res, token);
-  res.json({ ok: true });
-});
-
-app.post(`${basePath}/api/auth/login`, authAttemptLimiter, async (req, res) => {
-  const auth = await loadUiAuthConfig();
-  if (!auth.enabled) return res.json({ ok: true, passwordSet: false });
-  const password = String(req.body?.password || '');
-  if (!checkPassword(password, auth.passwordHash)) return res.status(401).json({ ok: false, error: 'Authentication failed' });
-  const token = createSessionToken();
-  createSession(token);
-  setAuthCookie(res, token);
-  res.json({ ok: true, passwordSet: true });
-});
-
-app.post(`${basePath}/api/auth/change-password`, async (req, res) => {
-  const auth = await loadUiAuthConfig();
-  const token = parseCookies(req).cc_auth;
-  if (auth.enabled && !isValidSession(token)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  const currentPassword = String(req.body?.currentPassword || '');
-  const newPassword = String(req.body?.newPassword || '');
-  if (auth.enabled && !checkPassword(currentPassword, auth.passwordHash)) return res.status(401).json({ ok: false, error: 'Authentication failed' });
-  if (newPassword.length < 12) return res.status(400).json({ ok: false, error: 'New password must be at least 12 characters' });
-  await setUiPassword(newPassword);
-  const nextToken = createSessionToken();
-  createSession(nextToken);
-  setAuthCookie(res, nextToken);
-  res.json({ ok: true });
-});
-
-app.post(`${basePath}/api/auth/logout`, async (req, res) => {
-  const token = parseCookies(req).cc_auth;
-  revokeSession(token);
-  clearAuthCookie(res);
-  res.json({ ok: true });
-});
-
-app.use(createUiApiPolicy({
-  basePath,
-  loadAuth: loadUiAuthConfig,
-  readSessionToken: (req) => parseCookies(req).cc_auth,
-  validateSession: isValidSession,
-}));
-
-app.get(`${basePath}/api/setup/capabilities`, async (_req, res) => {
-  res.json({ ok: true, capabilities: await getPlatformCapabilities() });
-});
-
-app.post(`${basePath}/api/auth/reika`, authAttemptLimiter, async (req, res) => {
-  if (!validReikaEmbedToken(req)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  const token = createSessionToken();
-  createSession(token);
-  setAuthCookie(res, token);
-  res.json({ ok: true });
-});
+// Auth + operator-setup routes live in server/routes/auth.js (extracted from
+// the monolith). The UI API policy MUST be registered BEFORE the auth router so
+// it runs for every matched request (the router's handlers respond without
+// calling next(), so a policy mounted after it would be bypassed).
+const { router: authRouter, uiApiPolicy } = createAuthRouter({ basePath });
+app.use(uiApiPolicy);
+app.use(authRouter);
 
 
 app.get(`${basePath}/api/settings/api-key`, async (_req, res) => {

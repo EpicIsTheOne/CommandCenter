@@ -19,6 +19,13 @@ export function buildShutdown({ server, wss, localApiServer = null, bridge = nul
   }
 
   async function shutdown(signal = 'SIGTERM') {
+    // Arm the hard-timeout only once a shutdown is actually requested, so it
+    // never force-exits an otherwise-healthy server.
+    const hardKillTimer = setTimeout(() => {
+      log.error('[shutdown] Graceful drain exceeded hard limit; forcing exit.');
+      process.exit(1);
+    }, hardTimeoutMs);
+    if (typeof hardKillTimer.unref === 'function') hardKillTimer.unref();
     if (shuttingDown) return;
     shuttingDown = true;
     log.warn(`[shutdown] Received ${signal}; draining connections…`);
@@ -43,13 +50,7 @@ export function buildShutdown({ server, wss, localApiServer = null, bridge = nul
     process.exit(0);
   }
 
-  const hardKill = setTimeout(() => {
-    log.error('[shutdown] Graceful drain exceeded hard limit; forcing exit.');
-    process.exit(1);
-  }, hardTimeoutMs);
-  if (typeof hardKill.unref === 'function') hardKill.unref();
-
-  return { shutdown, isShuttingDown: () => shuttingDown, hardKill };
+  return { shutdown, isShuttingDown: () => shuttingDown };
 }
 
 export function registerGracefulShutdown(deps = {}) {

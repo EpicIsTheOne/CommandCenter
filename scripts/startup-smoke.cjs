@@ -4,6 +4,11 @@ const { mkdtempSync, rmSync } = require('node:fs');
 const { join } = require('node:path');
 const { tmpdir } = require('node:os');
 
+// Honor BASE_PATH the same way the server does, so the smoke works for
+// path-prefixed deployments (e.g. behind a reverse proxy subpath).
+const basePath = (process.env.BASE_PATH || '').trim().replace(/\/$/, '');
+const bp = (p) => `${basePath}${p}`;
+
 const port = 33000 + Math.floor(Math.random() * 800);
 const localPort = port + 1000;
 const dataDir = mkdtempSync(join(tmpdir(), 'cc-startup-'));
@@ -34,19 +39,19 @@ function request(targetPort, path, { method = 'GET', headers = {}, body = null }
 async function run() {
   const deadline = Date.now() + 45000;
   while (true) {
-    try { if ((await request(port, '/api/auth/status')).status === 200) break; } catch {}
+    try { if ((await request(port, bp('/api/auth/status'))).status === 200) break; } catch {}
     if (Date.now() > deadline || child.exitCode !== null) throw new Error('Server did not become healthy.');
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  if ((await request(port, '/')).status !== 200) throw new Error('Main UI did not load.');
-  if ((await request(port, '/api/setup/capabilities')).status !== 403) throw new Error('Sensitive browser API was not setup-gated.');
-  const setup = await request(port, '/api/auth/setup', { method: 'POST', body: { password: 'correct horse battery staple' } });
+  if ((await request(port, bp('/'))).status !== 200) throw new Error('Main UI did not load.');
+  if ((await request(port, bp('/api/setup/capabilities'))).status !== 403) throw new Error('Sensitive browser API was not setup-gated.');
+  const setup = await request(port, bp('/api/auth/setup'), { method: 'POST', body: { password: 'correct horse battery staple' } });
   if (setup.status !== 200) throw new Error(`Password setup failed: ${setup.status} ${setup.body}`);
   const cookie = String(setup.headers['set-cookie']?.[0] || '').split(';')[0];
-  if ((await request(port, '/api/setup/capabilities', { headers: { Cookie: cookie } })).status !== 200) throw new Error('Authenticated browser API failed.');
-  if ((await request(port, '/api/fairy/memory')).status !== 401) throw new Error('Anonymous sensitive API was not rejected.');
-  if ((await request(port, '/api/v1/agents', { headers: { Authorization: `Bearer ${apiKey}` } })).status !== 200) throw new Error('Bearer API authentication failed.');
-  const local = await request(localPort, '/api/v1/agents');
+  if ((await request(port, bp('/api/setup/capabilities'), { headers: { Cookie: cookie } })).status !== 200) throw new Error('Authenticated browser API failed.');
+  if ((await request(port, bp('/api/fairy/memory'))).status !== 401) throw new Error('Anonymous sensitive API was not rejected.');
+  if ((await request(port, bp('/api/v1/agents'), { headers: { Authorization: `Bearer ${apiKey}` } })).status !== 200) throw new Error('Bearer API authentication failed.');
+  const local = await request(localPort, bp('/api/v1/agents'));
   if (local.status !== 200 || local.headers['x-commandcenter-auth-mode'] !== 'local-bypass') throw new Error('Verified local-listener bypass failed.');
   console.log('Demo startup/UI/auth/bearer/local-listener smoke passed.');
 }
