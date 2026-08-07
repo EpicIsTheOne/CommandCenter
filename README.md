@@ -517,7 +517,7 @@ See `.env.example` for the full template.
 | `LOCAL_API_ENABLED` | `false` | Enable a separate localhost-only API listener for local programs |
 | `LOCAL_API_HOST` | `127.0.0.1` | Local API listener host (keep loopback-only) |
 | `LOCAL_API_PORT` | `3001` | Local API listener port for same-machine apps |
-| `DEMO_MODE` | `true` | `true` = no gateway needed; `false` = connect to OpenClaw gateway |
+| `DEMO_MODE` | `false` | `true` = no gateway needed (UI preview); `false` = connect to OpenClaw gateway. Demo mode never disables operator auth. |
 | `GATEWAY_URL` | `ws://127.0.0.1:18789` | OpenClaw gateway WebSocket URL |
 | `GATEWAY_TOKEN` | — | Gateway auth token, required when `DEMO_MODE=false` |
 | `COMMANDCENTER_API_KEY` | — | Required for the public `/api/v1` API listener; local loopback listener can bypass this |

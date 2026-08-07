@@ -48,7 +48,7 @@ export default {
   gatewayUrl: process.env.GATEWAY_URL || 'ws://127.0.0.1:18789',
   gatewayToken: resolvedGatewayToken,
   gatewayTokenSource,
-  demoMode: process.env.DEMO_MODE !== 'false',
+  demoMode: String(process.env.DEMO_MODE || '').trim().toLowerCase() === 'true',
   relayOnlyMode: relayOnlyRequested || reikaEmbeddedRuntime,
   openaiApiKey: process.env.OPENAI_API_KEY || '',
   weatherLocation: process.env.WEATHER_LOCATION || 'Kingston,Ontario,Canada',
