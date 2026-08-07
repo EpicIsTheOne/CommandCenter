@@ -4,8 +4,15 @@ import { readJsonStore, writeJsonStore } from './json-store.js';
 
 const ROOT = process.cwd();
 const DATA_DIR = String(process.env.COMMANDCENTER_DATA_DIR || '').trim() || join(ROOT, 'data');
-const AUTH_FILE = join(DATA_DIR, 'ui-auth.json');
+const AUTH = join(DATA_DIR, 'ui-auth.json');
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
+
+// Schema migrations keyed by destination version. migrations[v] transforms a
+// store at version (v-1) into version v. v1 simply adopts an explicit version
+// field; legacy files (no version) are treated as v0 and normalized here.
+const UI_AUTH_MIGRATIONS = {
+  1: (data) => ({ version: 1, passwordHash: String(data?.passwordHash || '') }),
+};
 
 const sessions = new Map();
 
@@ -24,7 +31,9 @@ function verifyPassword(password, stored = '') {
 
 export async function loadUiAuthConfig() {
   try {
-    const parsed = await readJsonStore(AUTH_FILE, { defaultValue: { passwordHash: '' } });
+    // version 1: { version, passwordHash }. Legacy files without a version
+    // field (v0) are migrated to v1 on read via the migration table.
+    const parsed = await readJsonStore(AUTH, { defaultValue: { version: 1, passwordHash: '' }, version: 1, migrations: UI_AUTH_MIGRATIONS });
     return {
       passwordHash: String(parsed.passwordHash || ''),
       enabled: !!parsed.passwordHash,
@@ -37,7 +46,7 @@ export async function loadUiAuthConfig() {
 
 export async function setUiPassword(password) {
   const passwordHash = hashPassword(password);
-  await writeJsonStore(AUTH_FILE, { passwordHash }, { mode: 0o600, backup: true });
+  await writeJsonStore(AUTH, { version: 1, passwordHash }, { mode: 0o600, backup: true });
   revokeAllSessions();
   return { enabled: true };
 }

@@ -23,9 +23,10 @@ async function parseFile(filePath) {
   return JSON.parse(await readFile(filePath, 'utf8'));
 }
 
-export async function readJsonStore(filePath, { defaultValue, recoverBackup = true } = {}) {
+export async function readJsonStore(filePath, { defaultValue, recoverBackup = true, version, migrations = {} } = {}) {
+  let data;
   try {
-    return await parseFile(filePath);
+    data = await parseFile(filePath);
   } catch (err) {
     if (err?.code === 'ENOENT') {
       return typeof defaultValue === 'function' ? defaultValue() : structuredClone(defaultValue);
@@ -41,6 +42,24 @@ export async function readJsonStore(filePath, { defaultValue, recoverBackup = tr
     }
     throw new JsonStoreCorruptionError(filePath, err);
   }
+  // Optional schema migration: bring older on-disk shapes up to `version`.
+  if (typeof version === 'number') {
+    const current = typeof data?.version === 'number' ? data.version : 0;
+    if (current !== version) {
+      let migrated = data;
+      for (let v = current + 1; v <= version; v += 1) {
+        const step = migrations[v];
+        if (typeof step === 'function') migrated = await step(migrated);
+      }
+      if (migrated?.version !== version) migrated = { ...migrated, version };
+      // Persist the upgraded shape so subsequent reads are cheap and stable.
+      try { await writeJsonStore(filePath, migrated); } catch (writeErr) {
+        console.error(`[json-store] Migration of ${basename(filePath)} succeeded in memory but failed to persist: ${writeErr?.message || writeErr}`);
+      }
+      return migrated;
+    }
+  }
+  return data;
 }
 
 async function atomicWrite(filePath, value, { mode = 0o600, backup = true } = {}) {
