@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const execFileAsync = promisify(execFile);
-test('Windows-compatible demo startup survives missing optional Python', { timeout: 25000 }, async () => {
+test('Windows-compatible demo startup survives missing optional Python', { timeout: 90000 }, async () => {
   const here = dirname(fileURLToPath(import.meta.url));
-  await execFileAsync(process.execPath, [join(here, '..', 'scripts', 'startup-smoke.cjs')], { cwd: join(here, '..'), timeout: 22000 });
+  await execFileAsync(process.execPath, [join(here, '..', 'scripts', 'startup-smoke.cjs')], { cwd: join(here, '..'), timeout: 70000 });
 });

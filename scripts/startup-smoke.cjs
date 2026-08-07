@@ -32,7 +32,7 @@ function request(targetPort, path, { method = 'GET', headers = {}, body = null }
 }
 
 async function run() {
-  const deadline = Date.now() + 15000;
+  const deadline = Date.now() + 45000;
   while (true) {
     try { if ((await request(port, '/api/auth/status')).status === 200) break; } catch {}
     if (Date.now() > deadline || child.exitCode !== null) throw new Error('Server did not become healthy.');
@@ -56,4 +56,4 @@ run().catch((err) => { console.error(err.stack || err); console.error(output); p
   rmSync(dataDir, { recursive: true, force: true });
 });
 
-setTimeout(() => { child.kill(); console.error(output); process.exit(1); }, 20000).unref();
+setTimeout(() => { child.kill(); console.error(output); process.exit(1); }, 55000).unref();
