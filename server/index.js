@@ -44,6 +44,11 @@ import relayAgentSource from './relay-agent-source.js';
 import { applyUpdate, finalizePostRestartUpdateState, getUpdatePayload, startAutoUpdateScheduler } from './updater.js';
 import { ALLOWED_SCOPE_TYPES, ALLOWED_TYPES, buildAgentCommPromptBlock, createAgentComm, getAgentComm, listAgentComms, listAgentCommThread, markAgentCommsRead } from './agent-comms.js';
 import { appendRoleplayGroupMessages, createRoleplayGroup, deleteRoleplayGroup, getRoleplayGroup, listRoleplayGroups, saveRoleplayGroup } from './roleplay-group-store.js';
+import { authorizeWebSocketRequest } from './request-security.js';
+import { RelayManager } from './relay-manager.js';
+import { RELAY_OWNER_ID } from './relay-protocol.js';
+import { createRelayDeviceUpgrade } from './relay-ws.js';
+import { createPairing, listDevices, revokeDevice } from './relay-store.js';
 
 function apiAttachmentPayload(files = []) {
   return files.map((file) => ({
@@ -64,6 +69,7 @@ const app = express();
 const getRoster = () => loadAgentRoster();
 const roster = getRoster();
 const basePath = config.basePath || '';
+const relayManager = new RelayManager();
 
 function getAgentIdentity(agentId = '', activeRoster = getRoster()) {
   const target = String(agentId || '').trim();
@@ -741,6 +747,36 @@ app.use(async (req, res, next) => {
   const token = parseCookies(req).cc_auth;
   if (!isValidSession(token)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
   return next();
+});
+
+app.post(`${basePath}/api/relay/v1/pairings`, async (req, res) => {
+  try {
+    const pairing = await createPairing({ ttlMs: req.body?.ttlMs });
+    res.status(201).json({ ok: true, pairing });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not create pairing', code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.get(`${basePath}/api/relay/v1/devices`, async (_req, res) => {
+  try {
+    const devices = await listDevices();
+    const presence = new Map(relayManager.listPresence().map((entry) => [entry.deviceId, entry]));
+    res.json({ ok: true, ownerId: RELAY_OWNER_ID, devices: devices.map((device) => ({ ...device, presence: presence.get(device.id) || { ownerId: device.ownerId, deviceId: device.id, state: 'offline' } })) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not list relay devices', code: 'INTERNAL_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/relay/v1/devices/:id/revoke`, async (req, res) => {
+  try {
+    const changed = await revokeDevice(String(req.params.id || ''));
+    if (!changed) return res.status(404).json({ ok: false, error: 'Device not found', code: 'DEVICE_NOT_FOUND' });
+    relayManager.closeDevice(String(req.params.id || ''), 4003, 'Device revoked');
+    res.json({ ok: true, revoked: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not revoke relay device', code: 'INTERNAL_ERROR' });
+  }
 });
 
 
@@ -6155,7 +6191,30 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
   }
 });
 
-const wss = new WebSocketServer({ server, path: `${basePath || ''}/ws` || '/ws' });
+const wsPath = `${basePath || ''}/ws` || '/ws';
+const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+const relayDeviceUpgrade = createRelayDeviceUpgrade({ basePath, relayManager, useHttps });
+
+server.on('upgrade', async (req, socket, head) => {
+  try {
+    if (relayDeviceUpgrade.tryUpgrade(req, socket, head)) return;
+    const pathname = new URL(req.url || '/', `${useHttps ? 'https' : 'http'}://localhost`).pathname;
+    if (pathname !== wsPath) {
+      socket.destroy();
+      return;
+    }
+    const authorization = authorizeWebSocketRequest(req, { validateSession: isValidSession });
+    if (!authorization.ok) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+  } catch {
+    socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    socket.destroy();
+  }
+});
 
 wss.on('connection', (ws) => {
   console.log(`[ws] Client connected (total: ${wss.clients.size})`);
