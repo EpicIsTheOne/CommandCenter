@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { getHermesAgent, loadAgentRoster } from './agents.js';
+import { buildAgentCommContext, listScopedAgentComms, markAgentCommsRead } from './agent-comms.js';
 import relayAgentSource from './relay-agent-source.js';
 
 const MAX_CONTEXT_MESSAGES = 40;
@@ -10,7 +11,7 @@ function summarizeMessageLine(message) {
   return `${role}: ${text || '(empty)'}`;
 }
 
-function buildPrompt(session, latestMessage, attachmentContext = '') {
+function buildPrompt(session, latestMessage, attachmentContext = '', backchannelBlock = '') {
   const history = Array.isArray(session.messages) ? session.messages.slice(-MAX_CONTEXT_MESSAGES) : [];
   const priorHistory = history.slice(0, -1);
   const historyLines = priorHistory.map(summarizeMessageLine).join('\n');
@@ -21,10 +22,14 @@ function buildPrompt(session, latestMessage, attachmentContext = '') {
     historyLines ? `Conversation so far:\n${historyLines}` : '',
     `Latest user message:\n${String(latestMessage || '').trim()}`,
     attachmentContext || '',
+    backchannelBlock || '',
     'Treat only the conversation shown above as the active session context.',
     'Ignore any unrelated OpenClaw session history, timeout continuation messages, heartbeat chatter, system recovery text, or prior conversations not explicitly shown above.',
     'Do not assume missing prior turns, unfinished phrases, or off-screen history.',
+    'If attached files include extracted text, use that extracted text as primary file context.',
+    'If attached files include local image or PDF paths, inspect those files directly with your available tools before answering when the user is asking about their contents.',
     'Reply naturally and directly to the latest user message.',
+    'If internal backchannel notes were provided, incorporate that context naturally into your response without explicitly mentioning the backchannel system.',
   ].filter(Boolean).join('\n\n');
 }
 
@@ -54,7 +59,7 @@ function getHermesBin() {
   return process.env.HERMES_BIN || 'hermes';
 }
 
-export function buildHermesArgs(prompt, session, attachmentImages = []) {
+function buildHermesArgs(prompt, session, attachmentImages = []) {
   const provider = String(process.env.HERMES_INFERENCE_PROVIDER || '').trim();
   const resolvedAgent = getHermesTarget(session);
   const model = String(process.env.HERMES_INFERENCE_MODEL || resolvedAgent?.model || process.env.HERMES_AGENT_MODEL || '').trim();
@@ -64,22 +69,12 @@ export function buildHermesArgs(prompt, session, attachmentImages = []) {
     ...(profile ? ['--profile', profile] : []),
     'chat',
     '-q', prompt,
+    ...(attachmentImages[0] ? ['--image', attachmentImages[0]] : []),
     '-Q',
     '--source', 'commandcenter',
     ...(resumeSessionId ? ['--resume', resumeSessionId] : []),
     ...(model ? ['--model', model] : []),
     ...(provider ? ['--provider', provider] : []),
-    ...(attachmentImages[0]?.path ? ['--image', attachmentImages[0].path] : []),
-  ];
-}
-
-export function buildOpenClawArgs(prompt, session, target, thinkingLevel) {
-  const openClawSessionId = getOpenClawSessionId(session);
-  return [
-    'agent', '--agent', target,
-    ...(openClawSessionId ? ['--session-id', openClawSessionId] : []),
-    '--thinking', thinkingLevel,
-    '--message', prompt,
   ];
 }
 
@@ -101,14 +96,30 @@ function parseHermesOutput(stdout = '') {
   return { text, hermesSessionId };
 }
 
-export function runApiChatTurn({ session, latestMessage, attachmentContext = '', attachmentImages = [], attachmentStatuses = [], onEvent } = {}) {
-  return new Promise((resolve, reject) => {
+export function runApiChatTurn({ session, latestMessage, attachmentContext = '', attachmentImages = [], onEvent } = {}) {
+  return new Promise(async (resolve, reject) => {
     const target = String(session?.agent || '').trim();
     const userText = String(latestMessage || '').trim();
     if (!target) return reject(new Error('Missing session agent'));
     if (!userText) return reject(new Error('Missing latest message'));
 
-    const prompt = buildPrompt(session, userText, attachmentContext);
+    let backchannelBlock = '';
+    let injectedBackchannelIds = [];
+    if (session?.metadata?.skipBackchannel !== true) {
+      try {
+        const backchannelMessages = await listScopedAgentComms({
+          agentId: target,
+          scopeType: 'chat',
+          scopeId: String(session?.id || '').trim(),
+          limit: 8,
+          unreadOnly: true,
+        });
+        injectedBackchannelIds = backchannelMessages.map((message) => message.id).filter(Boolean);
+        backchannelBlock = buildAgentCommContext(backchannelMessages);
+      } catch {}
+    }
+
+    const prompt = buildPrompt(session, userText, attachmentContext, backchannelBlock);
     const openclawBin = process.env.OPENCLAW_BIN || 'openclaw';
     const hermesBin = getHermesBin();
     const thinkingLevel = target === 'orchestrator' || target === 'main' ? 'low' : 'off';
@@ -119,33 +130,32 @@ export function runApiChatTurn({ session, latestMessage, attachmentContext = '',
     try { onEvent?.({ type: 'thinking', data: { agent: target, status: useRelay ? 'Routing to relay...' : (useHermes ? 'Routing to Hermes...' : 'Processing...') } }); } catch {}
 
     if (useRelay) {
-      relayAgentSource.runRelayChatTurn({ session, latestMessage: prompt, onEvent })
-        .then((result) => resolve({
+      try {
+        const result = await relayAgentSource.runRelayChatTurn({ session, latestMessage: prompt, onEvent });
+        if (injectedBackchannelIds.length) {
+          markAgentCommsRead({ ids: injectedBackchannelIds, agentId: target }).catch(() => {});
+        }
+        return resolve({
           text: result.text,
           prompt,
-          hermesSessionId: '',
-          hermesProfile: '',
-          relayProviderSessionId: result.providerSessionId || '',
-          relayRemoteSessionId: result.sessionId || '',
           runtime: result.runtime || 'relay',
-          attachmentStatuses: attachmentStatuses.map((item) => (
-            item.status === 'consumed' && attachmentImages.some((image) => image.id === item.id)
-              ? { ...item, status: 'unsupported', detail: 'Relay image input is not configured; the image was not shown to the model.' }
-              : item
-          )),
-        }))
-        .catch(reject);
-      return;
+          providerSessionId: result.providerSessionId || '',
+          sessionId: result.sessionId || '',
+        });
+      } catch (err) {
+        return reject(err instanceof Error ? err : new Error(String(err || 'Relay chat failed')));
+      }
     }
 
+    const openClawSessionId = getOpenClawSessionId(session);
     const args = useHermes
       ? buildHermesArgs(prompt, session, attachmentImages)
-      : buildOpenClawArgs(prompt, session, target, thinkingLevel);
-    const effectiveStatuses = attachmentStatuses.map((item) => (
-      item.status === 'consumed' && attachmentImages.some((image) => image.id === item.id) && !useHermes
-        ? { ...item, status: 'unsupported', detail: `${useRelay ? 'Relay' : 'OpenClaw CLI'} image input is not configured; the image was not shown to the model.` }
-        : item
-    ));
+      : [
+          'agent', '--agent', target,
+          ...(openClawSessionId ? ['--session-id', openClawSessionId] : []),
+          '--thinking', thinkingLevel,
+          '--message', prompt,
+        ];
 
     execFile(useHermes ? hermesBin : openclawBin, args, {
       timeout: 120000,
@@ -156,6 +166,9 @@ export function runApiChatTurn({ session, latestMessage, attachmentContext = '',
       const result = useHermes
         ? parseHermesOutput(`${String(stdout || '')}\n${String(stderr || '')}`)
         : { text: String(stdout || '').trim(), hermesSessionId: '' };
+      if (injectedBackchannelIds.length) {
+        markAgentCommsRead({ ids: injectedBackchannelIds, agentId: target }).catch(() => {});
+      }
       try { onEvent?.({ type: 'response', data: { agent: target, text: result.text } }); } catch {}
       resolve({
         text: result.text,
@@ -163,7 +176,6 @@ export function runApiChatTurn({ session, latestMessage, attachmentContext = '',
         hermesSessionId: result.hermesSessionId,
         hermesProfile: resolvedHermesAgent?.hermesProfile || '',
         runtime: useHermes ? 'hermes' : 'openclaw',
-        attachmentStatuses: effectiveStatuses,
       });
     });
   });

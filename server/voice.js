@@ -208,17 +208,34 @@ function getFishSessionCookie(settings) {
   return raw.includes('=') ? raw : `aichat_session=${raw}`;
 }
 
+function getFishApiKey(settings) {
+  return String(
+    settings.fishApiKey
+    || settings.sttFishApiKey
+    || process.env.FISH_AUDIO_API_KEY
+    || ''
+  ).trim();
+}
+
+function applyFishAuthHeaders(headers, settings) {
+  const cookie = getFishSessionCookie(settings);
+  const apiKey = getFishApiKey(settings);
+  if (cookie) headers.Cookie = cookie;
+  if (apiKey) {
+    headers.Authorization = `Bearer ${apiKey}`;
+    headers['X-Fish-API-Key'] = apiKey;
+  }
+  return headers;
+}
 
 export async function searchFishAudioVoices(query, settings = {}, options = {}) {
   const base = getFishApiBase(settings);
-  const cookie = getFishSessionCookie(settings);
   const params = new URLSearchParams({
     q: String(query || '').trim(),
     limit: String(Math.min(Math.max(Number(options.limit || 8), 1), 12)),
     pageSize: String(Math.min(Math.max(Number(options.pageSize || 12), 1), 25)),
   });
-  const headers = { Accept: 'application/json' };
-  if (cookie) headers.Cookie = cookie;
+  const headers = applyFishAuthHeaders({ Accept: 'application/json' }, settings);
 
   const res = await fetch(`${base}/api/fish/models?${params.toString()}`, { headers });
   if (!res.ok) {
@@ -241,13 +258,11 @@ async function speakWithFishAudio(text, settings, overrideVoiceId = '', agentId 
   if (!voiceId) return null;
 
   const base = getFishApiBase(settings);
-  const cookie = getFishSessionCookie(settings);
   const playbackMode = resolveFishPlaybackMode(text, settings);
-  const headers = {
+  const headers = applyFishAuthHeaders({
     'Content-Type': 'application/json',
     Accept: 'audio/mpeg,audio/*,*/*',
-  };
-  if (cookie) headers.Cookie = cookie;
+  }, settings);
 
   const res = await fetch(`${base}/api/tts/audio`, {
     method: 'POST',
@@ -281,13 +296,11 @@ export async function streamFishAudioText(text, settings = {}, outRes, { voiceId
   if (!resolvedVoiceId) throw new Error('Fish Audio voice ID is required.');
 
   const base = getFishApiBase(settings);
-  const cookie = getFishSessionCookie(settings);
   const playbackMode = resolveFishPlaybackMode(text, settings);
-  const headers = {
+  const headers = applyFishAuthHeaders({
     'Content-Type': 'application/json',
     Accept: 'audio/mpeg,audio/*,*/*',
-  };
-  if (cookie) headers.Cookie = cookie;
+  }, settings);
 
   const upstream = await fetch(`${base}/api/tts/audio`, {
     method: 'POST',
@@ -385,12 +398,10 @@ export async function streamSpeak(text, agentId = 'main', outRes) {
   if (!voiceId) return false;
 
   const base = getFishApiBase(settings);
-  const cookie = getFishSessionCookie(settings);
-  const headers = {
+  const headers = applyFishAuthHeaders({
     'Content-Type': 'application/json',
     Accept: 'audio/mpeg,audio/*,*/*',
-  };
-  if (cookie) headers.Cookie = cookie;
+  }, settings);
 
   const upstream = await fetch(`${base}/api/tts/audio`, {
     method: 'POST',

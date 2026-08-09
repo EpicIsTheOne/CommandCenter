@@ -189,7 +189,8 @@ function renderCodexImportedCompanion(ctx, width, height, companion, state = 'id
   const layout = getCodexSheetLayout(pet, img);
   const activeRow = getValidCodexRow(companion, state, layout.actualRows);
   const frameCount = getCodexFrameCount(companion, state, layout.actualColumns);
-  const preferredFrame = Math.abs(Math.floor(tick / 140)) % frameCount;
+  const frameDivisor = state === 'idle' ? 240 : state === 'thinking' ? 180 : 140;
+  const preferredFrame = Math.abs(Math.floor(tick / frameDivisor)) % frameCount;
   const frame = getVisibleCodexFrame(img, layout, activeRow, preferredFrame, frameCount);
   if (frame < 0) return;
   const sx = frame * layout.frameWidth;
@@ -240,7 +241,7 @@ function renderPixelCompanion(ctx, width, height, companion, state = 'idle', tic
   const unit = Math.max(2, Math.floor((Math.min(width, height) / 18) * sizeScale));
   const cx = Math.floor(width / 2);
   const cy = Math.floor(height / 2);
-  const bob = state === 'idle' ? Math.sin(tick / 400) * unit * 0.6 : state === 'responding' ? Math.sin(tick / 120) * unit * 0.4 : 0;
+  const bob = state === 'idle' ? Math.sin(tick / 720) * unit * 0.42 : state === 'responding' ? Math.sin(tick / 120) * unit * 0.4 : 0;
   const headY = cy - unit * 3 + bob;
   const bodyY = cy + bob;
 
@@ -330,14 +331,17 @@ export function getCompanionById(companionId = '') {
 
 export function mountCompanionCanvas(canvas, options = {}) {
   if (!canvas) return null;
+  const existing = companionState.runtime.get(canvas);
+  if (existing?.rafId) cancelAnimationFrame(existing.rafId);
   const agentId = String(options.agentId || canvas.dataset.agentId || '').trim();
   const state = options.state || 'idle';
   const label = options.label || '';
   const visual = getAgentVisual(agentId);
-  const runtime = { canvas, agentId, state, label, visual };
+  const runtime = { canvas, agentId, state, label, visual, rafId: 0, mountedAt: performance.now() };
   companionState.runtime.set(canvas, runtime);
 
   const draw = () => {
+    if (!companionState.runtime.has(canvas)) return;
     const rect = canvas.getBoundingClientRect();
     const nextWidth = Math.max(1, Math.floor(rect.width || options.width || 72));
     const nextHeight = Math.max(1, Math.floor(rect.height || options.height || 72));
@@ -345,6 +349,7 @@ export function mountCompanionCanvas(canvas, options = {}) {
     if (canvas.height !== nextHeight) canvas.height = nextHeight;
     const ctx = canvas.getContext('2d');
     renderPixelCompanion(ctx, canvas.width, canvas.height, runtime.visual.companion || {}, runtime.state, performance.now(), runtime.label, { scale: runtime.visual.scale || 1, keepLastFrame: true });
+    runtime.rafId = requestAnimationFrame(draw);
   };
 
   runtime.draw = draw;
@@ -355,7 +360,6 @@ export function mountCompanionCanvas(canvas, options = {}) {
 export function refreshCompanions() {
   for (const runtime of companionState.runtime.values()) {
     runtime.visual = getAgentVisual(runtime.agentId);
-    if (runtime.draw) runtime.draw();
   }
 }
 
@@ -363,7 +367,6 @@ export function setCompanionState(agentId, state = 'idle') {
   for (const runtime of companionState.runtime.values()) {
     if (runtime.agentId !== agentId) continue;
     runtime.state = state;
-    if (runtime.draw) runtime.draw();
   }
 }
 

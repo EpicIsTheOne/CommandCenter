@@ -2,7 +2,6 @@ import { mkdir, readFile, writeFile, readdir, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, extname, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { readJsonStore, updateJsonStore, writeJsonStore } from './json-store.js';
 
 const ROOT = process.cwd();
 const DATA_DIR = join(ROOT, 'data');
@@ -23,19 +22,25 @@ function sanitizeName(name = '') {
 async function ensureStore() {
   await mkdir(RECORDINGS_DIR, { recursive: true });
   if (!existsSync(META_FILE)) {
-    await writeJsonStore(META_FILE, { recordings: [] });
+    await writeFile(META_FILE, JSON.stringify({ recordings: [] }, null, 2) + '\n');
   }
 }
 
 async function loadMeta() {
   await ensureStore();
-  const parsed = await readJsonStore(META_FILE, { defaultValue: { recordings: [] } });
-  return { recordings: Array.isArray(parsed.recordings) ? parsed.recordings : [] };
+  try {
+    const raw = await readFile(META_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    const recordings = Array.isArray(parsed.recordings) ? parsed.recordings : [];
+    return { recordings };
+  } catch {
+    return { recordings: [] };
+  }
 }
 
 async function saveMeta(meta = { recordings: [] }) {
   await ensureStore();
-  await writeJsonStore(META_FILE, { recordings: Array.isArray(meta.recordings) ? meta.recordings : [] });
+  await writeFile(META_FILE, JSON.stringify({ recordings: Array.isArray(meta.recordings) ? meta.recordings : [] }, null, 2) + '\n');
 }
 
 export async function listFairyRecordings() {
@@ -54,6 +59,7 @@ export async function saveFairyRecording({ buffer, mimeType = 'video/webm', sess
   const filePath = join(RECORDINGS_DIR, filename);
   await writeFile(filePath, buffer);
   const info = await stat(filePath);
+  const meta = await loadMeta();
   const record = {
     id,
     sessionId: String(sessionId || ''),
@@ -69,7 +75,8 @@ export async function saveFairyRecording({ buffer, mimeType = 'video/webm', sess
     notes: String(notes || '').slice(0, 300),
     source: String(source || 'fairy-live'),
   };
-  await updateJsonStore(META_FILE, { defaultValue: { recordings: [] } }, (meta) => ({ recordings: [record, ...(Array.isArray(meta.recordings) ? meta.recordings : [])] }));
+  meta.recordings.unshift(record);
+  await saveMeta(meta);
   return record;
 }
 

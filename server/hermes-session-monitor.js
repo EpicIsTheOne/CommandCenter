@@ -1,6 +1,5 @@
 import { execFile } from 'node:child_process';
 import { getHermesAgents, loadAgentRoster } from './agents.js';
-import { resolvePython } from './platform-capabilities.js';
 
 const HERMES_PY_SCRIPT = String.raw`
 import sqlite3, os, json, sys
@@ -115,7 +114,6 @@ function resolveHermesAgentForRow(row, hermesAgents = []) {
 }
 
 export function startHermesSessionMonitor({ broadcast, intervalMs = 2200, roster = loadAgentRoster() } = {}) {
-  const pythonPromise = resolvePython();
   const seenMessageIdsByDb = new Map();
   const initializedDbs = new Set();
   const idleTimers = new Map();
@@ -217,10 +215,8 @@ export function startHermesSessionMonitor({ broadcast, intervalMs = 2200, roster
     }
   }
 
-  async function pollOneDb(dbPath, profile) {
-    const python = await pythonPromise;
-    if (!python) return;
-    execFile(python.command, [...python.args, '-c', HERMES_PY_SCRIPT, dbPath, '120'], {
+  function pollOneDb(dbPath, profile) {
+    execFile('python3', ['-c', HERMES_PY_SCRIPT, dbPath, '120'], {
       timeout: 10000,
       env: { ...process.env, PATH: process.env.HOME + '/.local/bin:' + process.env.PATH },
       maxBuffer: 1024 * 1024 * 4,
@@ -251,7 +247,7 @@ export function startHermesSessionMonitor({ broadcast, intervalMs = 2200, roster
     const targets = agents
       .map((agent) => ({ profile: String(agent.hermesProfile || '').trim(), dbPath: `${String(agent.hermesHome || '').replace(/\/$/, '') || process.env.HOME + '/.hermes'}/state.db` }))
       .filter((item) => item.profile && item.dbPath);
-    for (const target of targets) pollOneDb(target.dbPath, target.profile).catch(() => {});
+    for (const target of targets) pollOneDb(target.dbPath, target.profile);
     pruneSeen();
   }
 

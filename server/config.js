@@ -35,9 +35,6 @@ const envGatewayToken = String(process.env.GATEWAY_TOKEN || '').trim();
 const localGateway = envGatewayToken ? { token: '', source: 'env' } : readLocalGatewayToken();
 const resolvedGatewayToken = envGatewayToken || localGateway.token || '';
 const gatewayTokenSource = envGatewayToken ? 'env' : localGateway.source;
-const reikaEmbedToken = String(process.env.REIKA_EMBED_TOKEN || '').trim();
-const relayOnlyRequested = ['1', 'true', 'yes', 'on'].includes(String(process.env.COMMANDCENTER_RELAY_ONLY || process.env.RELAY_ONLY_MODE || '').trim().toLowerCase());
-const reikaEmbeddedRuntime = String(process.env.NODE_ENV || '').trim().toLowerCase() === 'reika-embedded' || Boolean(reikaEmbedToken);
 
 export default {
   host: String(process.env.HOST || '0.0.0.0').trim() || '0.0.0.0',
@@ -49,10 +46,8 @@ export default {
   gatewayToken: resolvedGatewayToken,
   gatewayTokenSource,
   demoMode: process.env.DEMO_MODE !== 'false',
-  relayOnlyMode: relayOnlyRequested || reikaEmbeddedRuntime,
   openaiApiKey: process.env.OPENAI_API_KEY || '',
   weatherLocation: process.env.WEATHER_LOCATION || 'Kingston,Ontario,Canada',
   apiKey: process.env.COMMANDCENTER_API_KEY || '',
-  reikaEmbedToken,
   basePath,
 };

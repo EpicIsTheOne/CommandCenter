@@ -1,18 +1,31 @@
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { getHermesAgent } from './agents.js';
-import { readJsonStore, updateJsonStore } from './json-store.js';
 
 const ROOT = process.cwd();
-const TASKS_FILE = join(ROOT, 'data', 'live-tasks.v1.json');
+const DATA_DIR = join(ROOT, 'data');
+const TASKS_FILE = join(DATA_DIR, 'live-tasks.v1.json');
 
 function nowIso() {
   return new Date().toISOString();
 }
 
 async function readStore() {
-  const parsed = await readJsonStore(TASKS_FILE, { defaultValue: { tasks: [] } });
-  return { tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [] };
+  try {
+    if (!existsSync(TASKS_FILE)) return { tasks: [] };
+    const raw = await readFile(TASKS_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    return { tasks: Array.isArray(parsed.tasks) ? parsed.tasks : [] };
+  } catch {
+    return { tasks: [] };
+  }
+}
+
+async function writeStore(store) {
+  await mkdir(DATA_DIR, { recursive: true });
+  await writeFile(TASKS_FILE, JSON.stringify(store, null, 2) + '\n', { mode: 0o600 });
 }
 
 export async function listLiveTasks() {
@@ -26,6 +39,7 @@ export async function getLiveTask(taskId) {
 }
 
 export async function createLiveTask({ title, summary, prompt, agent = 'orchestrator', runtime = '' }) {
+  const store = await readStore();
   const now = nowIso();
   const task = {
     id: `live-${Date.now().toString(36)}`,
@@ -40,18 +54,22 @@ export async function createLiveTask({ title, summary, prompt, agent = 'orchestr
     result: '',
     error: '',
   };
-  await updateJsonStore(TASKS_FILE, { defaultValue: { tasks: [] } }, (store) => ({ tasks: [...(store.tasks || []), task] }));
+  store.tasks.push(task);
+  await writeStore(store);
   return task;
 }
 
 export async function updateLiveTask(taskId, patch) {
-  let updated = null;
-  await updateJsonStore(TASKS_FILE, { defaultValue: { tasks: [] } }, (store) => ({ tasks: (store.tasks || []).map((task) => {
-    if (task.id !== taskId) return task;
-    updated = { ...task, ...patch, updated_at: nowIso() };
-    return updated;
-  }) }));
-  return updated;
+  const store = await readStore();
+  const index = store.tasks.findIndex((task) => task.id === taskId);
+  if (index === -1) return null;
+  store.tasks[index] = {
+    ...store.tasks[index],
+    ...patch,
+    updated_at: nowIso(),
+  };
+  await writeStore(store);
+  return store.tasks[index];
 }
 
 export function looksComplexRequest(text = '') {

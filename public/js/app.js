@@ -1,18 +1,20 @@
 import * as terminal from './terminal.js?v=20260320j';
 import * as mascot from './mascot.js?v=20260509y';
 import * as office from './office.js?v=20260516-rooms7';
-import * as voice from './voice.js?v=20260515-voicefix2';
+import * as voice from './voice.js?v=20260601-pawanfix1';
 import * as wake from './wake.js?v=20260320l';
-import * as directChat from './direct-chat.js?v=20260708-relay1';
-import * as companions from './companions.js?v=20260515-voicefix2';
+import * as directChat from './direct-chat.js?v=20260601-pawanfix1';
+import * as singleAgent from './single-agent.js?v=20260601-pawanfix1';
+import * as companions from './companions.js?v=20260601-pawanfix1';
 import * as music from './music.js?v=20260514c';
 import * as intro from './intro.js?v=20260514b';
 import * as appearance from './appearance.js?v=20260514b';
 import * as branding from './branding.js?v=20260514b';
 import * as layoutSettings from './layout-settings.js?v=20260514b';
 import * as fairyLive from './fairy-live.js?v=20260520-fairy-callmode1';
+import * as agentComms from './agent-comms.js?v=20260524-agentcomms1';
 
-const APP_BUILD = '20260518-fairy-chatcall1';
+const APP_BUILD = '20260601-pawanfix1';
 console.log('[CommandCenter] app build:', APP_BUILD);
 
 let roster = { agents: [], primaryAgentId: 'main' };
@@ -26,8 +28,7 @@ let isFullscreen = false;
 let playbackToken = 0;
 let availableVoices = [];
 let currentWakeSettings = { wakeWords: {} };
-let currentDirectChatSettings = { relayEnabled: false, relayUrl: '', relayShowDeviceLabels: true };
-let currentCompanionSettings = { agentVisuals: {} };
+let currentCompanionSettings = { agentVisuals: {}, singleAgentVisuals: {} };
 let availableCompanions = [];
 let wakeDesired = false;
 let lastSpokenSignature = '';
@@ -291,11 +292,9 @@ async function refreshAgentsSettings() {
     const sources = data.sources || {};
     const openclaw = sources.openclaw || {};
     const hermes = sources.hermes || {};
-    const relay = sources.relay || {};
     if (data.roster?.agents?.length) applyRoster(data.roster);
     const openclawAgents = Array.isArray(openclaw.activeAgents) ? openclaw.activeAgents : [];
     const hermesAgents = Array.isArray(hermes.activeAgents) ? hermes.activeAgents : [];
-    const relayAgents = Array.isArray(relay.activeAgents) ? relay.activeAgents : [];
 
     const showOpenClawBtn = data.actions?.showDetectOpenClaw || openclawAgents.length === 0;
     const showHermesBtn = data.actions?.showDetectHermes || hermesAgents.length === 0;
@@ -307,26 +306,24 @@ async function refreshAgentsSettings() {
       const parts = [];
       if (openclawAgents.length) parts.push(`${openclawAgents.length} OpenClaw`);
       if (hermesAgents.length) parts.push(`${hermesAgents.length} Hermes`);
-      if (relayAgents.length) parts.push(`${relayAgents.length} Relay`);
-      const totalAgents = openclawAgents.length + hermesAgents.length + relayAgents.length;
-      statusEl.textContent = parts.length ? `${parts.join(' + ')} agent${totalAgents === 1 ? '' : 's'} detected.` : 'No agents detected. Use Detect to add sources.';
+      statusEl.textContent = parts.length ? `${parts.join(' + ')} agent${(openclawAgents.length + hermesAgents.length) === 1 ? '' : 's'} detected.` : 'No agents detected. Use Detect to add sources.';
     }
 
     if (listEl) {
-      const allAgents = [...openclawAgents, ...hermesAgents, ...relayAgents];
+      const allAgents = [...openclawAgents, ...hermesAgents];
       if (!allAgents.length) {
         listEl.innerHTML = '<div class="setting-hint">No agents configured. Click Detect to enable OpenClaw or Hermes agents.</div>';
       } else {
         listEl.innerHTML = allAgents.map((agent) => {
-          const sourceLabel = agent.source === 'relay' ? (agent.relayDeviceName || 'Relay') : (agent.source === 'hermes' ? 'Hermes' : 'OpenClaw');
-          const sourceClass = agent.source === 'relay' ? 'relay-agent-badge' : (agent.source === 'hermes' ? 'hermes-agent-badge' : 'openclaw-agent-badge');
+          const sourceLabel = agent.source === 'hermes' ? 'Hermes' : 'OpenClaw';
+          const sourceClass = agent.source === 'hermes' ? 'hermes-agent-badge' : 'openclaw-agent-badge';
           const bossBadge = agent.isBoss ? ' <span style="color:#FFD700;" title="Primary agent">★</span>' : '';
           return `<div class="agent-row" style="display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
             <span class="agent-color-dot" style="width:10px; height:10px; border-radius:50%; background:${escapeHtml(agent.color || '#AA66FF')}; flex-shrink:0;"></span>
             <span style="font-weight:600;">${escapeHtml(agent.label || agent.id)}</span>
             ${bossBadge}
             <span style="color:var(--text-dim); font-size:0.85em;">${escapeHtml(agent.id)}</span>
-            <span class="${sourceClass}" style="margin-left:auto; font-size:0.75em; padding:2px 8px; border-radius:999px; background:${agent.source === 'relay' ? 'rgba(126,231,255,0.14)' : (agent.source === 'hermes' ? 'rgba(255,102,196,0.15)' : 'rgba(255,215,0,0.12)')}; color:${agent.source === 'relay' ? '#7EE7FF' : (agent.source === 'hermes' ? '#FF66C4' : '#FFD700')};">${sourceLabel}</span>
+            <span class="${sourceClass}" style="margin-left:auto; font-size:0.75em; padding:2px 8px; border-radius:999px; background:${agent.source === 'hermes' ? 'rgba(255,102,196,0.15)' : 'rgba(255,215,0,0.12)'}; color:${agent.source === 'hermes' ? '#FF66C4' : '#FFD700'};">${sourceLabel}</span>
           </div>`;
         }).join('');
       }
@@ -335,26 +332,6 @@ async function refreshAgentsSettings() {
     if (statusEl) statusEl.textContent = err.message || 'Failed to load agents.';
     if (listEl) listEl.innerHTML = `<div class="setting-hint" style="color:var(--red);">${escapeHtml(err.message || 'Failed to load agents.')}</div>`;
   }
-}
-
-async function loadDirectChatSettings() {
-  try {
-    const data = await fetchJson(`${BASE}/api/settings/direct-chat`);
-    currentDirectChatSettings = data.settings || currentDirectChatSettings;
-    return currentDirectChatSettings;
-  } catch (err) {
-    terminal.log(`[settings] Direct Chat settings unavailable: ${err.message}`, 'error', true);
-    return currentDirectChatSettings;
-  }
-}
-
-function populateDirectChatSettings(settings = currentDirectChatSettings) {
-  const relayEnabled = document.getElementById('direct-chat-relay-enabled');
-  const relayUrl = document.getElementById('direct-chat-relay-url');
-  const relayShowDeviceLabels = document.getElementById('direct-chat-relay-show-device-labels');
-  if (relayEnabled) relayEnabled.checked = settings.relayEnabled === true;
-  if (relayUrl) relayUrl.value = settings.relayUrl || '';
-  if (relayShowDeviceLabels) relayShowDeviceLabels.checked = settings.relayShowDeviceLabels !== false;
 }
 
 async function detectAgentSource(source = '') {
@@ -944,6 +921,7 @@ function applyRoster(nextRoster = { agents: [], primaryAgentId: 'main' }) {
   roster = nextRoster || { agents: [], primaryAgentId: 'main' };
   office.setRoster?.(roster);
   directChat.setRoster?.(roster);
+  agentComms.setRoster?.(roster);
 }
 
 function normalizeSpeechText(text = '') {
@@ -1088,21 +1066,11 @@ function waitForAuthSubmit() {
 }
 
 async function ensureUiAuth() {
-  let reikaExchangeAttempted = false;
   while (true) {
     const status = await fetchJson(`${BASE}/api/auth/status`);
     if (status?.authenticated) {
       closeAuthModal();
       return;
-    }
-    if (!reikaExchangeAttempted) {
-      reikaExchangeAttempted = true;
-      try {
-        await fetchJson(`${BASE}/api/auth/reika`, { method: 'POST' });
-        continue;
-      } catch {
-        // Normal browsers continue to password auth.
-      }
     }
     openAuthModal({ mode: status?.passwordSet ? 'login' : 'setup' });
     // eslint-disable-next-line no-await-in-loop
@@ -1119,15 +1087,13 @@ async function loadSetupStatus() {
     const hasError = issues.some((issue) => issue.level === 'error');
     const hasWarn = issues.some((issue) => issue.level === 'warn');
     const tone = hasError ? 'error' : hasWarn ? 'warn' : 'ok';
-    const pillText = setup.relayOnlyMode || bridge.relayOnlyMode || bridge.mode === 'relay-only'
-      ? 'Relay Connected'
-      : setup.demoMode
-        ? 'Demo Mode'
-        : bridge.mode === 'live'
-          ? 'Live Connected'
-          : bridge.mode === 'demo'
-            ? 'Demo Fallback'
-            : 'Connecting';
+    const pillText = setup.demoMode
+      ? 'Demo Mode'
+      : bridge.mode === 'live'
+        ? 'Live Connected'
+        : bridge.mode === 'demo'
+          ? 'Demo Fallback'
+          : 'Connecting';
     const summary = `${setup.modeLabel || 'Unknown mode'} • STT: ${String(setup.sttMode || 'api').toUpperCase()}${setup.sttMode === 'api' ? ` → ${setup.sttProvider || 'fish'}` : ''} • TTS: ${setup.ttsProvider || 'elevenlabs'}${bridge.gatewayTokenSource ? ` • Gateway token: ${bridge.gatewayTokenSource}` : ''}`;
     setSetupStatus(summary, issues, tone, pillText);
     return data;
@@ -1144,8 +1110,24 @@ async function loadRoster() {
       roster = await res.json();
       office.setRoster?.(roster);
       directChat.setRoster?.(roster);
+      singleAgent.setRoster?.(roster);
     }
   } catch (_) {}
+}
+
+function buildSingleAgentRuntimeVisuals(workspaceResolved = {}, singleAgentResolved = {}) {
+  const out = {};
+  const agentIds = new Set([
+    ...Object.keys(workspaceResolved || {}),
+    ...Object.keys(singleAgentResolved || {}),
+    ...(roster.agents || []).map((agent) => agent.id),
+  ]);
+  for (const agentId of agentIds) {
+    const single = singleAgentResolved?.[agentId] || null;
+    const workspace = workspaceResolved?.[agentId] || null;
+    out[agentId] = single && single.mode !== 'default' ? single : (workspace || single || { mode: 'default' });
+  }
+  return out;
 }
 
 async function loadCompanionSettings() {
@@ -1154,6 +1136,7 @@ async function loadCompanionSettings() {
     currentCompanionSettings = data.settings || { agentVisuals: {} };
     availableCompanions = data.items || [];
     companions.setCompanionData({ visuals: data.resolved || {}, items: availableCompanions });
+    window.__singleAgentVisuals = buildSingleAgentRuntimeVisuals(data.resolved || {}, data.singleAgentResolved || {});
   } catch (_) {}
 }
 
@@ -1169,10 +1152,7 @@ async function requestFullscreen() {
   }
 }
 
-function bootSequence(status = null) {
-  const bridge = status?.bridge || {};
-  const setup = status?.setup || {};
-  const relayOnly = setup.relayOnlyMode || bridge.relayOnlyMode || bridge.mode === 'relay-only';
+function bootSequence() {
   const lines = [
     ['[sys] OpenClaw Command Center v1.0', 'system'],
     ['[sys] Initializing display modules...', 'system'],
@@ -1182,7 +1162,7 @@ function bootSequence(status = null) {
     [`[sys] Voice: tap mascot for ${getAgentLabel(getPrimaryAgent())}, tap any agent in office`, 'agent'],
     ['[sys] Wake mode: local whisper name detection', 'agent'],
     [`[sys] Agents: ${roster.agents.map(a => `${a.id}(${a.label})`).join(' | ') || 'main(Main)'}`, 'info'],
-    [relayOnly ? '[sys] Connecting to Reika Relay...' : '[sys] Connecting to OpenClaw gateway...', 'system'],
+    ['[sys] Connecting to OpenClaw gateway...', 'system'],
   ];
 
   let i = 0;
@@ -1236,6 +1216,7 @@ function isNoisyIdleEvent(type, data = {}) {
 
 async function handleEvent(msg) {
   fairyLive.handleEvent(msg);
+  agentComms.handleEvent?.(msg);
   const { type, data } = msg;
 
   if (isNoisyIdleEvent(type, data)) {
@@ -1850,95 +1831,292 @@ function renderImportResult(item, assignedAgentId = '') {
   bindImportResultActions();
 }
 
-function buildAgentCompanionRow(agent, saved = {}, items = []) {
-  const wrapper = document.createElement('div');
-  wrapper.className = 'agent-voice-row agent-companion-row';
-  wrapper.dataset.agentId = agent.id;
-  const mode = saved?.mode === 'companion' ? 'companion' : 'default';
+function getScopedVisualSummary(mode, item, companionId, live2dModelUrl, live2dBridgeUrl, vrmModelUrl, scope = 'workspace') {
+  return mode === 'live2d'
+    ? (live2dModelUrl ? 'Live2D auto viewer configured' : 'Live2D mode')
+    : mode === 'vrm'
+      ? (vrmModelUrl ? 'VRM model configured' : 'VRM mode')
+      : mode === 'companion'
+        ? (item?.name || companionId || 'Unassigned companion')
+        : scope === 'single-agent' ? 'Single Agent default view' : 'Workspace/default view';
+}
+
+function buildScopedVisualEditor(agent, saved = {}, items = [], scope = 'workspace') {
+  const advanced = scope === 'single-agent';
+  const mode = saved?.mode === 'companion' ? 'companion' : advanced && saved?.mode === 'live2d' ? 'live2d' : advanced && saved?.mode === 'vrm' ? 'vrm' : 'default';
   const companionId = String(saved?.companionId || '').trim();
   const selected = items.find((item) => item.id === companionId) || null;
+  const live2d = saved?.live2d || {};
+  const vrm = saved?.vrm || {};
+  const live2dModelUrl = String(live2d.modelUrl || '').trim();
+  const live2dBridgeUrl = String(live2d.bridgeUrl || '').trim();
+  const vrmModelUrl = String(vrm.modelUrl || '').trim();
+  const vrmScale = Math.min(2.5, Math.max(0.5, Number(vrm.scale || 1) || 1));
+  const vrmScalePercent = Math.round(vrmScale * 100);
+  const vrmCameraY = Number.isFinite(Number(vrm.cameraY)) ? Number(vrm.cameraY) : 1.25;
+  const vrmCameraZoom = Number.isFinite(Number(vrm.cameraZoom)) ? Number(vrm.cameraZoom) : 1;
+  const vrmLookAtCamera = vrm.lookAtCamera !== false;
   const scale = Math.min(2, Math.max(0.45, Number(saved?.scale || 1) || 1));
   const scalePercent = Math.round(scale * 100);
-  wrapper.innerHTML = `
-    <button class="agent-companion-toggle" type="button" aria-expanded="false">
-      <span class="agent-voice-title">${escapeHtml(agent.label || agent.id)}</span>
-      <span class="agent-companion-summary">${mode === 'companion' ? escapeHtml(selected?.name || companionId || 'Unassigned companion') : 'Default character view'}</span>
-    </button>
-    <div class="agent-companion-body hidden">
+  const summaryText = getScopedVisualSummary(mode, selected, companionId, live2dModelUrl, live2dBridgeUrl, vrmModelUrl, scope);
+  const scopeKey = escapeHtml(scope);
+  const scopeLabel = scope === 'single-agent' ? 'Single Agent visual' : 'Workspace visual';
+  return `
+    <div class="agent-visual-scope" data-visual-scope="${scopeKey}">
+      <div class="agent-visual-scope-title">${scopeLabel}</div>
       <div class="agent-companion-grid">
         <label>
           <span class="setting-hint">Visual mode</span>
-          <select class="agent-companion-mode" data-agent-id="${escapeHtml(agent.id)}">
+          <select class="agent-companion-mode" data-visual-scope="${scopeKey}" data-agent-id="${escapeHtml(agent.id)}">
             <option value="default" ${mode === 'default' ? 'selected' : ''}>Default</option>
             <option value="companion" ${mode === 'companion' ? 'selected' : ''}>Companion</option>
+            ${advanced ? `<option value="live2d" ${mode === 'live2d' ? 'selected' : ''}>Live2D</option><option value="vrm" ${mode === 'vrm' ? 'selected' : ''}>VRM</option>` : ''}
           </select>
         </label>
         <label>
           <span class="setting-hint">Companion package</span>
-          <select class="agent-companion-select" data-agent-id="${escapeHtml(agent.id)}">
+          <select class="agent-companion-select" data-visual-scope="${scopeKey}" data-agent-id="${escapeHtml(agent.id)}">
             <option value="">Select companion</option>
             ${items.map((item) => `<option value="${escapeHtml(item.id)}" ${item.id === companionId ? 'selected' : ''}>${escapeHtml(item.name || item.id)}</option>`).join('')}
           </select>
         </label>
+        <button class="secondary-button companion-delete-btn ${['codex-import', 'live2d-import', 'vrm-import'].includes(selected?.sourceType) ? '' : 'hidden'}" type="button" data-companion-id="${escapeHtml(companionId)}" data-visual-scope="${scopeKey}">DELETE VISUAL</button>
         <label class="agent-companion-size-field">
-          <span class="setting-hint">Companion size <strong class="agent-companion-size-value">${scalePercent}%</strong></span>
-          <input class="agent-companion-size" data-agent-id="${escapeHtml(agent.id)}" type="range" min="45" max="200" step="5" value="${scalePercent}">
+          <span class="setting-hint">Visual size <strong class="agent-companion-size-value">${scalePercent}%</strong></span>
+          <input class="agent-companion-size" data-visual-scope="${scopeKey}" data-agent-id="${escapeHtml(agent.id)}" type="range" min="45" max="200" step="5" value="${scalePercent}">
+        </label>
+        <label class="agent-live2d-field">
+          <span class="setting-hint">Live2D model URL / path</span>
+          <input class="agent-live2d-model" data-visual-scope="${scopeKey}" data-agent-id="${escapeHtml(agent.id)}" type="text" value="${escapeHtml(live2dModelUrl)}" placeholder="/models/hiyori/hiyori.model3.json">
+        </label>
+        <label class="agent-live2d-field">
+          <span class="setting-hint">Live2D viewer URL / override</span>
+          <input class="agent-live2d-bridge" data-visual-scope="${scopeKey}" data-agent-id="${escapeHtml(agent.id)}" type="text" value="${escapeHtml(live2dBridgeUrl)}" placeholder="Auto: /commandcenter/live2d-viewer.html">
+        </label>
+        <label class="agent-vrm-field">
+          <span class="setting-hint">VRM model URL / path</span>
+          <input class="agent-vrm-model" data-visual-scope="${scopeKey}" data-agent-id="${escapeHtml(agent.id)}" type="text" value="${escapeHtml(vrmModelUrl)}" placeholder="/models/astra/astra.vrm">
+        </label>
+        <label class="agent-vrm-field">
+          <span class="setting-hint">VRM size <strong class="agent-vrm-size-value">${vrmScalePercent}%</strong></span>
+          <input class="agent-vrm-size" data-visual-scope="${scopeKey}" data-agent-id="${escapeHtml(agent.id)}" type="range" min="50" max="250" step="5" value="${vrmScalePercent}">
+        </label>
+        <label class="agent-vrm-field">
+          <span class="setting-hint">Camera Y</span>
+          <input class="agent-vrm-camera-y" data-visual-scope="${scopeKey}" data-agent-id="${escapeHtml(agent.id)}" type="number" step="0.05" value="${escapeHtml(vrmCameraY)}">
+        </label>
+        <label class="agent-vrm-field">
+          <span class="setting-hint">Camera zoom</span>
+          <input class="agent-vrm-camera-zoom" data-visual-scope="${scopeKey}" data-agent-id="${escapeHtml(agent.id)}" type="number" step="0.05" min="0.4" max="3" value="${escapeHtml(vrmCameraZoom)}">
+        </label>
+        <label class="agent-vrm-field agent-vrm-checkbox">
+          <span class="setting-hint">Look at camera</span>
+          <input class="agent-vrm-lookat" data-visual-scope="${scopeKey}" data-agent-id="${escapeHtml(agent.id)}" type="checkbox" ${vrmLookAtCamera ? 'checked' : ''}>
         </label>
       </div>
-      <div class="agent-companion-preview-wrap ${mode === 'companion' ? '' : 'is-default'}">
-        <canvas class="agent-companion-preview" width="84" height="84"></canvas>
-        <div class="setting-hint agent-companion-preview-text">${mode === 'companion' ? escapeHtml(selected?.name || companionId || 'Companion preview') : 'Using current CommandCenter visuals for this agent.'}</div>
+      <div class="agent-companion-preview-wrap ${mode === 'companion' ? '' : 'is-default'} ${mode === 'vrm' ? 'is-vrm' : ''}" data-visual-scope="${scopeKey}">
+        <canvas class="agent-companion-preview" data-visual-scope="${scopeKey}" width="84" height="84"></canvas>
+        <div class="setting-hint agent-companion-preview-text" data-visual-scope="${scopeKey}">${mode === 'live2d' ? 'Live2D stage will be used only in Single Agent Mode.' : mode === 'vrm' ? (vrmModelUrl ? 'VRM stage will react to agent state and voice playback in Single Agent Mode.' : 'Add a VRM model URL/path for Single Agent Mode.') : mode === 'companion' ? escapeHtml(selected?.name || companionId || 'Companion preview') : scope === 'single-agent' ? 'Using Single Agent default visuals for this agent.' : 'Using workspace-compatible visuals for this agent.'}</div>
       </div>
+    </div>
+  `;
+}
+
+function buildAgentCompanionRow(agent, saved = {}, items = []) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'agent-voice-row agent-companion-row';
+  wrapper.dataset.agentId = agent.id;
+  const workspaceSaved = saved?.agentVisuals || {};
+  const singleAgentSaved = saved?.singleAgentVisuals || {};
+  const workspaceMode = workspaceSaved?.mode === 'companion' ? 'companion' : 'default';
+  const workspaceCompanionId = String(workspaceSaved?.companionId || '').trim();
+  const workspaceItem = items.find((item) => item.id === workspaceCompanionId) || null;
+  const saMode = singleAgentSaved?.mode === 'companion' ? 'companion' : singleAgentSaved?.mode === 'live2d' ? 'live2d' : singleAgentSaved?.mode === 'vrm' ? 'vrm' : 'default';
+  const saLive2d = singleAgentSaved?.live2d || {};
+  const saVrm = singleAgentSaved?.vrm || {};
+  const summaryText = `Workspace: ${getScopedVisualSummary(workspaceMode, workspaceItem, workspaceCompanionId, '', '', '', 'workspace')} • Single Agent: ${getScopedVisualSummary(saMode, items.find((item) => item.id === String(singleAgentSaved?.companionId || '').trim()) || null, String(singleAgentSaved?.companionId || '').trim(), String(saLive2d.modelUrl || ''), String(saLive2d.bridgeUrl || ''), String(saVrm.modelUrl || ''), 'single-agent')}`;
+  wrapper.innerHTML = `
+    <button class="agent-companion-toggle" type="button" aria-expanded="false">
+      <span class="agent-voice-title">${escapeHtml(agent.label || agent.id)}</span>
+      <span class="agent-companion-summary">${escapeHtml(summaryText)}</span>
+    </button>
+    <div class="agent-companion-body hidden">
+      ${buildScopedVisualEditor(agent, workspaceSaved, items, 'workspace')}
+      ${buildScopedVisualEditor(agent, singleAgentSaved, items, 'single-agent')}
     </div>
   `;
   return wrapper;
 }
 
+async function deleteCompanionVisual(companionId = '') {
+  const id = String(companionId || '').trim();
+  if (!id) return;
+  const item = availableCompanions.find((entry) => entry.id === id) || null;
+  const deletable = new Set(['codex-import', 'live2d-import', 'vrm-import']);
+  if (!deletable.has(item?.sourceType)) {
+    setCompanionImportStatus('Only imported visual packages can be deleted. Built-ins are protected.');
+    return;
+  }
+  const ok = window.confirm(`Delete imported visual "${item.name || id}"? This removes the package and clears agents using it.`);
+  if (!ok) return;
+  try {
+    setCompanionImportStatus(`Deleting ${item.name || id}...`);
+    await fetchJson(`${BASE}/api/companions/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    await reloadCompanionStateFromServer();
+    setCompanionImportStatus(`Deleted ${item.name || id}.`);
+  } catch (err) {
+    setCompanionImportStatus(err.message || 'Delete failed.');
+  }
+}
+
+function renderImportedVisualLibrary() {
+  const mount = document.getElementById('companion-import-library');
+  if (!mount) return;
+  const imported = availableCompanions.filter((item) => ['codex-import', 'live2d-import', 'vrm-import'].includes(item?.sourceType));
+  if (!imported.length) {
+    mount.innerHTML = '<div class="setting-hint">No imported visual packages yet.</div>';
+    return;
+  }
+  mount.innerHTML = imported.map((item) => {
+    const type = item.sourceType === 'codex-import' ? 'Codex pet' : item.sourceType === 'live2d-import' ? 'Live2D' : 'VRM';
+    return `
+      <div class="agent-voice-row imported-visual-row" data-companion-id="${escapeHtml(item.id)}">
+        <div>
+          <div class="agent-voice-title">${escapeHtml(item.name || item.id)}</div>
+          <div class="setting-hint">${escapeHtml(type)} · ${escapeHtml(item.id)}</div>
+        </div>
+        <button class="secondary-button imported-visual-delete" type="button" data-companion-id="${escapeHtml(item.id)}">DELETE</button>
+      </div>
+    `;
+  }).join('');
+  mount.querySelectorAll('.imported-visual-delete').forEach((button) => {
+    button.addEventListener('click', () => deleteCompanionVisual(button.dataset.companionId || ''));
+  });
+}
+
 function wireCompanionRows() {
+  const renderScope = (row, scope = 'workspace') => {
+    const scopeRoot = row.querySelector(`.agent-visual-scope[data-visual-scope="${scope}"]`);
+    if (!scopeRoot) return;
+    const modeSelect = scopeRoot.querySelector('.agent-companion-mode');
+    const companionSelect = scopeRoot.querySelector('.agent-companion-select');
+    const previewCanvas = scopeRoot.querySelector('.agent-companion-preview');
+    const previewText = scopeRoot.querySelector('.agent-companion-preview-text');
+    const sizeInput = scopeRoot.querySelector('.agent-companion-size');
+    const sizeValue = scopeRoot.querySelector('.agent-companion-size-value');
+    const live2dModelInput = scopeRoot.querySelector('.agent-live2d-model');
+    const live2dBridgeInput = scopeRoot.querySelector('.agent-live2d-bridge');
+    const vrmModelInput = scopeRoot.querySelector('.agent-vrm-model');
+    const vrmSizeInput = scopeRoot.querySelector('.agent-vrm-size');
+    const vrmSizeValue = scopeRoot.querySelector('.agent-vrm-size-value');
+    const summary = row.querySelector('.agent-companion-summary');
+    const rawMode = modeSelect?.value || 'default';
+    const mode = rawMode === 'companion' ? 'companion' : scope === 'single-agent' && rawMode === 'live2d' ? 'live2d' : scope === 'single-agent' && rawMode === 'vrm' ? 'vrm' : 'default';
+    const item = availableCompanions.find((entry) => entry.id === companionSelect?.value) || null;
+    const deleteBtn = scopeRoot.querySelector('.companion-delete-btn');
+    if (deleteBtn) {
+      deleteBtn.dataset.companionId = item?.id || '';
+      deleteBtn.classList.toggle('hidden', !['codex-import', 'live2d-import', 'vrm-import'].includes(item?.sourceType));
+    }
+    const previewWrap = scopeRoot.querySelector('.agent-companion-preview-wrap');
+    previewWrap?.classList.toggle('is-default', mode !== 'companion');
+    previewWrap?.classList.toggle('is-live2d', mode === 'live2d');
+    previewWrap?.classList.toggle('is-vrm', mode === 'vrm');
+    scopeRoot.querySelectorAll('.agent-live2d-field').forEach((field) => field.classList.toggle('hidden', mode !== 'live2d'));
+    scopeRoot.querySelectorAll('.agent-vrm-field').forEach((field) => field.classList.toggle('hidden', mode !== 'vrm'));
+    if (scope === 'single-agent' && mode === 'live2d' && item?.sourceType === 'live2d-import' && item.live2d?.modelUrl && live2dModelInput && !String(live2dModelInput.value || '').trim()) {
+      live2dModelInput.value = item.live2d.modelUrl;
+      if (live2dBridgeInput && !String(live2dBridgeInput.value || '').trim()) live2dBridgeInput.value = item.live2d.bridgeUrl || `${BASE}/live2d-viewer.html`;
+    }
+    if (scope === 'single-agent' && mode === 'vrm' && item?.sourceType === 'vrm-import' && item.vrm?.modelUrl && vrmModelInput && !String(vrmModelInput.value || '').trim()) {
+      vrmModelInput.value = item.vrm.modelUrl;
+    }
+    const live2dModelUrl = String(live2dModelInput?.value || '').trim();
+    const live2dBridgeUrl = String(live2dBridgeInput?.value || '').trim();
+    const vrmModelUrl = String(vrmModelInput?.value || '').trim();
+    previewText.textContent = mode === 'live2d'
+      ? (live2dBridgeUrl || live2dModelUrl ? 'Live2D stage will be used only in Single Agent Mode.' : 'Add/upload a Live2D model for Single Agent Mode. The local viewer is automatic.')
+      : mode === 'vrm'
+        ? (vrmModelUrl ? 'VRM stage will react to agent state and voice playback in Single Agent Mode.' : 'Add a VRM model URL/path for Single Agent Mode.')
+        : mode === 'companion'
+          ? (item?.name || companionSelect?.value || 'Choose a companion package for this agent.')
+          : scope === 'single-agent' ? 'Using Single Agent default visuals for this agent.' : 'Using workspace-compatible visuals for this agent.';
+    const scale = Math.min(2, Math.max(0.45, Number(sizeInput?.value || 100) / 100 || 1));
+    if (sizeValue) sizeValue.textContent = `${Math.round(scale * 100)}%`;
+    if (vrmSizeValue) vrmSizeValue.textContent = `${Math.round(Math.min(2.5, Math.max(0.5, Number(vrmSizeInput?.value || 100) / 100 || 1)) * 100)}%`;
+    if (mode === 'companion' && item) companions.renderCompanionPreview(previewCanvas, item, 'idle', '', { scale });
+    else if (previewCanvas) previewCanvas.getContext('2d')?.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+    const workspaceScope = row.querySelector('.agent-visual-scope[data-visual-scope="workspace"]');
+    const saScope = row.querySelector('.agent-visual-scope[data-visual-scope="single-agent"]');
+    const workspaceMode = workspaceScope?.querySelector('.agent-companion-mode')?.value || 'default';
+    const workspaceCompanionId = workspaceScope?.querySelector('.agent-companion-select')?.value || '';
+    const workspaceItem = availableCompanions.find((entry) => entry.id === workspaceCompanionId) || null;
+    const saMode = saScope?.querySelector('.agent-companion-mode')?.value || 'default';
+    const saCompanionId = saScope?.querySelector('.agent-companion-select')?.value || '';
+    const saItem = availableCompanions.find((entry) => entry.id === saCompanionId) || null;
+    const saLive2dModelUrl = String(saScope?.querySelector('.agent-live2d-model')?.value || '').trim();
+    const saLive2dBridgeUrl = String(saScope?.querySelector('.agent-live2d-bridge')?.value || '').trim();
+    const saVrmModelUrl = String(saScope?.querySelector('.agent-vrm-model')?.value || '').trim();
+    summary.textContent = `Workspace: ${getScopedVisualSummary(workspaceMode === 'companion' ? 'companion' : 'default', workspaceItem, workspaceCompanionId, '', '', '', 'workspace')} • Single Agent: ${getScopedVisualSummary(saMode === 'companion' ? 'companion' : saMode === 'live2d' ? 'live2d' : saMode === 'vrm' ? 'vrm' : 'default', saItem, saCompanionId, saLive2dModelUrl, saLive2dBridgeUrl, saVrmModelUrl, 'single-agent')}`;
+  };
+
   document.querySelectorAll('.agent-companion-row').forEach((row) => {
     const toggle = row.querySelector('.agent-companion-toggle');
     const body = row.querySelector('.agent-companion-body');
-    const modeSelect = row.querySelector('.agent-companion-mode');
-    const companionSelect = row.querySelector('.agent-companion-select');
-    const previewCanvas = row.querySelector('.agent-companion-preview');
-    const previewText = row.querySelector('.agent-companion-preview-text');
-    const sizeInput = row.querySelector('.agent-companion-size');
-    const sizeValue = row.querySelector('.agent-companion-size-value');
-    const summary = row.querySelector('.agent-companion-summary');
-    const renderPreview = () => {
-      const mode = modeSelect?.value === 'companion' ? 'companion' : 'default';
-      const item = availableCompanions.find((entry) => entry.id === companionSelect?.value) || null;
-      row.querySelector('.agent-companion-preview-wrap')?.classList.toggle('is-default', mode !== 'companion');
-      summary.textContent = mode === 'companion' ? (item?.name || companionSelect?.value || 'Unassigned companion') : 'Default character view';
-      previewText.textContent = mode === 'companion'
-        ? (item?.name || companionSelect?.value || 'Choose a companion package for this agent.')
-        : 'Using current CommandCenter visuals for this agent.';
-      const scale = Math.min(2, Math.max(0.45, Number(sizeInput?.value || 100) / 100 || 1));
-      if (sizeValue) sizeValue.textContent = `${Math.round(scale * 100)}%`;
-      if (mode === 'companion' && item) companions.renderCompanionPreview(previewCanvas, item, 'idle', '', { scale });
-      else if (previewCanvas) previewCanvas.getContext('2d')?.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
-    };
     toggle?.addEventListener('click', () => {
       const next = body.classList.contains('hidden');
       body.classList.toggle('hidden', !next);
       toggle.setAttribute('aria-expanded', String(next));
     });
-    modeSelect?.addEventListener('change', renderPreview);
-    companionSelect?.addEventListener('change', renderPreview);
-    sizeInput?.addEventListener('input', renderPreview);
-    renderPreview();
+    ['workspace', 'single-agent'].forEach((scope) => {
+      const scopeRoot = row.querySelector(`.agent-visual-scope[data-visual-scope="${scope}"]`);
+      if (!scopeRoot) return;
+      scopeRoot.querySelectorAll('select,input').forEach((el) => {
+        el.addEventListener(el.type === 'checkbox' ? 'change' : 'input', () => renderScope(row, scope));
+        if (el.tagName === 'SELECT') el.addEventListener('change', () => renderScope(row, scope));
+      });
+      scopeRoot.querySelector('.companion-delete-btn')?.addEventListener('click', () => deleteCompanionVisual(scopeRoot.querySelector('.companion-delete-btn')?.dataset.companionId || ''));
+      renderScope(row, scope);
+    });
   });
 }
 
 async function reloadCompanionStateFromServer() {
   const companionData = await fetchJson(`${BASE}/api/settings/companions`);
-  currentCompanionSettings = companionData.settings || { agentVisuals: {} };
+  currentCompanionSettings = companionData.settings || { agentVisuals: {}, singleAgentVisuals: {} };
   availableCompanions = companionData.items || [];
   companions.setCompanionData({ visuals: companionData.resolved || {}, items: availableCompanions });
+  window.__singleAgentVisuals = buildSingleAgentRuntimeVisuals(companionData.resolved || {}, companionData.singleAgentResolved || {});
   await loadRoster();
   office.setAgentVisuals(companionData.resolved || {}, availableCompanions || []);
   directChat.setCompanionData(companionData.resolved || {}, availableCompanions || []);
+  singleAgent.setCompanionData(window.__singleAgentVisuals || companionData.resolved || {}, availableCompanions || []);
   populateSettingsForm(window.__lastVoiceSettings || {}, currentWakeSettings || { wakeWords: {} });
+  renderImportedVisualLibrary();
+}
+
+async function importUniversalVisual() {
+  const input = document.getElementById('companion-import-universal');
+  const agentSelect = document.getElementById('companion-import-agent');
+  const files = Array.from(input?.files || []);
+  if (!files.length) {
+    setCompanionImportStatus('Choose a Codex pet zip/files, Live2D package/model, or VRM file first.');
+    return;
+  }
+  const form = new FormData();
+  for (const file of files) form.append('files', file, file.webkitRelativePath || file.name);
+  if (agentSelect?.value) form.append('agentId', agentSelect.value);
+  const label = files.length === 1 ? files[0].name : `${files.length} files`;
+  setCompanionImportStatus(`Uploading visual package: ${label}...`);
+  try {
+    const data = await fetchJson(`${BASE}/api/companions/import-universal`, { method: 'POST', body: form });
+    if (input) input.value = '';
+    await reloadCompanionStateFromServer();
+    setCompanionImportStatus(`Imported ${data.kind || 'visual'}: ${data.item?.name || data.item?.id || label}.`);
+    if (data.kind === 'codex') renderImportResult(data.item, data.assigned?.agentId || '');
+  } catch (err) {
+    setCompanionImportStatus(err.message || 'Visual import failed.');
+  }
 }
 
 async function importCompanionPackage() {
@@ -2385,9 +2563,10 @@ function populateSettingsForm(voiceSettings = {}, wakeSettings = {}) {
   porcupineKeyHint.textContent = wakeSettings.hasAccessKey ? `Saved key: ${wakeSettings.accessKeyMasked}` : 'No saved Porcupine key yet.';
   companionList.innerHTML = '';
   roster.agents.forEach((agent) => {
-    companionList.appendChild(buildAgentCompanionRow(agent, currentCompanionSettings.agentVisuals?.[agent.id] || {}, availableCompanions));
+    companionList.appendChild(buildAgentCompanionRow(agent, { agentVisuals: currentCompanionSettings.agentVisuals?.[agent.id] || {}, singleAgentVisuals: currentCompanionSettings.singleAgentVisuals?.[agent.id] || {} }, availableCompanions));
   });
   wireCompanionRows();
+  renderImportedVisualLibrary();
 
   const importAgentSelect = document.getElementById('companion-import-agent');
   if (importAgentSelect) {
@@ -2417,12 +2596,8 @@ function populateSettingsForm(voiceSettings = {}, wakeSettings = {}) {
   if (vignetteSideSlider) vignetteSideSlider.oninput = wireDirectionalSlider;
   if (vignetteBottomSlider) vignetteBottomSlider.oninput = wireDirectionalSlider;
 
-  const companionImportBtn = document.getElementById('import-companion-btn');
-  if (companionImportBtn) companionImportBtn.onclick = importCompanionPackage;
-  const companionImportFolderBtn = document.getElementById('import-companion-folder-btn');
-  if (companionImportFolderBtn) companionImportFolderBtn.onclick = importCompanionFolder;
-  const companionImportZipBtn = document.getElementById('import-companion-zip-btn');
-  if (companionImportZipBtn) companionImportZipBtn.onclick = importCompanionZip;
+  const companionImportUniversalBtn = document.getElementById('import-companion-universal-btn');
+  if (companionImportUniversalBtn) companionImportUniversalBtn.onclick = importUniversalVisual;
 
   const fishVoiceSearch = document.getElementById('fish-voice-search');
   const fishVoiceSearchBtn = document.getElementById('fish-voice-search-btn');
@@ -2480,19 +2655,18 @@ async function openSettings() {
       fetchJson(`${BASE}/api/settings/wake`),
       fetchJson(`${BASE}/api/settings/companions`),
       fetchJson(`${BASE}/api/settings/gemini`),
-      loadDirectChatSettings(),
       appearance.refresh(),
       branding.refresh(),
       layoutSettings.refresh(),
       intro.refresh(),
       music.refresh(),
     ]);
-    currentCompanionSettings = companionData.settings || { agentVisuals: {} };
+    currentCompanionSettings = companionData.settings || { agentVisuals: {}, singleAgentVisuals: {} };
     availableCompanions = companionData.items || [];
     companions.setCompanionData({ visuals: companionData.resolved || {}, items: availableCompanions });
+  window.__singleAgentVisuals = buildSingleAgentRuntimeVisuals(companionData.resolved || {}, companionData.singleAgentResolved || {});
     populateSettingsForm(voiceData.settings || {}, wakeData.settings || {});
     populateGeminiSettingsForm(geminiData.settings || {});
-    populateDirectChatSettings(currentDirectChatSettings);
     await refreshFairyDiagnostics();
     await refreshFairyMemoryList();
     await refreshFairyRecordings();
@@ -2619,9 +2793,6 @@ async function saveSettings() {
   const fishPlaybackMode = document.getElementById('fish-playback-mode')?.value?.trim() || 'auto';
   const fishAutoStreamMinChars = Number(document.getElementById('fish-auto-stream-min-chars')?.value || 260);
   const fishIncludeAsteriskNarration = document.getElementById('fish-include-narration').checked;
-  const relayEnabled = document.getElementById('direct-chat-relay-enabled')?.checked === true;
-  const relayUrl = document.getElementById('direct-chat-relay-url')?.value?.trim() || '';
-  const relayShowDeviceLabels = document.getElementById('direct-chat-relay-show-device-labels')?.checked !== false;
   const porcupineAccessKey = document.getElementById('porcupine-access-key').value.trim();
   const vignetteStrength = clampVignetteStrength(document.getElementById('vignette-strength')?.value || DEFAULT_VIGNETTE_STRENGTH);
   const directionalVignette = {
@@ -2657,12 +2828,35 @@ async function saveSettings() {
 
   const companionEntries = Array.from(document.querySelectorAll('.agent-companion-row')).map((row) => {
     const agentId = row.dataset.agentId;
-    const mode = row.querySelector('.agent-companion-mode')?.value === 'companion' ? 'companion' : 'default';
-    const companionId = String(row.querySelector('.agent-companion-select')?.value || '').trim();
-    const scale = Math.min(2, Math.max(0.45, Number(row.querySelector('.agent-companion-size')?.value || 100) / 100 || 1));
-    return [agentId, { mode, companionId, scale }];
-  }).filter(([agentId]) => agentId);
-  const agentVisuals = Object.fromEntries(companionEntries);
+    if (!agentId) return null;
+    const readScope = (scope = 'workspace') => {
+      const scopeRoot = row.querySelector(`.agent-visual-scope[data-visual-scope="${scope}"]`);
+      if (!scopeRoot) return null;
+      const rawMode = scopeRoot.querySelector('.agent-companion-mode')?.value || 'default';
+      const mode = rawMode === 'companion' ? 'companion' : scope === 'single-agent' && rawMode === 'live2d' ? 'live2d' : scope === 'single-agent' && rawMode === 'vrm' ? 'vrm' : 'default';
+      const companionId = String(scopeRoot.querySelector('.agent-companion-select')?.value || '').trim();
+      const selectedItem = availableCompanions.find((entry) => entry.id === companionId) || null;
+      const scale = Math.min(2, Math.max(0.45, Number(scopeRoot.querySelector('.agent-companion-size')?.value || 100) / 100 || 1));
+      const live2d = {
+        modelUrl: String(scopeRoot.querySelector('.agent-live2d-model')?.value || selectedItem?.live2d?.modelUrl || '').trim(),
+        bridgeUrl: String(scopeRoot.querySelector('.agent-live2d-bridge')?.value || selectedItem?.live2d?.bridgeUrl || '').trim(),
+      };
+      const vrm = {
+        modelUrl: String(scopeRoot.querySelector('.agent-vrm-model')?.value || selectedItem?.vrm?.modelUrl || '').trim(),
+        scale: Math.min(2.5, Math.max(0.5, Number(scopeRoot.querySelector('.agent-vrm-size')?.value || 100) / 100 || 1)),
+        cameraY: Number(scopeRoot.querySelector('.agent-vrm-camera-y')?.value || 1.25) || 1.25,
+        cameraZoom: Number(scopeRoot.querySelector('.agent-vrm-camera-zoom')?.value || 1) || 1,
+        lookAtCamera: scopeRoot.querySelector('.agent-vrm-lookat')?.checked !== false,
+        idleMotion: 'breathing',
+        speakingMotion: 'talk',
+        visemeMode: 'synthetic',
+      };
+      return { mode, companionId, scale, live2d, vrm };
+    };
+    return [agentId, { workspace: readScope('workspace'), singleAgent: readScope('single-agent') }];
+  }).filter(Boolean);
+  const agentVisuals = Object.fromEntries(companionEntries.map(([agentId, entry]) => [agentId, entry.workspace]));
+  const singleAgentVisuals = Object.fromEntries(companionEntries.map(([agentId, entry]) => [agentId, entry.singleAgent]));
 
   setSettingsStatus('Saving settings...');
   try {
@@ -2681,7 +2875,7 @@ async function saveSettings() {
     await fetchJson(`${BASE}/api/settings/companions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agentVisuals }),
+      body: JSON.stringify({ agentVisuals, singleAgentVisuals }),
     });
 
     await fetchJson(`${BASE}/api/settings/wake`, {
@@ -2689,13 +2883,6 @@ async function saveSettings() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ porcupineAccessKey, wakeWords }),
     });
-
-    const directChatData = await fetchJson(`${BASE}/api/settings/direct-chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ relayEnabled, relayUrl, relayShowDeviceLabels }),
-    });
-    currentDirectChatSettings = directChatData.settings || currentDirectChatSettings;
 
     await appearance.saveSettings();
     await branding.saveSettings();
@@ -2708,18 +2895,17 @@ async function saveSettings() {
       fetchJson(`${BASE}/api/settings/wake`),
       fetchJson(`${BASE}/api/settings/companions`),
       fetchJson(`${BASE}/api/settings/gemini`),
-      loadDirectChatSettings(),
     ]);
-    currentCompanionSettings = companionData.settings || { agentVisuals: {} };
+    currentCompanionSettings = companionData.settings || { agentVisuals: {}, singleAgentVisuals: {} };
     availableCompanions = companionData.items || [];
     companions.setCompanionData({ visuals: companionData.resolved || {}, items: availableCompanions });
+  window.__singleAgentVisuals = buildSingleAgentRuntimeVisuals(companionData.resolved || {}, companionData.singleAgentResolved || {});
     populateSettingsForm(voiceData.settings || {}, wakeData.settings || {});
     populateGeminiSettingsForm(geminiData.settings || {});
-    populateDirectChatSettings(currentDirectChatSettings);
-    await loadRoster();
     fairyLive.refreshConfig?.().catch(() => {});
     office.setAgentVisuals(companionData.resolved || {}, availableCompanions || []);
     directChat.setCompanionData(companionData.resolved || {}, availableCompanions || []);
+    singleAgent.setCompanionData(window.__singleAgentVisuals || companionData.resolved || {}, availableCompanions || []);
     persistVignetteStrength(vignetteStrength);
     applyVignetteStrength(vignetteStrength);
     persistDirectionalVignette(directionalVignette);
@@ -2795,7 +2981,9 @@ async function main() {
   await intro.init();
   office.setAgentVisuals(currentCompanionSettings.agentVisuals ? Object.fromEntries(roster.agents.map((agent) => [agent.id, companions.getAgentVisual(agent.id)])) : {}, availableCompanions);
   directChat.init();
+  singleAgent.init();
   fairyLive.init();
+  agentComms.initAgentComms({ base: BASE, fetchJson, initialRoster: roster });
   window.addEventListener('commandcenter:fairy-status', (event) => {
     const detail = event?.detail || {};
     if (!detail.active) {
@@ -2810,7 +2998,10 @@ async function main() {
   });
   initPwaInstall();
   directChat.setRoster(roster);
-  directChat.setCompanionData(Object.fromEntries(roster.agents.map((agent) => [agent.id, companions.getAgentVisual(agent.id)])), availableCompanions);
+  singleAgent.setRoster(roster);
+  const initialCompanionVisuals = Object.fromEntries(roster.agents.map((agent) => [agent.id, companions.getAgentVisual(agent.id)]));
+  directChat.setCompanionData(initialCompanionVisuals, availableCompanions);
+  singleAgent.setCompanionData(window.__singleAgentVisuals || initialCompanionVisuals, availableCompanions);
 
   voice.init({
     onTranscription: (text, agent) => {
@@ -2972,8 +3163,12 @@ async function main() {
   }, { once: false });
 
   const mascotZone = document.getElementById('zone-mascot');
-  mascotZone.addEventListener('click', async () => {
+  mascotZone.addEventListener('click', async (event) => {
     const primary = getPrimaryAgent();
+    if (event?.altKey || event?.metaKey || event?.ctrlKey) {
+      singleAgent.open(primary).catch(() => {});
+      return;
+    }
     if (!isFullscreen) {
       await requestFullscreen();
       await new Promise(r => setTimeout(r, 300));
@@ -3013,6 +3208,11 @@ async function main() {
     const y = (e.clientY - rect.top) * scaleY;
     const agentId = office.getAgentAtPoint(x, y);
     if (!agentId) return;
+
+    if (e.altKey || e.metaKey || e.ctrlKey) {
+      singleAgent.open(agentId).catch(() => {});
+      return;
+    }
 
     if (e.shiftKey) {
       const opts = workspaceRooms.rooms.map((r, i) => `${i + 1}: ${r.name}`).join('\n');
@@ -3070,8 +3270,8 @@ async function main() {
   terminal.log('[wake] Wake mode: local whisper name detection', 'info', true);
   setConnectionState('connecting', 'CONNECTING');
   setWakeButtonState('off');
-  const initialSetupStatus = await loadSetupStatus().catch(() => null);
-  bootSequence(initialSetupStatus);
+  bootSequence();
+  loadSetupStatus().catch(() => {});
   setSetupTestResult('No setup test run yet.', [], 'ok');
   connect();
 

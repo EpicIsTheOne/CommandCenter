@@ -70,8 +70,9 @@ async function dispatchFairyEvent(page, sessionId, event) {
 }
 
 (async () => {
-  const launchOptions = {
+  const browser = await chromium.launch({
     headless: true,
+    executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
     args: [
       '--use-fake-ui-for-media-stream',
       '--use-fake-device-for-media-stream',
@@ -81,10 +82,7 @@ async function dispatchFairyEvent(page, sessionId, event) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
     ],
-  };
-  const executablePath = process.env.CHROMIUM_EXECUTABLE_PATH || process.env.CHROMIUM_PATH || '';
-  if (executablePath) launchOptions.executablePath = executablePath;
-  const browser = await chromium.launch(launchOptions);
+  });
 
   const context = await browser.newContext({ viewport: { width: 1440, height: 1100 }, permissions: ['microphone', 'camera'] });
   const page = await context.newPage();

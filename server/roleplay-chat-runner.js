@@ -1,10 +1,14 @@
 import OpenAI from 'openai';
 import { readFileSync, existsSync } from 'node:fs';
 import { loadAgentRoster } from './agents.js';
+import { buildAgentCommContext, listScopedAgentComms, markAgentCommsRead } from './agent-comms.js';
+import { loadDirectChatSettings } from './direct-chat-settings.js';
 
 const MAX_CONTEXT_MESSAGES = 40;
 const DEFAULT_OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
 const DEFAULT_ROLEPLAY_MODEL = process.env.OPENROUTER_ROLEPLAY_MODEL || 'z-ai/glm-5';
+const DEFAULT_PAWAN_BASE_URL = process.env.PAWAN_BASE_URL || 'https://api.pawan.krd/v1';
+const PAWAN_MODEL_PREFIX = 'pkrd/';
 
 function summarizeMessageLine(message) {
   const role = message.role === 'assistant' ? 'assistant' : 'user';
@@ -46,11 +50,15 @@ function loadAgentPersonality(agentId) {
     const soul = tryRead(`${workspace}/SOUL.md`);
     const system = tryRead(`${workspace}/SYSTEM.md`);
     const user = tryRead(`${workspace}/USER.md`);
+    const memoryUser = tryRead(`${workspace}/memories/USER.md`);
+    const memoryCore = tryRead(`${workspace}/memories/MEMORY.md`);
     const agents = tryRead(`${workspace}/AGENTS.md`);
 
     if (soul) chunks.push('=== SOUL.md ===\n' + soul);
     if (system) chunks.push('=== SYSTEM.md ===\n' + system);
     if (user) chunks.push('=== USER.md ===\n' + user);
+    if (memoryUser) chunks.push('=== memories/USER.md ===\n' + memoryUser);
+    if (memoryCore) chunks.push('=== memories/MEMORY.md ===\n' + memoryCore);
     if (!chunks.length && agents) chunks.push('=== AGENTS.md ===\n' + agents);
   }
 
@@ -63,7 +71,7 @@ function loadAgentPersonality(agentId) {
   return null;
 }
 
-function buildSystemPrompt(session) {
+function buildSystemPrompt(session, backchannelBlock = '') {
   const identity = getAgentIdentity(session?.agent);
   const personalityContent = loadAgentPersonality(session?.agent);
 
@@ -89,24 +97,23 @@ function buildSystemPrompt(session) {
     'Do not claim to be Claude, ChatGPT, OpenAI, Anthropic, Gemini, or any other provider identity unless the user explicitly asks what backend model powers this mode.',
     'If the user explicitly asks about the backend model, answer briefly that this is a lightweight OpenRouter roleplay path, and keep that separate from your character identity.',
     'Do not break character just because the underlying model exists.',
+    'If internal backchannel notes were provided, incorporate that context naturally into your response without explicitly mentioning the backchannel system or drawing attention to the fact that you received notes.',
   ].join(' ');
 
+  const chunks = [basePrompt, '', '=== ROLEPLAY RUNTIME RULES ===', roleplayRules];
+
   if (personalityContent) {
-    return [
-      basePrompt,
-      '',
-      '=== CHARACTER FILES ===',
-      personalityContent,
-      '',
-      '=== ROLEPLAY RUNTIME RULES ===',
-      roleplayRules,
-    ].join('\n');
+    chunks.unshift('=== CHARACTER FILES ===', personalityContent, '');
   }
 
-  return [basePrompt, roleplayRules].join(' ');
+  if (backchannelBlock) {
+    chunks.push('', '=== INTERNAL AGENT NOTES ===', backchannelBlock);
+  }
+
+  return chunks.join('\n');
 }
 
-function buildMessages(session, latestMessage, attachmentContext = '') {
+function buildMessages(session, latestMessage, attachmentContext = '', backchannelBlock = '') {
   const history = Array.isArray(session?.messages) ? session.messages.slice(-MAX_CONTEXT_MESSAGES) : [];
   const prior = history.slice(0, -1).map(summarizeMessageLine);
   const latest = String(latestMessage || '').trim();
@@ -115,7 +122,7 @@ function buildMessages(session, latestMessage, attachmentContext = '') {
   return [
     {
       role: 'system',
-      content: buildSystemPrompt(session),
+      content: buildSystemPrompt(session, backchannelBlock),
     },
     ...prior,
     {
@@ -133,20 +140,50 @@ function normalizeRoleplayProvider(input = {}) {
   return { baseURL, apiKey, model };
 }
 
+function isPawanModel(model = '') {
+  return String(model || '').trim().toLowerCase().startsWith(PAWAN_MODEL_PREFIX);
+}
+
 export async function runRoleplayChatTurn({ session, latestMessage, attachmentContext = '', model, roleplayProvider = null, onEvent } = {}) {
   const provider = normalizeRoleplayProvider(roleplayProvider || session?.metadata?.roleplayProvider || {});
+  const directChatSettings = await loadDirectChatSettings().catch(() => ({}));
   const chosenModel = String(model || provider.model || process.env.OPENROUTER_ROLEPLAY_MODEL || DEFAULT_ROLEPLAY_MODEL).trim() || DEFAULT_ROLEPLAY_MODEL;
-  const baseURL = String(provider.baseURL || process.env.OPENROUTER_BASE_URL || DEFAULT_OPENROUTER_BASE_URL).trim();
-  const apiKey = String(provider.apiKey || process.env.OPENROUTER_API_KEY || '').trim();
+  const usePawan = isPawanModel(chosenModel);
+  const baseURL = String(usePawan
+    ? (provider.baseURL || DEFAULT_PAWAN_BASE_URL)
+    : (provider.baseURL || process.env.OPENROUTER_BASE_URL || DEFAULT_OPENROUTER_BASE_URL)).trim();
+  const apiKey = String(usePawan
+    ? (provider.apiKey || directChatSettings?.pawanApiKey || process.env.PAWAN_API_KEY || '')
+    : (provider.apiKey || process.env.OPENROUTER_API_KEY || '')).trim();
   const isOpenRouter = /openrouter\.ai\/api\/v1\/?$/i.test(baseURL);
+  const isPawan = /api\.pawan\.krd\/v1\/?$/i.test(baseURL);
   if (isOpenRouter && !apiKey) throw new Error('OPENROUTER_API_KEY is not configured');
+  if (usePawan && !apiKey) throw new Error('Pawan.krd API key is not configured');
+  if (isPawan && !apiKey) throw new Error('Pawan.krd API key is not configured');
+
+  const targetAgent = String(session?.agent || '').trim();
+  let backchannelBlock = '';
+  let injectedBackchannelIds = [];
+  if (session?.metadata?.skipBackchannel !== true) {
+    try {
+      const backchannelMessages = await listScopedAgentComms({
+        agentId: targetAgent,
+        scopeType: 'chat',
+        scopeId: String(session?.id || '').trim(),
+        limit: 8,
+        unreadOnly: true,
+      });
+      injectedBackchannelIds = backchannelMessages.map((message) => message.id).filter(Boolean);
+      backchannelBlock = buildAgentCommContext(backchannelMessages);
+    } catch {}
+  }
 
   const client = new OpenAI({
     apiKey: apiKey || 'not-needed',
     baseURL,
   });
 
-  const messages = buildMessages(session, latestMessage, attachmentContext);
+  const messages = buildMessages(session, latestMessage, attachmentContext, backchannelBlock);
 
   try { onEvent?.({ type: 'thinking', data: { mode: 'roleplay', model: chosenModel, status: 'Processing...' } }); } catch {}
 
@@ -167,6 +204,9 @@ export async function runRoleplayChatTurn({ session, latestMessage, attachmentCo
 
   const text = String(response.choices?.[0]?.message?.content || '').trim();
   if (!text) throw new Error('Roleplay model returned an empty response');
+  if (injectedBackchannelIds.length) {
+    markAgentCommsRead({ ids: injectedBackchannelIds, agentId: targetAgent }).catch(() => {});
+  }
   try { onEvent?.({ type: 'response', data: { mode: 'roleplay', model: chosenModel, text } }); } catch {}
   return { text, model: chosenModel };
 }

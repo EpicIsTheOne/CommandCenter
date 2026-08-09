@@ -2,16 +2,6 @@
 
 This is the practical install flow for getting CommandCenter running without mystery failures.
 
-## Security-first startup
-
-- Open first-run setup from the Command Center host itself. Password creation is loopback-only.
-- Use at least 12 characters. Login/setup attempts are throttled and changing the password invalidates prior sessions.
-- Public `/api/v1` requests require `Authorization: Bearer <COMMANDCENTER_API_KEY>`.
-- The optional local no-key API works only when the TCP peer is loopback and the request arrived on `LOCAL_API_PORT`; proxy headers do not affect this decision.
-- `/ws` requires either the UI session cookie or an Authorization bearer header. Do not put credentials in WebSocket URLs.
-
-On Windows, Python discovery tries `PYTHON_BIN`, `.venv\\Scripts\\python.exe`, `py -3`, `python3`, and `python`. Wake workers are optional and warm only when wake configuration exists.
-
 ---
 
 ## 1) Prerequisites

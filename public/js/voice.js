@@ -26,6 +26,10 @@ let currentAudio = null;
 let currentAudioUrl = null;
 let currentSpeakController = null;
 let currentPlaybackToken = 0;
+let playbackAudioContext = null;
+let playbackAnalyser = null;
+let playbackMonitorTimer = null;
+let playbackSource = null;
 let lastPlaybackSignature = '';
 let lastPlaybackStartedAt = 0;
 const DUPLICATE_PLAYBACK_WINDOW_MS = 12000;
@@ -65,8 +69,57 @@ function emitPlaybackEvent(name, detail = {}) {
   document.dispatchEvent(new CustomEvent(name, { detail }));
 }
 
+function emitVoiceEvent(name, detail = {}) {
+  document.dispatchEvent(new CustomEvent(name, { detail }));
+}
+
+function stopPlaybackMonitor() {
+  clearInterval(playbackMonitorTimer);
+  playbackMonitorTimer = null;
+  playbackAnalyser = null;
+  playbackSource = null;
+  if (playbackAudioContext) {
+    playbackAudioContext.close().catch(() => {});
+    playbackAudioContext = null;
+  }
+}
+
+function startPlaybackMonitor(audio, agentId = 'main') {
+  stopPlaybackMonitor();
+  try {
+    const Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor || !audio) return;
+    playbackAudioContext = new Ctor();
+    playbackAnalyser = playbackAudioContext.createAnalyser();
+    playbackAnalyser.fftSize = 1024;
+    playbackSource = playbackAudioContext.createMediaElementSource(audio);
+    playbackSource.connect(playbackAnalyser);
+    playbackAnalyser.connect(playbackAudioContext.destination);
+    const buffer = new Uint8Array(playbackAnalyser.fftSize);
+    playbackMonitorTimer = setInterval(() => {
+      if (!playbackAnalyser || audio.paused || audio.ended) {
+        emitPlaybackEvent('commandcenter:voice-playback-level', { agentId, level: 0 });
+        return;
+      }
+      playbackAnalyser.getByteTimeDomainData(buffer);
+      let sumSquares = 0;
+      for (let i = 0; i < buffer.length; i += 1) {
+        const centered = (buffer[i] - 128) / 128;
+        sumSquares += centered * centered;
+      }
+      const rms = Math.sqrt(sumSquares / buffer.length);
+      const level = Math.max(0, Math.min(1, rms * 5.5));
+      emitPlaybackEvent('commandcenter:voice-playback-level', { agentId, level });
+    }, 45);
+  } catch (err) {
+    console.warn('[voice] playback level monitor unavailable:', err?.message || err);
+    stopPlaybackMonitor();
+  }
+}
+
 export function stopPlayback() {
   currentPlaybackToken += 1;
+  stopPlaybackMonitor();
   if (currentSpeakController) {
     currentSpeakController.abort();
     currentSpeakController = null;
@@ -182,6 +235,7 @@ export async function startRecording(options = {}) {
       cleanupMonitoring();
       cleanupStream();
       isStoppingRecording = false;
+      emitVoiceEvent('commandcenter:voice-recording-stop', { agentId: targetAgent });
       if (onRecordingStopped) onRecordingStopped(targetAgent);
       if (audioChunks.length === 0) return;
       const blob = new Blob(audioChunks, { type: 'audio/webm' });
@@ -192,6 +246,7 @@ export async function startRecording(options = {}) {
     mediaRecorder.start(100);
     isRecording = true;
     isStoppingRecording = false;
+    emitVoiceEvent('commandcenter:voice-recording-start', { agentId: targetAgent });
 
     maxRecordTimer = setTimeout(() => {
       if (isRecording) stopRecording({ immediate: true });
@@ -211,6 +266,7 @@ export function stopRecording(options = {}) {
   if (!mediaRecorder || mediaRecorder.state === 'inactive') {
     isRecording = false;
     isStoppingRecording = false;
+    emitVoiceEvent('commandcenter:voice-recording-stop', { agentId: targetAgent });
     return;
   }
   if (isStoppingRecording) return;
@@ -250,7 +306,7 @@ function supportsStreamingAudioMime(mime = 'audio/mpeg') {
     && MediaSource.isTypeSupported(mime);
 }
 
-async function playStreamedAudioResponse(res, { playbackToken, controller } = {}) {
+async function playStreamedAudioResponse(res, { playbackToken, controller, agentId = targetAgent } = {}) {
   const mime = (res.headers.get('content-type') || 'audio/mpeg').split(';')[0] || 'audio/mpeg';
   if (!res.body || !supportsStreamingAudioMime(mime)) return null;
 
@@ -270,6 +326,7 @@ async function playStreamedAudioResponse(res, { playbackToken, controller } = {}
     let startedPlayback = false;
 
     const detachAudio = () => {
+      stopPlaybackMonitor();
       audio.onended = null;
       audio.onerror = null;
       audio.pause();
@@ -288,7 +345,7 @@ async function playStreamedAudioResponse(res, { playbackToken, controller } = {}
       reader?.cancel?.().catch(() => {});
       detachAudio();
       releaseSpeakerLock();
-      emitPlaybackEvent('commandcenter:voice-playback-stop');
+      emitPlaybackEvent('commandcenter:voice-playback-stop', { agentId, completed });
       resolve(completed);
     };
 
@@ -330,7 +387,8 @@ async function playStreamedAudioResponse(res, { playbackToken, controller } = {}
         });
 
         reader = res.body.getReader();
-        emitPlaybackEvent('commandcenter:voice-playback-start');
+        emitPlaybackEvent('commandcenter:voice-playback-start', { agentId });
+        startPlaybackMonitor(audio, agentId);
         while (playbackToken === currentPlaybackToken && !controller.signal.aborted) {
           const { value, done } = await reader.read();
           if (done) break;
@@ -374,6 +432,7 @@ async function sendToServer(blob) {
       throw new Error('empty-transcription');
     }
     const { text } = payload;
+    if (text) emitVoiceEvent('commandcenter:voice-transcription', { agentId: sentTo, text });
     if (text && onTranscription) onTranscription(text, sentTo);
     return { ok: true, text };
   } catch (err) {
@@ -412,7 +471,7 @@ export async function playSpokenResponse(text, agentId = 'main', options = {}) {
     console.log(`[voice] Playback mode: ${ttsMode}`);
 
     if (ttsMode === 'stream') {
-      const streamed = await playStreamedAudioResponse(res, { playbackToken, controller });
+      const streamed = await playStreamedAudioResponse(res, { playbackToken, controller, agentId });
       if (streamed !== null) return streamed;
       console.log('[voice] MediaSource streaming unsupported for this audio type; falling back to full-buffer playback');
     }
@@ -430,6 +489,7 @@ export async function playSpokenResponse(text, agentId = 'main', options = {}) {
       let finished = false;
       const cleanup = (completed) => {
         if (finished) return;
+        stopPlaybackMonitor();
         finished = true;
         audio.onended = null;
         audio.onerror = null;
@@ -449,6 +509,7 @@ export async function playSpokenResponse(text, agentId = 'main', options = {}) {
       audio.onerror = () => cleanup(false);
       audio.play().then(() => {
         emitPlaybackEvent('commandcenter:voice-playback-start', { agentId });
+        startPlaybackMonitor(audio, agentId);
       }).catch(() => cleanup(false));
     });
   } catch (err) {

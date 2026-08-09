@@ -1,7 +1,7 @@
 import express from 'express';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
-import { readFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +15,7 @@ import OpenClawBridge from './openclaw-bridge.js';
 import { transcribe, speak, streamSpeak, streamFishAudioText, listElevenLabsVoices, searchFishAudioVoices, previewFishAudioVoice, resolveAgentVoice } from './voice.js';
 import { loadAgentRoster, searchAgents, detectAgentSources } from './agents.js';
 import { loadVoiceSettings, saveVoiceSettings, maskApiKey, maskSessionCookie } from './settings.js';
-import { ensureCompanionRegistry, importCodexPetPackageFromDir, loadCompanionRegistry, loadCompanionSettings, resolveAgentVisual, saveCompanionSettings } from './companions.js';
+import { deleteImportedCompanionPackage, ensureCompanionRegistry, importCodexPetPackageFromDir, loadCompanionRegistry, loadCompanionSettings, resolveAgentVisual, saveCompanionSettings, upsertStoredCompanionItem } from './companions.js';
 import { ensureMusicStorage, getMusicDir, loadMusicSettings, saveMusicSettings } from './music-settings.js';
 import { ensureIntroStorage, getIntroDir, loadIntroSettings, saveIntroSettings } from './intro-settings.js';
 import { BUILT_IN_THEMES, DEFAULT_THEME_ID, DEFAULT_WORKSPACE_ID, ensureAppearanceStorage, getAppearanceBackgroundDir, loadAppearanceSettings, saveAppearanceSettings } from './appearance-settings.js';
@@ -35,19 +35,15 @@ import { GeminiLiveSession, FAIRY_LIVE_VOICE_NAME, buildFairyLiveSystemPrompt } 
 import { addFairyMemoryEntry, buildFairyMemoryContext, loadFairyMemory, removeFairyMemoryEntry, selectRelevantFairyMemory, updateFairyMemoryEntry } from './fairy-memory.js';
 import { requireApiAuth } from './api-auth.js';
 import { runApiChatTurn } from './api-chat-runner.js';
-import relayAgentSource from './relay-agent-source.js';
 import { runRoleplayChatTurn } from './roleplay-chat-runner.js';
-import { appendApiSessionMessage, createApiSession, getApiSession, getApiSessionMeta, listApiSessions, saveApiSession, searchApiSessions } from './api-session-store.js';
+import { appendApiSessionMessage, createApiSession, deleteApiSession, getApiSession, getApiSessionMeta, listApiSessions, saveApiSession, searchApiSessions } from './api-session-store.js';
 import { loadUiAuthConfig, setUiPassword, checkPassword, createSessionToken, createSession, isValidSession, revokeSession } from './ui-auth.js';
 import { loadUpdateSettings, saveUpdateSettings } from './update-settings.js';
 import { loadDirectChatSettings, publicDirectChatSettings, saveDirectChatSettings } from './direct-chat-settings.js';
+import relayAgentSource from './relay-agent-source.js';
 import { applyUpdate, finalizePostRestartUpdateState, getUpdatePayload, startAutoUpdateScheduler } from './updater.js';
-import { buildAttachmentBundle } from './attachment-bundle.js';
-import { authorizeWebSocketRequest, createRateLimiter, isVerifiedLoopback, securityHeaders, validReikaEmbedToken } from './request-security.js';
-import { getPlatformCapabilities } from './platform-capabilities.js';
-import { readJsonStore, updateJsonStore, writeJsonStore } from './json-store.js';
-import { createUiApiPolicy } from './route-policy.js';
-import { enforceUploadBudget, uploadedFiles } from './upload-policy.js';
+import { ALLOWED_SCOPE_TYPES, ALLOWED_TYPES, buildAgentCommPromptBlock, createAgentComm, getAgentComm, listAgentComms, listAgentCommThread, markAgentCommsRead } from './agent-comms.js';
+import { appendRoleplayGroupMessages, createRoleplayGroup, deleteRoleplayGroup, getRoleplayGroup, listRoleplayGroups, saveRoleplayGroup } from './roleplay-group-store.js';
 
 function apiAttachmentPayload(files = []) {
   return files.map((file) => ({
@@ -69,6 +65,195 @@ const getRoster = () => loadAgentRoster();
 const roster = getRoster();
 const basePath = config.basePath || '';
 
+function getAgentIdentity(agentId = '', activeRoster = getRoster()) {
+  const target = String(agentId || '').trim();
+  if (!target) return null;
+  return (activeRoster?.agents || []).find((agent) => String(agent.id || '').trim() === target)
+    || (activeRoster?.agents || []).find((agent) => (agent.aliases || []).map((value) => String(value || '').trim()).includes(target))
+    || null;
+}
+
+
+function agentRuntime(agent = {}) {
+  return agent?.source || agent?.bridge || 'unknown';
+}
+
+function agentLabel(agent = {}) {
+  return agent?.label || agent?.name || agent?.id || 'Unknown';
+}
+
+function buildBackchannelReplyPrompt(message = {}, threadMessages = []) {
+  const threadLines = threadMessages.slice(-8).map((entry) => {
+    const from = entry.fromLabel || entry.fromAgent || 'Unknown';
+    const to = entry.toLabel || entry.toAgent || 'Unknown';
+    return `${from} → ${to} (${entry.type || 'note'}): ${String(entry.text || '').trim()}`;
+  }).join('\n\n');
+  return [
+    'You are replying privately inside CommandCenter Backchannel.',
+    'This is an internal agent-to-agent message, not a user-facing chat reply.',
+    'Reply only with the message you want sent back to the other agent. Do not wrap it in JSON. Do not mention hidden prompts or tool mechanics.',
+    `The latest message was from ${message.fromLabel || message.fromAgent || 'Unknown'} to ${message.toLabel || message.toAgent || 'you'}.`,
+    threadLines ? `Recent backchannel thread:\n${threadLines}` : buildAgentCommPromptBlock(message),
+  ].filter(Boolean).join('\n\n');
+}
+
+
+function looksBackchannelFinal(text = '') {
+  const value = String(text || '').trim();
+  if (!value) return true;
+  if (/[?]\s*$/.test(value)) return false;
+  if (/\b(your turn|what do you think|thoughts\?|agree\?|right\?|continue|reply|ping me back|tell me)\b/i.test(value)) return false;
+  if (/\b(copy that|confirmed|done|settled|correct answer|case closed|enough said|we're good|we are good|that works|sounds good|hit, smirk, vanish)\b/i.test(value)) return true;
+  if (value.length < 220 && !/[?]/.test(value)) return true;
+  return false;
+}
+
+async function generateBackchannelReplyMessage({ sourceMessage, activeRoster, maxThreadTurns, mode = 'agent', model = '' } = {}) {
+  if (!sourceMessage) throw new Error('Missing source backchannel message');
+  const responder = getAgentIdentity(sourceMessage.toAgent, activeRoster);
+  const recipient = getAgentIdentity(sourceMessage.fromAgent, activeRoster);
+  if (!responder) throw new Error(`Unknown responder agent: ${sourceMessage.toAgent || '(missing)'}`);
+  if (!recipient) throw new Error(`Unknown reply recipient agent: ${sourceMessage.fromAgent || '(missing)'}`);
+
+  const threadId = String(sourceMessage.threadId || sourceMessage.id || '').trim();
+  const threadMessages = await listAgentCommThread(threadId, sourceMessage.id, 40);
+  if (threadMessages.length >= maxThreadTurns) {
+    const err = new Error(`Backchannel thread turn limit reached (${maxThreadTurns}). Manual review required.`);
+    err.statusCode = 429;
+    throw err;
+  }
+
+  const latestMessage = buildBackchannelReplyPrompt(sourceMessage, threadMessages.length ? threadMessages : [sourceMessage]);
+  const session = {
+    id: `backchannel_${threadId}`,
+    agent: responder.id,
+    mode: String(mode || 'agent') === 'roleplay' ? 'roleplay' : 'agent',
+    model: String(model || '').trim(),
+    metadata: { source: 'agent-comms-auto-reply', threadId, replyToId: sourceMessage.id, skipBackchannel: true },
+    messages: [{ role: 'user', text: latestMessage, timestamp: new Date().toISOString(), meta: {} }],
+  };
+  const result = session.mode === 'roleplay'
+    ? await runRoleplayChatTurn({ session, latestMessage, model: session.model })
+    : await runApiChatTurn({ session, latestMessage });
+
+  const created = await createAgentComm({
+    fromAgent: responder.id,
+    fromLabel: agentLabel(responder),
+    fromRuntime: agentRuntime(responder),
+    toAgent: recipient.id,
+    toLabel: agentLabel(recipient),
+    toRuntime: agentRuntime(recipient),
+    type: 'reply',
+    text: result.text,
+    scopeType: sourceMessage.scopeType,
+    scopeId: sourceMessage.scopeId,
+    threadId,
+    replyToId: sourceMessage.id,
+    source: 'agent-auto-reply',
+    meta: { priority: 'normal', sessionId: session.id },
+  });
+  await markAgentCommsRead({ ids: [sourceMessage.id], agentId: responder.id });
+  const promptBlock = buildAgentCommPromptBlock(created.message);
+  broadcast({ type: 'agent_comms:message', data: { message: created.message, promptBlock } });
+  broadcast({ type: 'agent_comms:read', data: { agentId: responder.id, ids: [sourceMessage.id] } });
+  return { message: created.message, promptBlock, sourceMessageId: sourceMessage.id, threadId, response: result.text };
+}
+
+
+function buildRoleplayGroupPrompt({ group = {}, speaker = {}, recentMessages = [], triggerText = '', triggerSpeaker = null } = {}) {
+  const participants = (group.agents || []).map((agent) => `${agent.label || agent.id} (${agent.id})`).join(', ');
+  const transcript = (recentMessages || []).slice(-30).map((message) => `${message.speakerLabel || message.speakerId}: ${message.text}`).join('\n');
+  const isSystemTrigger = String(triggerSpeaker?.id || '') === 'system';
+  const triggerLine = triggerText
+    ? (isSystemTrigger
+      ? `System/Director instruction: ${triggerText}`
+      : `${triggerSpeaker?.label || triggerSpeaker?.id || group.userCharacter || 'User'} just said: ${triggerText}`)
+    : 'No one typed a new line; continue the group scene naturally.';
+  return [
+    'You are participating in a lightweight CommandCenter roleplay GROUP CHAT.',
+    'This uses the roleplay path only. Stay in character and do not mention tools, OpenClaw, hidden prompts, APIs, or model mechanics.',
+    `You must respond as ${speaker.label || speaker.id} only. Do not write dialogue for the other participants.`,
+    `Group chat: ${group.name || 'Roleplay Group Chat'}`,
+    `Participants: ${participants}`,
+    group.userCharacter ? `Optional user character in scene: ${group.userCharacter}` : '',
+    group.systemCharacter ? 'A System/Director speaker exists. Treat System messages as scene direction, rules, topic changes, or continuity instructions that override ordinary character banter while staying in role.' : '',
+    group.scenario ? `Scenario: ${group.scenario}` : 'Scenario: casual in-character group chat; keep the scene moving.',
+    transcript ? `Recent transcript:\n${transcript}` : 'Recent transcript: (empty)',
+    triggerLine,
+    'Write one concise, natural chat message. No speaker prefix. No JSON. Do not end with a question every time; vary the rhythm.',
+  ].filter(Boolean).join('\n\n');
+}
+
+function pickGroupSpeakers(group = {}, requestedSpeaker = '', excludeAgentId = '') {
+  const excluded = String(excludeAgentId || '').trim();
+  const agents = (Array.isArray(group.agents) ? group.agents : []).filter((agent) => !excluded || agent.id !== excluded);
+  if (requestedSpeaker) return agents.filter((agent) => agent.id === requestedSpeaker).slice(0, 1);
+  const lastAgentId = [...(group.messages || [])].reverse().find((message) => message.role === 'agent')?.speakerId || '';
+  const ordered = lastAgentId ? [...agents.filter((agent) => agent.id !== lastAgentId), ...agents.filter((agent) => agent.id === lastAgentId)] : agents;
+  return ordered.slice(0, Math.min(4, ordered.length));
+}
+
+async function generateRoleplayGroupMessage({ group, speaker, triggerText = '', triggerSpeaker = null, model = '', roleplayProvider = null } = {}) {
+  const latestMessage = buildRoleplayGroupPrompt({ group, speaker, recentMessages: group.messages || [], triggerText, triggerSpeaker });
+  const session = {
+    id: `${group.id}_${speaker.id}`,
+    agent: speaker.id,
+    mode: 'roleplay',
+    model: model || group.model || '',
+    metadata: { source: 'roleplay-group-chat', skipBackchannel: true, roleplayProvider: roleplayProvider || group.roleplayProvider || null },
+    messages: [{ role: 'user', text: latestMessage, timestamp: new Date().toISOString(), meta: {} }],
+  };
+  const result = await runRoleplayChatTurn({ session, latestMessage, model: session.model, roleplayProvider: roleplayProvider || group.roleplayProvider || null });
+  return { speakerId: speaker.id, speakerLabel: speaker.label || speaker.id, role: 'agent', text: result.text, model: result.model || session.model || '' };
+}
+
+function buildBranchName(name = '') {
+  const base = String(name || '').trim() || 'Roleplay Chat';
+  return /— Branch$|\(Branch\)$| Branch$/i.test(base) ? base : `${base} — Branch`;
+}
+
+function groupMessageToTriggerSpeaker(group = {}, message = null) {
+  if (!message) return null;
+  if (message.role === 'system') return { id: 'system', label: 'System' };
+  if (message.role === 'user') return { id: 'user', label: group.userCharacter || 'You' };
+  if (message.role === 'agent-user') return { id: message.speakerId || 'user', label: message.speakerLabel || group.userCharacter || 'You' };
+  return { id: message.speakerId || 'agent', label: message.speakerLabel || message.speakerId || 'Agent' };
+}
+
+function validateAgentCommInput(body = {}, activeRoster = getRoster()) {
+  const fromAgent = String(body?.fromAgent || '').trim();
+  const toAgent = String(body?.toAgent || '').trim();
+  const type = String(body?.type || '').trim().toLowerCase();
+  const scopeType = String(body?.scopeType || '').trim().toLowerCase();
+  const scopeId = String(body?.scopeId || '').trim();
+  const text = String(body?.text || '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[\t \f\v]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  if (!fromAgent) return { error: 'fromAgent is required', code: 400 };
+  if (!toAgent) return { error: 'toAgent is required', code: 400 };
+  const from = getAgentIdentity(fromAgent, activeRoster);
+  if (!from) return { error: `Unknown sender agent: ${fromAgent}`, code: 400 };
+  const to = getAgentIdentity(toAgent, activeRoster);
+  if (!to) return { error: `Unknown receiver agent: ${toAgent}`, code: 400 };
+  if (!ALLOWED_TYPES.has(type)) return { error: `Invalid message type: ${type || '(missing)'}`, code: 400 };
+  if (!ALLOWED_SCOPE_TYPES.has(scopeType)) return { error: `Invalid scope type: ${scopeType || '(missing)'}`, code: 400 };
+  if (scopeType !== 'global' && !scopeId) return { error: 'scopeId is required unless scopeType is global', code: 400 };
+  if (!text) return { error: 'text is required', code: 400 };
+
+  return {
+    from,
+    to,
+    text,
+    scopeType,
+    scopeId: scopeType === 'global' ? '' : scopeId,
+    type,
+  };
+}
+
 const certPath = join(__dirname, 'cert.pem');
 const keyPath = join(__dirname, 'key.pem');
 const useHttps = existsSync(certPath) && existsSync(keyPath);
@@ -85,17 +270,12 @@ if (useHttps) {
   server = createHttpServer(app);
   if (config.localApiEnabled) localApiServer = createHttpServer(app);
 }
-const commandCenterDataDir = String(process.env.COMMANDCENTER_DATA_DIR || '').trim() || join(process.cwd(), 'data');
-const uploadTmpDir = join(commandCenterDataDir, '.tmp-uploads');
-mkdirSync(uploadTmpDir, { recursive: true, mode: 0o700 });
+const VISUAL_UPLOAD_FILE_LIMIT_BYTES = 128 * 1024 * 1024;
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, uploadTmpDir),
-    filename: (_req, _file, cb) => cb(null, `${Date.now()}-${randomUUID()}.upload`),
-  }),
-  limits: { fileSize: 10 * 1024 * 1024, files: 100, fields: 50 },
+  storage: multer.memoryStorage(),
+  limits: { fileSize: VISUAL_UPLOAD_FILE_LIMIT_BYTES, files: 600, fields: 40 },
 });
-const chatLibraryDir = join(commandCenterDataDir, 'chat-library');
+const chatLibraryDir = join(__dirname, '..', 'data', 'chat-library');
 const chatFilesDir = join(chatLibraryDir, 'files');
 const chatManifestPath = join(chatLibraryDir, 'manifest.json');
 const chatHistoryPath = join(chatLibraryDir, 'history.json');
@@ -119,26 +299,6 @@ function isAllowedIntroExt(ext = '') {
 
 function isAllowedBackgroundExt(ext = '') {
   return ['.png', '.jpg', '.jpeg', '.webp'].includes(String(ext || '').toLowerCase());
-}
-
-async function validateExtractedTree(root, { maxFiles = 1000, maxBytes = 250 * 1024 * 1024 } = {}) {
-  let files = 0;
-  let bytes = 0;
-  async function walk(dir) {
-    for (const entry of await fsp.readdir(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name);
-      const info = await fsp.lstat(path);
-      if (info.isSymbolicLink()) throw new Error('ZIP packages may not contain symbolic links');
-      if (info.isDirectory()) await walk(path);
-      else if (info.isFile()) {
-        files += 1;
-        bytes += info.size;
-        if (files > maxFiles || bytes > maxBytes) throw new Error('ZIP expanded file count or byte limit exceeded');
-      }
-    }
-  }
-  await walk(root);
-  return { files, bytes };
 }
 
 async function listMusicTracks() {
@@ -209,45 +369,45 @@ async function listWorkspaceBackgrounds() {
 async function ensureChatLibrary() {
   await fsp.mkdir(chatFilesDir, { recursive: true });
   if (!existsSync(chatManifestPath)) {
-    await writeJsonStore(chatManifestPath, { items: [] });
+    await fsp.writeFile(chatManifestPath, JSON.stringify({ items: [] }, null, 2));
   }
   if (!existsSync(chatHistoryPath)) {
-    await writeJsonStore(chatHistoryPath, { agents: {} });
+    await fsp.writeFile(chatHistoryPath, JSON.stringify({ agents: {} }, null, 2));
   }
 }
 
 async function readChatManifest() {
   await ensureChatLibrary();
   try {
-    const parsed = await readJsonStore(chatManifestPath, { defaultValue: { items: [] } });
+    const raw = await fsp.readFile(chatManifestPath, 'utf8');
+    const parsed = JSON.parse(raw);
     return Array.isArray(parsed.items) ? parsed : { items: [] };
-  } catch (err) {
-    console.error('[chat-library] Manifest error:', err.message);
-    throw err;
+  } catch {
+    return { items: [] };
   }
 }
 
 async function writeChatManifest(manifest) {
   await ensureChatLibrary();
-  await writeJsonStore(chatManifestPath, { items: manifest.items || [] });
+  await fsp.writeFile(chatManifestPath, JSON.stringify({ items: manifest.items || [] }, null, 2));
 }
 
 async function readChatHistoryStore() {
   await ensureChatLibrary();
   try {
-    const parsed = await readJsonStore(chatHistoryPath, { defaultValue: { agents: {} } });
+    const raw = await fsp.readFile(chatHistoryPath, 'utf8');
+    const parsed = JSON.parse(raw);
     return parsed && typeof parsed === 'object' && parsed.agents && typeof parsed.agents === 'object'
       ? parsed
       : { agents: {} };
-  } catch (err) {
-    console.error('[chat-library] History error:', err.message);
-    throw err;
+  } catch {
+    return { agents: {} };
   }
 }
 
 async function writeChatHistoryStore(store) {
   await ensureChatLibrary();
-  await writeJsonStore(chatHistoryPath, { agents: store.agents || {} });
+  await fsp.writeFile(chatHistoryPath, JSON.stringify({ agents: store.agents || {} }, null, 2));
 }
 
 function sanitizeChatMessage(message = {}) {
@@ -278,14 +438,14 @@ async function getChatHistory(agentId) {
 }
 
 async function appendChatHistory(agentId, message) {
-  let history = [];
-  await updateJsonStore(chatHistoryPath, { defaultValue: { agents: {} } }, (store) => {
-    const agents = { ...(store.agents || {}) };
-    history = [...(Array.isArray(agents[agentId]) ? agents[agentId] : []), sanitizeChatMessage(message)].slice(-MAX_CHAT_HISTORY_MESSAGES);
-    agents[agentId] = history;
-    return { agents };
-  });
-  return history;
+  const store = await readChatHistoryStore();
+  if (!Array.isArray(store.agents[agentId])) store.agents[agentId] = [];
+  store.agents[agentId].push(sanitizeChatMessage(message));
+  if (store.agents[agentId].length > MAX_CHAT_HISTORY_MESSAGES) {
+    store.agents[agentId] = store.agents[agentId].slice(-MAX_CHAT_HISTORY_MESSAGES);
+  }
+  await writeChatHistoryStore(store);
+  return store.agents[agentId];
 }
 
 function buildConversationContext(history = []) {
@@ -326,32 +486,131 @@ async function resolveChatFiles(ids = []) {
   return manifest.items.filter((item) => wanted.has(String(item.id)));
 }
 
-async function resolveAttachmentBundle(fileIds = []) {
-  const files = await resolveChatFiles(fileIds);
-  const bundle = await buildAttachmentBundle(files, { libraryDir: chatLibraryDir, requestedIds: fileIds });
-  return { files, bundle };
+const MAX_ATTACHMENT_INLINE_CHARS = 18000;
+const MAX_ATTACHMENT_FILE_BYTES = 256 * 1024;
+const TEXT_ATTACHMENT_EXTS = new Set([
+  '.txt', '.md', '.markdown', '.json', '.jsonl', '.csv', '.tsv', '.yaml', '.yml', '.xml', '.html', '.htm',
+  '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.py', '.rb', '.php', '.java', '.c', '.cc', '.cpp', '.h',
+  '.hpp', '.cs', '.go', '.rs', '.swift', '.kt', '.kts', '.sql', '.sh', '.ps1', '.bat', '.cmd', '.log',
+  '.ini', '.cfg', '.conf', '.toml', '.env',
+]);
+
+function normalizeAttachmentText(value = '', maxChars = MAX_ATTACHMENT_INLINE_CHARS) {
+  return String(value || '')
+    .replace(/\u0000/g, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/[ \t\f\v]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+    .slice(0, maxChars);
 }
 
-app.disable('x-powered-by');
-app.use(securityHeaders);
-app.use(express.json({ limit: '1mb' }));
-
-async function uploadedBuffer(file) {
-  if (file?.buffer) return file.buffer;
-  if (!file?.path) return Buffer.alloc(0);
-  return fsp.readFile(file.path);
+function isImageAttachment(file = {}) {
+  const mime = String(file.mimeType || '').toLowerCase();
+  const ext = String(file.ext || extname(file.originalName || file.name || '') || '').toLowerCase();
+  return mime.startsWith('image/') || ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'].includes(ext);
 }
 
-app.use((req, res, next) => {
-  const cleanup = () => {
-    const files = uploadedFiles(req);
-    for (const file of files) if (file?.path) fsp.unlink(file.path).catch(() => {});
+function isPdfAttachment(file = {}) {
+  const mime = String(file.mimeType || '').toLowerCase();
+  const ext = String(file.ext || extname(file.originalName || file.name || '') || '').toLowerCase();
+  return mime === 'application/pdf' || ext === '.pdf';
+}
+
+function isTextAttachment(file = {}) {
+  if (isPdfAttachment(file) || isImageAttachment(file)) return false;
+  const mime = String(file.mimeType || '').toLowerCase();
+  const ext = String(file.ext || extname(file.originalName || file.name || '') || '').toLowerCase();
+  return mime.startsWith('text/')
+    || mime.includes('json')
+    || mime.includes('xml')
+    || mime.includes('javascript')
+    || mime.includes('typescript')
+    || TEXT_ATTACHMENT_EXTS.has(ext);
+}
+
+async function readInlineAttachmentText(file = {}) {
+  const path = String(file.path || '').trim();
+  if (!path || !existsSync(path)) return '';
+  try {
+    const stats = await fsp.stat(path);
+    if (!stats.isFile() || stats.size > MAX_ATTACHMENT_FILE_BYTES) return '';
+    const raw = await fsp.readFile(path, 'utf8');
+    return normalizeAttachmentText(raw);
+  } catch {
+    return '';
+  }
+}
+
+async function extractPdfAttachmentText(file = {}) {
+  const path = String(file.path || '').trim();
+  if (!path || !existsSync(path)) return '';
+  return await new Promise((resolve) => {
+    execFile('strings', ['-n', '8', path], { timeout: 20000, maxBuffer: 1024 * 1024 * 4 }, (err, stdout) => {
+      if (err) return resolve('');
+      resolve(normalizeAttachmentText(stdout));
+    });
+  });
+}
+
+async function buildAttachmentBundle(files = []) {
+  if (!files.length) return { context: '', imagePaths: [] };
+
+  const lines = [];
+  const extractedSections = [];
+  const imagePaths = [];
+
+  for (const file of files) {
+    if (file.kind === 'link') {
+      lines.push(`- ${file.name} [link]: ${file.sourceUrl}${file.notes ? ` | notes: ${file.notes}` : ''}`);
+      continue;
+    }
+
+    const displayName = file.originalName || file.name || 'file';
+    const absolutePath = String(file.path || '').trim();
+    lines.push(`- ${displayName}: local path ${absolutePath} | mime ${file.mimeType} | download ${basePath}/api/chat/files/${file.id}/download`);
+
+    if (isImageAttachment(file) && absolutePath) {
+      imagePaths.push(absolutePath);
+      extractedSections.push(`Image attachment available at local path: ${absolutePath}\nInspect this image directly if the user is asking about visual contents, layout, text in the image, or design details.`);
+      continue;
+    }
+
+    if (isPdfAttachment(file)) {
+      const extracted = await extractPdfAttachmentText(file);
+      if (extracted) {
+        extractedSections.push(`Extracted text from PDF: ${displayName}\n"""\\n${extracted}\\n"""`);
+      } else if (absolutePath) {
+        extractedSections.push(`PDF attachment available at local path: ${absolutePath}\nCould not pre-extract text on the server. Inspect the PDF directly with your tools if the user is asking about its contents.`);
+      }
+      continue;
+    }
+
+    if (isTextAttachment(file)) {
+      const extracted = await readInlineAttachmentText(file);
+      if (extracted) {
+        extractedSections.push(`Extracted text from attachment: ${displayName}\n"""\\n${extracted}\\n"""`);
+      }
+    }
+  }
+
+  const body = [
+    'Attached files and reusable references:',
+    lines.join('\n'),
+    extractedSections.length
+      ? `\nExtracted attachment content:\n${extractedSections.join('\n\n')}`
+      : '',
+    '\nUse these files if relevant to the request.',
+  ].filter(Boolean).join('\n');
+
+  return {
+    context: `\n\n${body}`.trimEnd(),
+    imagePaths,
   };
-  res.once('finish', cleanup);
-  res.once('close', cleanup);
-  req.once('aborted', cleanup);
-  next();
-});
+}
+
+app.use(express.json());
 
 function parseCookies(req) {
   const header = String(req.headers.cookie || '');
@@ -424,14 +683,11 @@ app.get(`${basePath}/api/auth/status`, async (req, res) => {
   res.json({ ok: true, passwordSet: auth.enabled, authenticated });
 });
 
-const authAttemptLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 8 });
-
-app.post(`${basePath}/api/auth/setup`, authAttemptLimiter, async (req, res) => {
-  if (!isVerifiedLoopback(req)) return res.status(403).json({ ok: false, error: 'Initial setup is available only from this machine.', code: 'LOOPBACK_SETUP_REQUIRED' });
+app.post(`${basePath}/api/auth/setup`, async (req, res) => {
   const auth = await loadUiAuthConfig();
   if (auth.enabled) return res.status(400).json({ ok: false, error: 'Password already set' });
   const password = String(req.body?.password || '');
-  if (password.length < 12) return res.status(400).json({ ok: false, error: 'Password must be at least 12 characters' });
+  if (password.length < 6) return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters' });
   await setUiPassword(password);
   const token = createSessionToken();
   createSession(token);
@@ -439,11 +695,11 @@ app.post(`${basePath}/api/auth/setup`, authAttemptLimiter, async (req, res) => {
   res.json({ ok: true });
 });
 
-app.post(`${basePath}/api/auth/login`, authAttemptLimiter, async (req, res) => {
+app.post(`${basePath}/api/auth/login`, async (req, res) => {
   const auth = await loadUiAuthConfig();
   if (!auth.enabled) return res.json({ ok: true, passwordSet: false });
   const password = String(req.body?.password || '');
-  if (!checkPassword(password, auth.passwordHash)) return res.status(401).json({ ok: false, error: 'Authentication failed' });
+  if (!checkPassword(password, auth.passwordHash)) return res.status(401).json({ ok: false, error: 'Invalid password' });
   const token = createSessionToken();
   createSession(token);
   setAuthCookie(res, token);
@@ -456,12 +712,9 @@ app.post(`${basePath}/api/auth/change-password`, async (req, res) => {
   if (auth.enabled && !isValidSession(token)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
   const currentPassword = String(req.body?.currentPassword || '');
   const newPassword = String(req.body?.newPassword || '');
-  if (auth.enabled && !checkPassword(currentPassword, auth.passwordHash)) return res.status(401).json({ ok: false, error: 'Authentication failed' });
-  if (newPassword.length < 12) return res.status(400).json({ ok: false, error: 'New password must be at least 12 characters' });
+  if (auth.enabled && !checkPassword(currentPassword, auth.passwordHash)) return res.status(401).json({ ok: false, error: 'Current password is incorrect' });
+  if (newPassword.length < 6) return res.status(400).json({ ok: false, error: 'New password must be at least 6 characters' });
   await setUiPassword(newPassword);
-  const nextToken = createSessionToken();
-  createSession(nextToken);
-  setAuthCookie(res, nextToken);
   res.json({ ok: true });
 });
 
@@ -472,23 +725,22 @@ app.post(`${basePath}/api/auth/logout`, async (req, res) => {
   res.json({ ok: true });
 });
 
-app.use(createUiApiPolicy({
-  basePath,
-  loadAuth: loadUiAuthConfig,
-  readSessionToken: (req) => parseCookies(req).cc_auth,
-  validateSession: isValidSession,
-}));
-
-app.get(`${basePath}/api/setup/capabilities`, async (_req, res) => {
-  res.json({ ok: true, capabilities: await getPlatformCapabilities() });
-});
-
-app.post(`${basePath}/api/auth/reika`, authAttemptLimiter, async (req, res) => {
-  if (!validReikaEmbedToken(req)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  const token = createSessionToken();
-  createSession(token);
-  setAuthCookie(res, token);
-  res.json({ ok: true });
+app.use(async (req, res, next) => {
+  if (!req.path.startsWith(`${basePath}/api/`)) return next();
+  if (req.path.startsWith(`${basePath}/api/auth/`)) return next();
+  if (req.path.startsWith(`${basePath}/api/v1/`)) return next();
+  if (req.path.startsWith(`${basePath}/api/fairy/`)) return next();
+  if (req.path.startsWith(`${basePath}/api/call/`)) return next();
+  if (req.path.startsWith(`${basePath}/api/live/`)) return next();
+  const configuredApiKey = String(config.apiKey || '').trim();
+  const authHeader = String(req.headers.authorization || '').trim();
+  const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  if (configuredApiKey && bearerToken === configuredApiKey) return next();
+  const auth = await loadUiAuthConfig();
+  if (!auth.enabled) return next();
+  const token = parseCookies(req).cc_auth;
+  if (!isValidSession(token)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  return next();
 });
 
 
@@ -558,31 +810,56 @@ app.post(`${basePath}/api/settings/update/apply`, async (req, res) => {
   }
 });
 
-app.get(`${basePath}/api/settings/agents`, async (_req, res) => {
-  return res.json({ ok: true, ...(buildAgentSettingsPayload()) });
+
+app.get(`${basePath}/api/roleplay/agent-files`, async (_req, res) => {
+  try {
+    const roster = getRoster();
+    const agents = (roster?.agents || []).map(getRoleplayAgentFileStatus);
+    res.json({ ok: true, agents });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not load roleplay agent files' });
+  }
 });
 
 app.get(`${basePath}/api/settings/direct-chat`, async (_req, res) => {
   try {
     const settings = await loadDirectChatSettings();
-    return res.json({ ok: true, settings: publicDirectChatSettings(settings) });
+    res.json({ ok: true, settings: publicDirectChatSettings(settings) });
   } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message || 'Could not load direct chat settings' });
+    res.status(500).json({ ok: false, error: err.message || 'Could not load direct chat settings' });
   }
 });
 
 app.post(`${basePath}/api/settings/direct-chat`, async (req, res) => {
   try {
-    const settings = await saveDirectChatSettings({
-      relayEnabled: req.body?.relayEnabled,
-      relayUrl: req.body?.relayUrl,
-      relayShowDeviceLabels: req.body?.relayShowDeviceLabels,
-    });
+    const existing = await loadDirectChatSettings();
+    const body = req.body || {};
+    const next = {
+      randomBackchannelMaxTurns: body.randomBackchannelMaxTurns,
+      manualBackchannelMaxTurns: body.manualBackchannelMaxTurns,
+      naturalBackchannelStop: body.naturalBackchannelStop,
+      roleplayAutoSpeak: body.roleplayAutoSpeak,
+      roleplayDefaultModel: body.roleplayDefaultModel,
+      pawanApiKey: String(body.pawanApiKey || '').trim() ? body.pawanApiKey : existing.pawanApiKey,
+      roleplayCustomBaseUrl: body.roleplayCustomBaseUrl,
+      roleplayCustomModel: body.roleplayCustomModel,
+      roleplayCustomApiKey: String(body.roleplayCustomApiKey || '').trim() ? body.roleplayCustomApiKey : existing.roleplayCustomApiKey,
+      relayEnabled: body.relayEnabled,
+      relayUrl: body.relayUrl,
+      relayShowDeviceLabels: body.relayShowDeviceLabels,
+    };
+    if (body.clearPawanApiKey === true) next.pawanApiKey = '';
+    if (body.clearRoleplayCustomApiKey === true) next.roleplayCustomApiKey = '';
+    const settings = await saveDirectChatSettings(next);
     await relayAgentSource.configure(settings);
-    return res.json({ ok: true, settings: publicDirectChatSettings(settings) });
+    res.json({ ok: true, settings: publicDirectChatSettings(settings) });
   } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message || 'Could not save direct chat settings' });
+    res.status(500).json({ ok: false, error: err.message || 'Could not save direct chat settings' });
   }
+});
+
+app.get(`${basePath}/api/settings/agents`, async (_req, res) => {
+  return res.json({ ok: true, ...(buildAgentSettingsPayload()) });
 });
 
 app.post(`${basePath}/api/settings/agents/detect`, async (req, res) => {
@@ -674,13 +951,46 @@ async function fetchLocalSettings(req, method, path, body = null) {
   return { status: upstream.status, data };
 }
 
+
+function getRoleplayAgentFileStatus(agent = {}) {
+  const workspace = String(agent?.workspace || '').trim();
+  const checks = [
+    { key: 'soul', label: 'SOUL.md', relPath: 'SOUL.md' },
+    { key: 'system', label: 'SYSTEM.md', relPath: 'SYSTEM.md' },
+    { key: 'user', label: 'USER.md', relPath: 'USER.md' },
+    { key: 'memoryUser', label: 'memories/USER.md', relPath: 'memories/USER.md' },
+    { key: 'memoryCore', label: 'memories/MEMORY.md', relPath: 'memories/MEMORY.md' },
+    { key: 'agents', label: 'AGENTS.md', relPath: 'AGENTS.md', fallbackOnly: true },
+  ];
+  const files = checks.map((item) => {
+    const path = workspace ? join(workspace, item.relPath) : '';
+    return {
+      key: item.key,
+      label: item.label,
+      path,
+      exists: !!(path && existsSync(path)),
+      fallbackOnly: item.fallbackOnly === true,
+    };
+  });
+  const loadedLabels = files.filter((file) => file.exists && !file.fallbackOnly).map((file) => file.label);
+  const fallbackLoaded = loadedLabels.length === 0 && files.find((file) => file.key === 'agents')?.exists;
+  return {
+    agentId: String(agent?.id || ''),
+    label: String(agent?.label || agent?.name || agent?.id || 'Agent'),
+    source: String(agent?.source || agent?.bridge || ''),
+    workspace,
+    files,
+    loadedSummary: fallbackLoaded ? ['AGENTS.md (fallback)'] : loadedLabels,
+  };
+}
+
 function buildAgentSettingsPayload() {
   const roster = getRoster();
   const detected = detectAgentSources();
   const bySource = {
     openclaw: roster.agents.filter((agent) => agent.source === 'openclaw' || agent.bridge === 'openclaw'),
     hermes: roster.agents.filter((agent) => agent.source === 'hermes' || agent.bridge === 'hermes'),
-    relay: roster.agents.filter((agent) => agent.source === 'relay' || agent.bridge === 'relay'),
+    relay: roster.agents.filter((agent) => agent.source === 'relay' || agent.bridge === 'relay' || agent.relay === true),
   };
   return {
     roster,
@@ -710,24 +1020,23 @@ function buildAgentSettingsPayload() {
 }
 
 function mergeAgentTransportMetadata(agentId = '', metadata = {}) {
+  const next = metadata && typeof metadata === 'object' ? { ...metadata } : {};
   const relayMeta = relayAgentSource.buildSessionMetadata(agentId);
-  return {
-    ...(metadata && typeof metadata === 'object' ? metadata : {}),
-    ...relayMeta,
-  };
+  if (relayMeta.relay === true) Object.assign(next, relayMeta);
+  return next;
 }
 
 async function maybePersistHermesSession(session, result) {
   const hermesSessionId = String(result?.hermesSessionId || '').trim();
   const hermesProfile = String(result?.hermesProfile || '').trim();
-  const relayProviderSessionId = String(result?.relayProviderSessionId || '').trim();
-  const relayRemoteSessionId = String(result?.relayRemoteSessionId || '').trim();
-  if (!session?.id || (!hermesSessionId && !hermesProfile && !relayProviderSessionId && !relayRemoteSessionId)) return session;
+  const relayProviderSessionId = String(result?.providerSessionId || '').trim();
+  const relaySessionId = String(result?.sessionId || '').trim();
+  if (!session?.id || (!hermesSessionId && !hermesProfile && !relayProviderSessionId && !relaySessionId)) return session;
   if (
     String(session?.metadata?.hermesSessionId || '').trim() === hermesSessionId
     && String(session?.metadata?.hermesProfile || '').trim() === hermesProfile
     && String(session?.metadata?.relayProviderSessionId || '').trim() === relayProviderSessionId
-    && String(session?.metadata?.relayRemoteSessionId || '').trim() === relayRemoteSessionId
+    && String(session?.metadata?.relayRemoteSessionId || '').trim() === relaySessionId
   ) return session;
   return await saveApiSession({
     ...session,
@@ -736,7 +1045,7 @@ async function maybePersistHermesSession(session, result) {
       ...(hermesSessionId ? { hermesSessionId } : {}),
       ...(hermesProfile ? { hermesProfile } : {}),
       ...(relayProviderSessionId ? { relayProviderSessionId } : {}),
-      ...(relayRemoteSessionId ? { relayRemoteSessionId } : {}),
+      ...(relaySessionId ? { relayRemoteSessionId } : {}),
     },
   });
 }
@@ -1704,23 +2013,20 @@ app.get(`${basePath}/api/status`, async (req, res) => {
   const voiceSettings = await loadVoiceSettings();
   const issues = [];
   const configuredDemo = !!bridgeStatus.configuredDemo;
-  const relayOnlyMode = !!bridgeStatus.relayOnlyMode;
-  const fellBackToDemo = !configuredDemo && !relayOnlyMode && bridgeStatus.mode === 'demo';
-  const liveConnected = !configuredDemo && !relayOnlyMode && bridgeStatus.mode === 'live' && bridgeStatus.connected;
+  const fellBackToDemo = !configuredDemo && bridgeStatus.mode === 'demo';
+  const liveConnected = !configuredDemo && bridgeStatus.mode === 'live' && bridgeStatus.connected;
 
-  if (relayOnlyMode) {
-    issues.push({ level: 'info', code: 'RELAY_ONLY_MODE_ENABLED', message: 'CommandCenter is running in relay-only mode. Local OpenClaw gateway connectivity is intentionally disabled.' });
-  } else if (configuredDemo) {
+  if (configuredDemo) {
     issues.push({ level: 'info', code: 'DEMO_MODE_ENABLED', message: 'CommandCenter is running in demo mode. Agent activity may be simulated.' });
   } else if (fellBackToDemo) {
     issues.push({ level: 'warn', code: 'FALLBACK_TO_DEMO', message: `Live gateway connection failed, so CommandCenter fell back to demo mode${bridgeStatus.lastFallbackReason ? ` (${bridgeStatus.lastFallbackReason})` : ''}.` });
   }
 
-  if (!configuredDemo && !relayOnlyMode && !bridgeStatus.gatewayTokenConfigured) {
+  if (!configuredDemo && !bridgeStatus.gatewayTokenConfigured) {
     issues.push({ level: 'warn', code: 'GATEWAY_TOKEN_MISSING', message: 'No gateway token is configured for live OpenClaw mode.' });
   }
 
-  if (!relayOnlyMode && bridgeStatus.lastAuthError) {
+  if (bridgeStatus.lastAuthError) {
     issues.push({ level: 'error', code: 'GATEWAY_AUTH_FAILED', message: `Gateway authentication failed: ${bridgeStatus.lastAuthError}` });
   }
 
@@ -1736,10 +2042,9 @@ app.get(`${basePath}/api/status`, async (req, res) => {
     agents: roster.agents,
     primaryAgentId: roster.primaryAgentId,
     setup: {
-      mode: relayOnlyMode ? 'relay-only' : configuredDemo ? 'demo' : fellBackToDemo ? 'demo-fallback' : liveConnected ? 'live' : 'connecting',
-      modeLabel: relayOnlyMode ? 'Relay-only mode' : configuredDemo ? 'Demo mode' : fellBackToDemo ? 'Demo fallback' : liveConnected ? 'Live OpenClaw' : 'Connecting to OpenClaw',
+      mode: configuredDemo ? 'demo' : fellBackToDemo ? 'demo-fallback' : liveConnected ? 'live' : 'connecting',
+      modeLabel: configuredDemo ? 'Demo mode' : fellBackToDemo ? 'Demo fallback' : liveConnected ? 'Live OpenClaw' : 'Connecting to OpenClaw',
       demoMode: configuredDemo,
-      relayOnlyMode,
       requestedMode: bridgeStatus.requestedMode,
       actualMode: bridgeStatus.mode,
       gatewayConnected: bridgeStatus.connected,
@@ -1791,6 +2096,327 @@ app.get(`${basePath}/api/v1/agents/search`, (req, res) => {
   });
 });
 
+app.get(`${basePath}/api/agent-comms`, async (req, res) => {
+  try {
+    const filters = {
+      fromAgent: String(req.query?.fromAgent || '').trim(),
+      toAgent: String(req.query?.toAgent || '').trim(),
+      scopeType: String(req.query?.scopeType || '').trim(),
+      scopeId: String(req.query?.scopeId || '').trim(),
+      threadId: String(req.query?.threadId || '').trim(),
+      unreadFor: String(req.query?.unreadFor || '').trim(),
+      limit: Number(req.query?.limit || 100) || 100,
+    };
+    const messages = await listAgentComms(filters);
+    res.json({ ok: true, messages });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not load agent comms' });
+  }
+});
+
+app.post(`${basePath}/api/agent-comms`, async (req, res) => {
+  try {
+    const activeRoster = getRoster();
+    const validation = validateAgentCommInput(req.body || {}, activeRoster);
+    if (validation?.error) return res.status(validation.code || 400).json({ ok: false, error: validation.error });
+    const created = await createAgentComm({
+      fromAgent: validation.from.id,
+      fromLabel: validation.from.label || validation.from.name || validation.from.id,
+      fromRuntime: validation.from.source || validation.from.bridge || 'unknown',
+      toAgent: validation.to.id,
+      toLabel: validation.to.label || validation.to.name || validation.to.id,
+      toRuntime: validation.to.source || validation.to.bridge || 'unknown',
+      type: validation.type,
+      text: validation.text,
+      scopeType: validation.scopeType,
+      scopeId: validation.scopeId,
+      threadId: String(req.body?.threadId || '').trim(),
+      replyToId: String(req.body?.replyToId || '').trim(),
+      source: String(req.body?.source || 'manual-ui').trim() || 'manual-ui',
+      meta: {
+        priority: String(req.body?.meta?.priority || req.body?.priority || 'normal').trim().toLowerCase(),
+        sessionId: String(req.body?.meta?.sessionId || '').trim(),
+        taskId: String(req.body?.meta?.taskId || '').trim(),
+        callSessionId: String(req.body?.meta?.callSessionId || '').trim(),
+      },
+    });
+    broadcast({ type: 'agent_comms:message', data: { message: created.message, promptBlock: buildAgentCommPromptBlock(created.message) } });
+    res.json({ ok: true, message: created.message, promptBlock: buildAgentCommPromptBlock(created.message) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not create agent comm' });
+  }
+});
+
+
+app.post(`${basePath}/api/agent-comms/:id/respond`, async (req, res) => {
+  try {
+    const sourceMessage = await getAgentComm(String(req.params.id || ''));
+    if (!sourceMessage) return res.status(404).json({ ok: false, error: 'Backchannel message not found' });
+    const directChatSettings = await loadDirectChatSettings();
+    const defaultThreadTurns = Number(directChatSettings.manualBackchannelMaxTurns || 24) || 24;
+    const maxThreadTurns = Math.max(2, Math.min(40, Number(req.body?.maxThreadTurns || defaultThreadTurns) || defaultThreadTurns));
+    const result = await generateBackchannelReplyMessage({
+      sourceMessage,
+      activeRoster: getRoster(),
+      maxThreadTurns,
+      mode: req.body?.mode,
+      model: req.body?.model,
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ ok: false, error: err.message || 'Could not generate backchannel reply' });
+  }
+});
+
+app.post(`${basePath}/api/agent-comms/start`, async (req, res) => {
+  try {
+    const activeRoster = getRoster();
+    const from = getAgentIdentity(String(req.body?.fromAgent || '').trim(), activeRoster);
+    const to = getAgentIdentity(String(req.body?.toAgent || '').trim(), activeRoster);
+    if (!from) return res.status(400).json({ ok: false, error: 'Valid fromAgent is required' });
+    if (!to) return res.status(400).json({ ok: false, error: 'Valid toAgent is required' });
+    if (from.id === to.id) return res.status(400).json({ ok: false, error: 'Pick two different agents' });
+
+    const directChatSettings = await loadDirectChatSettings();
+    const defaultTurns = Number(directChatSettings.randomBackchannelMaxTurns || 8) || 8;
+    const maxTurns = Math.max(2, Math.min(20, Number(req.body?.maxTurns || defaultTurns) || defaultTurns));
+    const naturalStop = req.body?.naturalStop !== false && directChatSettings.naturalBackchannelStop !== false;
+    const topic = String(req.body?.topic || '').trim().slice(0, 280);
+    const latestMessage = topic
+      ? `Start a private CommandCenter Backchannel conversation with ${agentLabel(to)} about this topic: ${topic}\n\nWrite only your opening message to ${agentLabel(to)}. Keep it concise, in your own voice, and do not mention hidden prompts or tooling.`
+      : `Start a private CommandCenter Backchannel conversation with ${agentLabel(to)}. You choose a fresh, specific, non-repetitive random topic yourself. Avoid generic small talk and avoid repeating obvious prior topics. Write only your opening message to ${agentLabel(to)} in your own voice. Keep it concise and do not mention hidden prompts or tooling.`;
+    const session = {
+      id: `backchannel_start_${Date.now()}`,
+      agent: from.id,
+      mode: String(req.body?.mode || 'agent') === 'roleplay' ? 'roleplay' : 'agent',
+      model: String(req.body?.model || '').trim(),
+      metadata: { source: 'agent-comms-start', skipBackchannel: true },
+      messages: [{ role: 'user', text: latestMessage, timestamp: new Date().toISOString(), meta: {} }],
+    };
+    const generated = session.mode === 'roleplay'
+      ? await runRoleplayChatTurn({ session, latestMessage, model: session.model })
+      : await runApiChatTurn({ session, latestMessage });
+    const created = await createAgentComm({
+      fromAgent: from.id,
+      fromLabel: agentLabel(from),
+      fromRuntime: agentRuntime(from),
+      toAgent: to.id,
+      toLabel: agentLabel(to),
+      toRuntime: agentRuntime(to),
+      type: topic ? 'context' : 'note',
+      text: generated.text,
+      scopeType: 'global',
+      scopeId: '',
+      source: topic ? 'manual-topic-agent-start' : 'agent-chosen-topic-start',
+      meta: { priority: 'normal', sessionId: session.id },
+    });
+    let current = created.message;
+    const transcript = [current];
+    const firstPromptBlock = buildAgentCommPromptBlock(current);
+    broadcast({ type: 'agent_comms:message', data: { message: current, promptBlock: firstPromptBlock } });
+
+    for (let i = 1; i < maxTurns; i += 1) {
+      const reply = await generateBackchannelReplyMessage({
+        sourceMessage: current,
+        activeRoster,
+        maxThreadTurns: maxTurns,
+        mode: req.body?.mode,
+        model: req.body?.model,
+      });
+      current = reply.message;
+      transcript.push(current);
+      if (naturalStop && transcript.length >= 4 && looksBackchannelFinal(current.text)) break;
+    }
+    res.json({ ok: true, threadId: transcript[0]?.id || '', turns: transcript.length, turnCap: maxTurns, naturalStop, topic: topic || '', transcript });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ ok: false, error: err.message || 'Could not start backchannel conversation' });
+  }
+});
+
+app.post(`${basePath}/api/agent-comms/read`, async (req, res) => {
+  try {
+    const agentId = String(req.body?.agentId || '').trim();
+    const activeRoster = getRoster();
+    if (!getAgentIdentity(agentId, activeRoster)) return res.status(400).json({ ok: false, error: `Unknown agent: ${agentId || '(missing)'}` });
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const result = await markAgentCommsRead({ ids, agentId });
+    broadcast({ type: 'agent_comms:read', data: { agentId, ids: result.ids || [] } });
+    res.json({ ok: true, updated: result.updated || 0, ids: result.ids || [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not mark messages read' });
+  }
+});
+
+
+app.get(`${basePath}/api/roleplay-groups`, async (req, res) => {
+  try {
+    const groups = await listRoleplayGroups({ limit: Number(req.query?.limit || 50) || 50 });
+    res.json({ ok: true, groups });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not list roleplay groups' });
+  }
+});
+
+app.post(`${basePath}/api/roleplay-groups`, async (req, res) => {
+  try {
+    const activeRoster = getRoster();
+    const ids = Array.isArray(req.body?.agentIds) ? req.body.agentIds.map((id) => String(id || '').trim()).filter(Boolean) : [];
+    const uniqueIds = [...new Set(ids)].slice(0, 12);
+    if (uniqueIds.length < 2) return res.status(400).json({ ok: false, error: 'Choose at least two agents' });
+    const agents = uniqueIds.map((id) => getAgentIdentity(id, activeRoster)).filter(Boolean).map((agent) => ({
+      id: agent.id,
+      label: agentLabel(agent),
+      color: String(agent.color || '').trim(),
+    }));
+    if (agents.length < 2) return res.status(400).json({ ok: false, error: 'Choose at least two valid agents' });
+    const group = await createRoleplayGroup({
+      name: req.body?.name,
+      scenario: req.body?.scenario,
+      agents,
+      userCharacter: req.body?.userCharacter,
+      systemCharacter: req.body?.systemCharacter === true,
+      model: req.body?.model,
+      roleplayProvider: req.body?.roleplayProvider,
+    });
+    res.json({ ok: true, group });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not create roleplay group' });
+  }
+});
+
+app.get(`${basePath}/api/roleplay-groups/:id`, async (req, res) => {
+  try {
+    const group = await getRoleplayGroup(String(req.params.id || ''));
+    if (!group) return res.status(404).json({ ok: false, error: 'Roleplay group not found' });
+    res.json({ ok: true, group });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not load roleplay group' });
+  }
+});
+
+app.post(`${basePath}/api/roleplay-groups/:id/branch`, async (req, res) => {
+  try {
+    const group = await getRoleplayGroup(String(req.params.id || ''));
+    if (!group) return res.status(404).json({ ok: false, error: 'Roleplay group not found' });
+    const messageId = String(req.body?.messageId || '').trim();
+    if (!messageId) return res.status(400).json({ ok: false, error: 'messageId is required' });
+    const idx = (group.messages || []).findIndex((message) => String(message.id || '') === messageId);
+    if (idx === -1) return res.status(404).json({ ok: false, error: 'Message not found' });
+    const target = group.messages[idx];
+    if (target.role !== 'agent' || !String(target.text || '').trim()) return res.status(400).json({ ok: false, error: 'Only generated agent messages can be branched' });
+    const branched = await createRoleplayGroup({
+      name: buildBranchName(group.name),
+      scenario: group.scenario,
+      agents: group.agents || [],
+      userCharacter: group.userCharacter,
+      systemCharacter: group.systemCharacter === true,
+      model: group.model || '',
+      roleplayProvider: group.roleplayProvider || null,
+    });
+    const saved = await saveRoleplayGroup({ ...branched, messages: (group.messages || []).slice(0, idx + 1) });
+    res.json({ ok: true, group: saved });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not branch roleplay group' });
+  }
+});
+
+app.post(`${basePath}/api/roleplay-groups/:id/regenerate`, async (req, res) => {
+  try {
+    let group = await getRoleplayGroup(String(req.params.id || ''));
+    if (!group) return res.status(404).json({ ok: false, error: 'Roleplay group not found' });
+    const messageId = String(req.body?.messageId || '').trim();
+    if (!messageId) return res.status(400).json({ ok: false, error: 'messageId is required' });
+    const idx = (group.messages || []).findIndex((message) => String(message.id || '') === messageId);
+    if (idx === -1) return res.status(404).json({ ok: false, error: 'Message not found' });
+    const target = group.messages[idx];
+    if (target.role !== 'agent' || !String(target.text || '').trim()) return res.status(400).json({ ok: false, error: 'Only generated agent messages can be regenerated' });
+    const priorMessages = (group.messages || []).slice(0, idx);
+    const triggerMessage = priorMessages.at(-1) || null;
+    group = await saveRoleplayGroup({ ...group, messages: priorMessages });
+    const speaker = (group.agents || []).find((agent) => agent.id === target.speakerId) || { id: target.speakerId, label: target.speakerLabel || target.speakerId };
+    const generated = await generateRoleplayGroupMessage({
+      group,
+      speaker,
+      triggerText: String(triggerMessage?.text || '').trim(),
+      triggerSpeaker: groupMessageToTriggerSpeaker(group, triggerMessage),
+      model: String(req.body?.model || group.model || '').trim(),
+      roleplayProvider: req.body?.roleplayProvider && typeof req.body.roleplayProvider === 'object' ? req.body.roleplayProvider : (group.roleplayProvider || null),
+    });
+    group = await appendRoleplayGroupMessages(group.id, [generated]);
+    res.json({ ok: true, group, message: group.messages.at(-1) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not regenerate roleplay group message' });
+  }
+});
+
+app.delete(`${basePath}/api/roleplay-groups/:id`, async (req, res) => {
+  try {
+    const ok = await deleteRoleplayGroup(String(req.params.id || ''));
+    if (!ok) return res.status(404).json({ ok: false, error: 'Roleplay group not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not delete roleplay group' });
+  }
+});
+
+app.post(`${basePath}/api/roleplay-groups/:id/talk`, async (req, res) => {
+  try {
+    let group = await getRoleplayGroup(String(req.params.id || ''));
+    if (!group) return res.status(404).json({ ok: false, error: 'Roleplay group not found' });
+    const text = String(req.body?.text || '').trim().slice(0, 4000);
+    const speakerId = String(req.body?.speakerId || '').trim();
+    const autoContinue = req.body?.autoContinue === true;
+    const model = String(req.body?.model || group.model || '').trim();
+    const roleplayProvider = req.body?.roleplayProvider && typeof req.body.roleplayProvider === 'object' ? req.body.roleplayProvider : (group.roleplayProvider || null);
+    const activeRoster = getRoster();
+    let triggerText = text;
+    let triggerSpeaker = null;
+    const appended = [];
+
+    if (text) {
+      const agentSpeaker = (group.agents || []).find((agent) => agent.id === speakerId) || null;
+      const systemSpeaker = speakerId === 'system' && group.systemCharacter === true;
+      triggerSpeaker = systemSpeaker ? { id: 'system', label: 'System' } : (agentSpeaker || { id: 'user', label: group.userCharacter || 'You' });
+      const userLine = {
+        speakerId: systemSpeaker ? 'system' : (agentSpeaker?.id || 'user'),
+        speakerLabel: systemSpeaker ? 'System' : (agentSpeaker?.label || group.userCharacter || 'You'),
+        role: systemSpeaker ? 'system' : (agentSpeaker ? 'agent-user' : 'user'),
+        text,
+        model: '',
+      };
+      group = await appendRoleplayGroupMessages(group.id, [userLine]);
+      appended.push(group.messages.at(-1));
+      if (!autoContinue) {
+        return res.json({ ok: true, group, messages: appended });
+      }
+    }
+
+    let speakers = [];
+    if (autoContinue) {
+      speakers = pickGroupSpeakers(group, '', '').slice(0, 1);
+    } else {
+      if (!speakerId) return res.status(400).json({ ok: false, error: 'Choose a speaker' });
+      const selectedAgent = (group.agents || []).find((agent) => agent.id === speakerId) || null;
+      if (!selectedAgent) return res.status(400).json({ ok: false, error: 'Manual Talk without text must target one agent speaker' });
+      speakers = [selectedAgent];
+    }
+
+    if (!speakers.length) return res.status(400).json({ ok: false, error: 'No agents available in this group' });
+    for (const speakerRef of speakers) {
+      const rosterAgent = getAgentIdentity(speakerRef.id, activeRoster);
+      const speaker = { ...speakerRef, ...(rosterAgent ? { label: agentLabel(rosterAgent) } : {}) };
+      const generated = await generateRoleplayGroupMessage({ group, speaker, triggerText, triggerSpeaker, model, roleplayProvider });
+      group = await appendRoleplayGroupMessages(group.id, [generated]);
+      appended.push(group.messages.at(-1));
+      triggerText = generated.text;
+      triggerSpeaker = speaker;
+    }
+    res.json({ ok: true, group, messages: appended });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not continue roleplay group' });
+  }
+});
+
 app.get(`${basePath}/api/v1/files`, async (req, res) => {
   try {
     const manifest = await readChatManifest();
@@ -1801,7 +2427,7 @@ app.get(`${basePath}/api/v1/files`, async (req, res) => {
   }
 });
 
-app.post(`${basePath}/api/v1/files/upload`, upload.array('files', 10), enforceUploadBudget({ maxFiles: 10, maxBytes: 25 * 1024 * 1024 }), async (req, res) => {
+app.post(`${basePath}/api/v1/files/upload`, upload.array('files', 10), async (req, res) => {
   try {
     await ensureChatLibrary();
     const files = Array.isArray(req.files) ? req.files : [];
@@ -1816,14 +2442,14 @@ app.post(`${basePath}/api/v1/files/upload`, upload.array('files', 10), enforceUp
       const safeOriginal = sanitizeName(file.originalname || `upload${ext}`);
       const savedName = `${id}${ext}`;
       const savedPath = join(chatFilesDir, savedName);
-      await fsp.writeFile(savedPath, await uploadedBuffer(file));
+      await fsp.writeFile(savedPath, file.buffer);
       const item = {
         id,
         kind: 'file',
         name: safeOriginal,
         originalName: file.originalname || safeOriginal,
         mimeType: file.mimetype || 'application/octet-stream',
-        size: file.size || 0,
+        size: file.size || file.buffer?.length || 0,
         createdAt: Date.now(),
         path: savedPath,
         ext,
@@ -1974,6 +2600,7 @@ app.get(`${basePath}/api/settings/voice`, async (req, res) => {
       fishVoiceId: settings.fishVoiceId,
       hasFishSessionCookie: !!settings.fishSessionCookie,
       fishSessionCookieMasked: maskSessionCookie(settings.fishSessionCookie),
+      hasFishApiKey: !!settings.fishApiKey,
       fishFormat: settings.fishFormat,
       fishIncludeAsteriskNarration: settings.fishIncludeAsteriskNarration === true,
       fishPlaybackMode: settings.fishPlaybackMode || 'auto',
@@ -1996,6 +2623,56 @@ app.get(`${basePath}/api/settings/voice`, async (req, res) => {
   });
 });
 
+
+function normalizeCompanionMode(mode = '', { allowAdvanced = true } = {}) {
+  const value = String(mode || 'default').trim().toLowerCase();
+  if (value === 'companion') return 'companion';
+  if (allowAdvanced && value === 'live2d') return 'live2d';
+  if (allowAdvanced && value === 'vrm') return 'vrm';
+  return 'default';
+}
+
+function normalizeCompanionScale(value, { max = 2 } = {}) {
+  const raw = Number(value);
+  return Number.isFinite(raw) ? Math.min(max, Math.max(0.45, raw)) : 1;
+}
+
+function normalizeVrmPayload(config = {}) {
+  return {
+    modelUrl: String(config?.vrm?.modelUrl || config?.vrmModelUrl || config?.modelUrl || '').trim(),
+    scale: Number.isFinite(Number(config?.vrm?.scale ?? config?.scale)) ? Math.min(2.5, Math.max(0.5, Number(config?.vrm?.scale ?? config?.scale))) : 1,
+    cameraY: Number.isFinite(Number(config?.vrm?.cameraY ?? config?.cameraY)) ? Number(config?.vrm?.cameraY ?? config?.cameraY) : 1.25,
+    cameraZoom: Number.isFinite(Number(config?.vrm?.cameraZoom ?? config?.cameraZoom)) ? Number(config?.vrm?.cameraZoom ?? config?.cameraZoom) : 1,
+    lookAtCamera: config?.vrm?.lookAtCamera !== false && config?.lookAtCamera !== false,
+    idleMotion: String(config?.vrm?.idleMotion || config?.idleMotion || 'breathing').trim() || 'breathing',
+    speakingMotion: String(config?.vrm?.speakingMotion || config?.speakingMotion || 'talk').trim() || 'talk',
+    visemeMode: String(config?.vrm?.visemeMode || config?.visemeMode || 'synthetic').trim() || 'synthetic',
+  };
+}
+
+function normalizeCompanionConfigForScope(config = {}, registry = [], { allowAdvanced = true } = {}) {
+  const mode = normalizeCompanionMode(config?.mode, { allowAdvanced });
+  const companionId = String(config?.companionId || '').trim();
+  const selectedItem = registry.find((item) => item.id === companionId) || null;
+  if (mode === 'companion' && !selectedItem) {
+    const err = new Error(`Unknown companion package`);
+    err.code = 'UNKNOWN_COMPANION';
+    throw err;
+  }
+  const selectedLive2d = mode === 'live2d' && selectedItem?.sourceType === 'live2d-import' ? (selectedItem.live2d || {}) : {};
+  const selectedVrm = mode === 'vrm' && selectedItem?.sourceType === 'vrm-import' ? (selectedItem.vrm || {}) : {};
+  const live2dModelUrl = String(config?.live2d?.modelUrl || config?.modelUrl || selectedLive2d.modelUrl || '').trim();
+  const live2dBridgeUrl = String(config?.live2d?.bridgeUrl || config?.bridgeUrl || selectedLive2d.bridgeUrl || '').trim() || (live2dModelUrl ? `${basePath}/live2d-viewer.html` : '');
+  const vrmConfig = selectedVrm.modelUrl && !(config?.vrm?.modelUrl || config?.modelUrl) ? { ...config, vrm: { ...selectedVrm, ...(config?.vrm || {}) } } : config;
+  return {
+    mode,
+    companionId: mode === 'companion' || selectedItem?.sourceType === 'live2d-import' || selectedItem?.sourceType === 'vrm-import' ? companionId : '',
+    scale: normalizeCompanionScale(config?.scale, { max: mode === 'vrm' ? 2.5 : 2 }),
+    live2d: mode === 'live2d' ? { modelUrl: live2dModelUrl, bridgeUrl: live2dBridgeUrl } : { modelUrl: '', bridgeUrl: '' },
+    vrm: mode === 'vrm' ? normalizeVrmPayload(vrmConfig) : normalizeVrmPayload({}),
+  };
+}
+
 app.get(`${basePath}/api/settings/companions`, async (req, res) => {
   const settings = await loadCompanionSettings();
   const registry = await loadCompanionRegistry(basePath);
@@ -2004,7 +2681,10 @@ app.get(`${basePath}/api/settings/companions`, async (req, res) => {
     settings,
     items: registry,
     resolved: Object.fromEntries(
-      roster.agents.map((agent) => [agent.id, resolveAgentVisual(agent.id, settings, registry)]),
+      roster.agents.map((agent) => [agent.id, resolveAgentVisual(agent.id, { agentVisuals: settings.agentVisuals || {} }, registry)]),
+    ),
+    singleAgentResolved: Object.fromEntries(
+      roster.agents.map((agent) => [agent.id, resolveAgentVisual(agent.id, { agentVisuals: settings.singleAgentVisuals || {} }, registry)]),
     ),
   });
 });
@@ -2015,66 +2695,75 @@ app.post(`${basePath}/api/settings/companions`, async (req, res) => {
     const registry = await loadCompanionRegistry(basePath);
     const body = req.body || {};
 
-    if (body.agentVisuals && typeof body.agentVisuals === 'object' && !Array.isArray(body.agentVisuals)) {
+    const hasBulkAgentVisuals = body.agentVisuals && typeof body.agentVisuals === 'object' && !Array.isArray(body.agentVisuals);
+    const hasBulkSingleAgentVisuals = body.singleAgentVisuals && typeof body.singleAgentVisuals === 'object' && !Array.isArray(body.singleAgentVisuals);
+    if (hasBulkAgentVisuals || hasBulkSingleAgentVisuals) {
       const nextAgentVisuals = { ...(existing.agentVisuals || {}) };
-      for (const [agentIdRaw, config] of Object.entries(body.agentVisuals || {})) {
-        const agentId = String(agentIdRaw || '').trim();
-        const mode = String(config?.mode || 'default').trim().toLowerCase() === 'companion' ? 'companion' : 'default';
-        const companionId = String(config?.companionId || '').trim();
-        const scaleRaw = Number(config?.scale);
-        const scale = Number.isFinite(scaleRaw) ? Math.min(2, Math.max(0.45, scaleRaw)) : 1;
-        if (!agentId || !roster.agents.find((agent) => agent.id === agentId)) {
-          return res.status(400).json({ ok: false, error: `Unknown agent: ${agentId}`, code: 'UNKNOWN_AGENT' });
+      const nextSingleAgentVisuals = { ...(existing.singleAgentVisuals || {}) };
+      try {
+        if (hasBulkAgentVisuals) {
+          for (const [agentIdRaw, config] of Object.entries(body.agentVisuals || {})) {
+            const agentId = String(agentIdRaw || '').trim();
+            if (!agentId || !roster.agents.find((agent) => agent.id === agentId)) {
+              return res.status(400).json({ ok: false, error: `Unknown agent: ${agentId}`, code: 'UNKNOWN_AGENT' });
+            }
+            nextAgentVisuals[agentId] = normalizeCompanionConfigForScope(config, registry, { allowAdvanced: false });
+          }
         }
-        if (mode === 'companion' && !registry.find((item) => item.id === companionId)) {
-          return res.status(400).json({ ok: false, error: `Unknown companion package for ${agentId}`, code: 'UNKNOWN_COMPANION' });
+        if (hasBulkSingleAgentVisuals) {
+          for (const [agentIdRaw, config] of Object.entries(body.singleAgentVisuals || {})) {
+            const agentId = String(agentIdRaw || '').trim();
+            if (!agentId || !roster.agents.find((agent) => agent.id === agentId)) {
+              return res.status(400).json({ ok: false, error: `Unknown agent: ${agentId}`, code: 'UNKNOWN_AGENT' });
+            }
+            nextSingleAgentVisuals[agentId] = normalizeCompanionConfigForScope(config, registry, { allowAdvanced: true });
+          }
         }
-        nextAgentVisuals[agentId] = {
-          mode,
-          companionId: mode === 'companion' ? companionId : '',
-          scale,
-        };
+      } catch (err) {
+        return res.status(400).json({ ok: false, error: err.message, code: err.code || 'BAD_REQUEST' });
       }
       const saved = await saveCompanionSettings({
         ...existing,
         agentVisuals: nextAgentVisuals,
+        singleAgentVisuals: nextSingleAgentVisuals,
       });
       return res.json({
         ok: true,
         settings: saved,
         resolved: Object.fromEntries(
-          roster.agents.map((agent) => [agent.id, resolveAgentVisual(agent.id, saved, registry)]),
+          roster.agents.map((agent) => [agent.id, resolveAgentVisual(agent.id, { agentVisuals: saved.agentVisuals || {} }, registry)]),
+        ),
+        singleAgentResolved: Object.fromEntries(
+          roster.agents.map((agent) => [agent.id, resolveAgentVisual(agent.id, { agentVisuals: saved.singleAgentVisuals || {} }, registry)]),
         ),
       });
     }
 
     const agentId = String(body.agentId || '').trim();
-    const mode = String(body.mode || 'default').trim().toLowerCase() === 'companion' ? 'companion' : 'default';
-    const companionId = String(body.companionId || '').trim();
-    const scaleRaw = Number(body.scale);
-    const scale = Number.isFinite(scaleRaw) ? Math.min(2, Math.max(0.45, scaleRaw)) : 1;
+    const scope = String(body.scope || 'workspace').trim().toLowerCase() === 'single-agent' ? 'single-agent' : 'workspace';
     if (!agentId || !roster.agents.find((agent) => agent.id === agentId)) {
       return res.status(400).json({ ok: false, error: 'Unknown agent', code: 'UNKNOWN_AGENT' });
     }
-    if (mode === 'companion' && !registry.find((item) => item.id === companionId)) {
-      return res.status(400).json({ ok: false, error: 'Unknown companion package', code: 'UNKNOWN_COMPANION' });
+    const targetKey = scope === 'single-agent' ? 'singleAgentVisuals' : 'agentVisuals';
+    let normalized;
+    try {
+      normalized = normalizeCompanionConfigForScope(body, registry, { allowAdvanced: scope === 'single-agent' });
+    } catch (err) {
+      return res.status(400).json({ ok: false, error: err.message, code: err.code || 'BAD_REQUEST' });
     }
     const saved = await saveCompanionSettings({
       ...existing,
-      agentVisuals: {
-        ...(existing.agentVisuals || {}),
-        [agentId]: {
-          mode,
-          companionId: mode === 'companion' ? companionId : '',
-          scale,
-        },
+      [targetKey]: {
+        ...(existing[targetKey] || {}),
+        [agentId]: normalized,
       },
     });
     res.json({
       ok: true,
       settings: saved,
-      saved: saved.agentVisuals?.[agentId] || { mode: 'default', companionId: '' },
-      resolved: resolveAgentVisual(agentId, saved, registry),
+      saved: saved[targetKey]?.[agentId] || { mode: 'default', companionId: '' },
+      resolved: resolveAgentVisual(agentId, { agentVisuals: saved[targetKey] || {} }, registry),
+      scope,
     });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
@@ -2084,6 +2773,188 @@ app.post(`${basePath}/api/settings/companions`, async (req, res) => {
 app.get(`${basePath}/api/companions`, async (req, res) => {
   const items = await loadCompanionRegistry(basePath);
   res.json({ ok: true, items });
+});
+
+app.delete(`${basePath}/api/companions/:id`, async (req, res) => {
+  try {
+    const companionId = String(req.params.id || '').trim();
+    const deleted = await deleteImportedCompanionPackage(companionId, basePath);
+    const existing = await loadCompanionSettings();
+    const deletedSlug = String(deleted?.deletedSlug || '');
+    const referencesDeletedVisual = (config = {}) => {
+      if (String(config?.companionId || '') === companionId) return true;
+      const urls = [config?.live2d?.modelUrl, config?.live2d?.bridgeUrl, config?.vrm?.modelUrl].map((value) => String(value || ''));
+      return !!deletedSlug && urls.some((url) => url.includes(`/imports/${deletedSlug}/`) || url.includes(`/imports/${encodeURIComponent(deletedSlug)}/`));
+    };
+    const clearDeletedRefs = (visuals = {}) => Object.fromEntries(
+      Object.entries(visuals || {}).map(([agentId, config]) => [
+        agentId,
+        referencesDeletedVisual(config) ? { ...config, mode: 'default', companionId: '', live2d: { modelUrl: '', bridgeUrl: '' }, vrm: {} } : config,
+      ]),
+    );
+    const saved = await saveCompanionSettings({
+      ...existing,
+      agentVisuals: clearDeletedRefs(existing.agentVisuals),
+      singleAgentVisuals: clearDeletedRefs(existing.singleAgentVisuals),
+    });
+    const registry = await loadCompanionRegistry(basePath);
+    res.json({
+      ok: true,
+      deleted,
+      settings: saved,
+      items: registry,
+      resolved: Object.fromEntries(
+        roster.agents.map((agent) => [agent.id, resolveAgentVisual(agent.id, { agentVisuals: saved.agentVisuals || {} }, registry)]),
+      ),
+      singleAgentResolved: Object.fromEntries(
+        roster.agents.map((agent) => [agent.id, resolveAgentVisual(agent.id, { agentVisuals: saved.singleAgentVisuals || {} }, registry)]),
+      ),
+    });
+  } catch (err) {
+    const status = err.code === 'COMPANION_NOT_FOUND' ? 404 : err.code === 'PROTECTED_COMPANION' ? 400 : 500;
+    res.status(status).json({ ok: false, error: err.message, code: err.code || 'INTERNAL_ERROR' });
+  }
+});
+
+async function walkFiles(rootDir = '') {
+  const out = [];
+  async function walk(dir) {
+    const entries = await fsp.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (entry.isFile()) out.push(full);
+    }
+  }
+  await walk(rootDir);
+  return out;
+}
+
+function pathRelativeTo(rootDir = '', filePath = '') {
+  return filePath.slice(String(rootDir).replace(/\\/g, '/').length).replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+function visualSlugFromPath(prefix = 'visual', filePath = '') {
+  return `${prefix}-${basename(filePath, extname(filePath)).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || randomUUID()}`;
+}
+
+function importedAssetUrl(slug = '', relativePath = '') {
+  const safe = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+/, '');
+  return `${basePath}/api/companions/imports/${encodeURIComponent(slug)}/${safe.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+async function copyImportTree(sourceRoot = '', destRoot = '') {
+  await fsp.rm(destRoot, { recursive: true, force: true });
+  await fsp.mkdir(destRoot, { recursive: true });
+  await fsp.cp(sourceRoot, destRoot, { recursive: true });
+}
+
+async function importUniversalVisualFromDir(sourceRoot = '', publicBase = basePath) {
+  const files = await walkFiles(sourceRoot);
+  const petJson = files.find((file) => basename(file).toLowerCase() === 'pet.json');
+  if (petJson) {
+    return { kind: 'codex', ...(await importCodexPetPackageFromDir(dirname(petJson), publicBase)) };
+  }
+  const vrmFile = files.find((file) => extname(file).toLowerCase() === '.vrm');
+  if (vrmFile) {
+    const slug = visualSlugFromPath('vrm', vrmFile);
+    const destDir = join(__dirname, '..', 'data', 'companions', 'imports', slug);
+    await copyImportTree(sourceRoot, destDir);
+    const relative = pathRelativeTo(sourceRoot.replace(/\\/g, '/'), vrmFile.replace(/\\/g, '/'));
+    const item = await upsertStoredCompanionItem({
+      id: `vrm-${slug.replace(/^vrm-/, '')}`,
+      name: basename(vrmFile, extname(vrmFile)),
+      sourceType: 'vrm-import',
+      importDirSlug: slug,
+      preview: '',
+      visualMode: 'vrm',
+      vrm: { modelUrl: importedAssetUrl(slug, relative) },
+    });
+    return { kind: 'vrm', item };
+  }
+  const live2dCandidates = files.filter((file) => /\.json$/i.test(basename(file)));
+  const live2dFile = live2dCandidates.find((file) => /\.model3\.json$/i.test(basename(file)))
+    || live2dCandidates.find((file) => /(^|[\/])model\.json$/i.test(file))
+    || live2dCandidates.find((file) => /\.model\.json$/i.test(basename(file)))
+    || live2dCandidates.find((file) => /model/i.test(basename(file)) && !/items|physics|pose|cdi|vtube/i.test(basename(file)));
+  if (live2dFile) {
+    const slug = visualSlugFromPath('live2d', live2dFile);
+    const destDir = join(__dirname, '..', 'data', 'companions', 'imports', slug);
+    await copyImportTree(sourceRoot, destDir);
+    const relative = pathRelativeTo(sourceRoot.replace(/\\/g, '/'), live2dFile.replace(/\\/g, '/'));
+    const item = await upsertStoredCompanionItem({
+      id: `live2d-${slug.replace(/^live2d-/, '')}`,
+      name: basename(live2dFile, extname(live2dFile)),
+      sourceType: 'live2d-import',
+      importDirSlug: slug,
+      preview: '',
+      visualMode: 'live2d',
+      live2d: { modelUrl: importedAssetUrl(slug, relative), bridgeUrl: `${basePath}/live2d-viewer.html` },
+    });
+    return { kind: 'live2d', item };
+  }
+  const err = new Error('Could not detect visual package. Upload a Codex pet folder/zip with pet.json, a Live2D model JSON package, or a .vrm file/package.');
+  err.code = 'UNSUPPORTED_VISUAL_PACKAGE';
+  throw err;
+}
+
+async function assignImportedVisualToAgent(agentId = '', imported = null) {
+  if (!agentId || !roster.agents.find((agent) => agent.id === agentId) || !imported?.item) return null;
+  const existing = await loadCompanionSettings();
+  if (imported.kind === 'codex') {
+    const saved = await saveCompanionSettings({
+      ...existing,
+      agentVisuals: { ...(existing.agentVisuals || {}), [agentId]: { mode: 'companion', companionId: imported.item.id, scale: 1 } },
+    });
+    return resolveAgentVisual(agentId, saved, await loadCompanionRegistry(basePath));
+  }
+  if (imported.kind === 'live2d') {
+    const saved = await saveCompanionSettings({
+      ...existing,
+      singleAgentVisuals: { ...(existing.singleAgentVisuals || {}), [agentId]: { mode: 'live2d', live2d: imported.item.live2d || {}, scale: 1 } },
+    });
+    return resolveAgentVisual(agentId, { agentVisuals: saved.singleAgentVisuals || {} }, await loadCompanionRegistry(basePath));
+  }
+  if (imported.kind === 'vrm') {
+    const saved = await saveCompanionSettings({
+      ...existing,
+      singleAgentVisuals: { ...(existing.singleAgentVisuals || {}), [agentId]: { mode: 'vrm', vrm: imported.item.vrm || {}, scale: 1 } },
+    });
+    return resolveAgentVisual(agentId, { agentVisuals: saved.singleAgentVisuals || {} }, await loadCompanionRegistry(basePath));
+  }
+  return null;
+}
+
+app.post(`${basePath}/api/companions/import-universal`, upload.array('files', 500), async (req, res) => {
+  let tempDir = '';
+  try {
+    const files = Array.isArray(req.files) ? req.files : [];
+    if (!files.length) return res.status(400).json({ ok: false, error: 'No visual files uploaded', code: 'BAD_REQUEST' });
+    const agentId = String(req.body?.agentId || '').trim();
+    tempDir = await fsp.mkdtemp(join(os.tmpdir(), 'cc-visual-import-'));
+    if (files.length === 1 && extname(files[0].originalname || '').toLowerCase() === '.zip') {
+      const zipPath = join(tempDir, 'package.zip');
+      await fsp.writeFile(zipPath, files[0].buffer);
+      await new Promise((resolve, reject) => execFile('unzip', ['-o', zipPath, '-d', tempDir], (err) => err ? reject(err) : resolve()));
+      await fsp.rm(zipPath, { force: true });
+    } else {
+      for (const file of files) {
+        const relativePath = String(file.originalname || file.fieldname || 'upload').replace(/\\/g, '/').replace(/^\/+/, '');
+        if (!relativePath || relativePath.includes('..')) continue;
+        const destPath = join(tempDir, relativePath);
+        await fsp.mkdir(dirname(destPath), { recursive: true });
+        await fsp.writeFile(destPath, file.buffer);
+      }
+    }
+    const imported = await importUniversalVisualFromDir(tempDir, basePath);
+    const items = await loadCompanionRegistry(basePath);
+    const assigned = await assignImportedVisualToAgent(agentId, imported);
+    res.json({ ok: true, kind: imported.kind, item: imported.item, items, assigned });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message, code: err.code || 'IMPORT_FAILED' });
+  } finally {
+    if (tempDir) fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }
 });
 
 app.post(`${basePath}/api/companions/import`, async (req, res) => {
@@ -2097,29 +2968,19 @@ app.post(`${basePath}/api/companions/import`, async (req, res) => {
   }
 });
 
-app.post(`${basePath}/api/companions/import-zip`, upload.single('package'), enforceUploadBudget({ maxFiles: 1, maxBytes: 25 * 1024 * 1024 }), async (req, res) => {
-  let tempDir = '';
+app.post(`${basePath}/api/companions/import-zip`, upload.single('package'), async (req, res) => {
   try {
     const file = req.file;
-    if (!file?.size) {
+    if (!file?.buffer?.length) {
       return res.status(400).json({ ok: false, error: 'No zip package uploaded', code: 'BAD_REQUEST' });
     }
     const agentId = String(req.body?.agentId || '').trim();
-    const zipBuffer = await uploadedBuffer(file);
-    if (!(zipBuffer[0] === 0x50 && zipBuffer[1] === 0x4b)) throw new Error('Uploaded package is not a ZIP file');
-    tempDir = await fsp.mkdtemp(join(os.tmpdir(), 'cc-pet-import-'));
+    const tempDir = await fsp.mkdtemp(join(os.tmpdir(), 'cc-pet-import-'));
     const zipPath = join(tempDir, 'package.zip');
-    await fsp.writeFile(zipPath, zipBuffer);
-    const entries = await new Promise((resolve, reject) => {
-      execFile('unzip', ['-Z1', zipPath], { maxBuffer: 1024 * 1024 }, (err, stdout) => err ? reject(err) : resolve(String(stdout || '').split(/\r?\n/).filter(Boolean)));
-    });
-    if (entries.length > 1000 || entries.some((name) => /(^|[\\/])\.\.([\\/]|$)/.test(name) || /^[\\/]/.test(name) || /^[A-Za-z]:/.test(name))) {
-      throw new Error('Unsafe or excessive ZIP contents');
-    }
+    await fsp.writeFile(zipPath, file.buffer);
     await new Promise((resolve, reject) => {
       execFile('unzip', ['-o', zipPath, '-d', tempDir], (err) => err ? reject(err) : resolve());
     });
-    await validateExtractedTree(tempDir);
     const imported = await importCodexPetPackageFromDir(tempDir, basePath);
     const items = await loadCompanionRegistry(basePath);
     let assigned = null;
@@ -2137,13 +2998,10 @@ app.post(`${basePath}/api/companions/import-zip`, upload.single('package'), enfo
     res.json({ ok: true, item: imported.item, items, assigned });
   } catch (err) {
     res.status(400).json({ ok: false, error: err.message, code: 'IMPORT_FAILED' });
-  } finally {
-    if (tempDir) await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
 });
 
-app.post(`${basePath}/api/companions/import-folder`, upload.array('files', 100), enforceUploadBudget({ maxFiles: 100, maxBytes: 100 * 1024 * 1024 }), async (req, res) => {
-  let tempDir = '';
+app.post(`${basePath}/api/companions/import-folder`, upload.array('files', 500), async (req, res) => {
   try {
     const files = Array.isArray(req.files) ? req.files : [];
     if (!files.length) {
@@ -2152,13 +3010,13 @@ app.post(`${basePath}/api/companions/import-folder`, upload.array('files', 100),
     const uploadedPaths = files.map((file) => String(file.originalname || '').replace(/\\/g, '/')).filter(Boolean);
     console.log('[companions] import-folder upload received', { count: uploadedPaths.length, first: uploadedPaths[0], paths: uploadedPaths.slice(0, 20) });
     const agentId = String(req.body?.agentId || '').trim();
-    tempDir = await fsp.mkdtemp(join(os.tmpdir(), 'cc-pet-folder-import-'));
+    const tempDir = await fsp.mkdtemp(join(os.tmpdir(), 'cc-pet-folder-import-'));
     for (const file of files) {
       const relativePath = String(file.originalname || '').replace(/\\/g, '/').replace(/^\/+/, '');
       if (!relativePath || relativePath.includes('..')) continue;
       const destPath = join(tempDir, relativePath);
       await fsp.mkdir(dirname(destPath), { recursive: true });
-      await fsp.writeFile(destPath, await uploadedBuffer(file));
+      await fsp.writeFile(destPath, file.buffer);
     }
     const imported = await importCodexPetPackageFromDir(tempDir, basePath);
     const items = await loadCompanionRegistry(basePath);
@@ -2178,8 +3036,6 @@ app.post(`${basePath}/api/companions/import-folder`, upload.array('files', 100),
   } catch (err) {
     console.error('[companions] import-folder failed:', err?.message || err);
     res.status(400).json({ ok: false, error: err.message, code: 'IMPORT_FAILED' });
-  } finally {
-    if (tempDir) await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
 });
 
@@ -2187,7 +3043,7 @@ app.get(`${basePath}/api/companions/imports/:slug/*`, async (req, res) => {
   const slug = basename(String(req.params.slug || ''));
   const file = String(req.params[0] || '').replace(/\\/g, '/').replace(/^\/+/, '');
   if (!file || file.includes('..')) return res.status(400).json({ ok: false, error: 'Invalid import asset path', code: 'BAD_REQUEST' });
-  const fullPath = join(commandCenterDataDir, 'companions', 'imports', slug, file);
+  const fullPath = join(__dirname, '..', 'data', 'companions', 'imports', slug, file);
   if (!existsSync(fullPath)) return res.status(404).json({ ok: false, error: 'Imported companion asset not found', code: 'NOT_FOUND' });
   res.sendFile(fullPath);
 });
@@ -2254,7 +3110,7 @@ app.post(`${basePath}/api/settings/appearance/theme`, async (req, res) => {
 
 app.post(`${basePath}/api/settings/appearance/background`, upload.single('background'), async (req, res) => {
   try {
-    if (!req.file?.size) return res.status(400).json({ ok: false, error: 'No background image uploaded', code: 'BAD_REQUEST' });
+    if (!req.file?.buffer?.length) return res.status(400).json({ ok: false, error: 'No background image uploaded', code: 'BAD_REQUEST' });
     const ext = extname(String(req.file.originalname || '')).toLowerCase();
     if (!isAllowedBackgroundExt(ext)) return res.status(400).json({ ok: false, error: 'Unsupported background format', code: 'BAD_REQUEST' });
     const dir = getAppearanceBackgroundDir();
@@ -2267,7 +3123,7 @@ app.post(`${basePath}/api/settings/appearance/background`, upload.single('backgr
       fullPath = join(dir, fileName);
       counter += 1;
     }
-    await fsp.writeFile(fullPath, await uploadedBuffer(req.file));
+    await fsp.writeFile(fullPath, req.file.buffer);
     const backgrounds = await listWorkspaceBackgrounds();
     const uploaded = backgrounds.find((bg) => bg.filename === fileName) || null;
     const saved = await saveAppearanceSettings({ ...(await loadAppearanceSettings()), workspaceBackgroundId: uploaded?.id || DEFAULT_WORKSPACE_ID });
@@ -2297,11 +3153,11 @@ app.post(`${basePath}/api/settings/branding`, async (req, res) => {
 
 app.post(`${basePath}/api/settings/branding/logo`, upload.single('logo'), async (req, res) => {
   try {
-    if (!req.file?.size) return res.status(400).json({ ok: false, error: 'No logo uploaded', code: 'BAD_REQUEST' });
+    if (!req.file?.buffer?.length) return res.status(400).json({ ok: false, error: 'No logo uploaded', code: 'BAD_REQUEST' });
     const ext = extname(String(req.file.originalname || '')).toLowerCase();
     if (!['.png', '.jpg', '.jpeg', '.webp', '.svg'].includes(ext)) return res.status(400).json({ ok: false, error: 'Unsupported logo format', code: 'BAD_REQUEST' });
     const name = `logo-${Date.now()}${ext}`;
-    await fsp.writeFile(join(getBrandingDir(), name), await uploadedBuffer(req.file));
+    await fsp.writeFile(join(getBrandingDir(), name), req.file.buffer);
     const saved = await saveBrandingSettings({ ...(await loadBrandingSettings()), logoUrl: `${basePath}/media/branding/${encodeURIComponent(name)}` });
     res.json({ ok: true, settings: saved });
   } catch (err) { res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' }); }
@@ -2309,11 +3165,11 @@ app.post(`${basePath}/api/settings/branding/logo`, upload.single('logo'), async 
 
 app.post(`${basePath}/api/settings/branding/favicon`, upload.single('favicon'), async (req, res) => {
   try {
-    if (!req.file?.size) return res.status(400).json({ ok: false, error: 'No favicon uploaded', code: 'BAD_REQUEST' });
+    if (!req.file?.buffer?.length) return res.status(400).json({ ok: false, error: 'No favicon uploaded', code: 'BAD_REQUEST' });
     const ext = extname(String(req.file.originalname || '')).toLowerCase();
     if (!['.ico', '.png', '.svg'].includes(ext)) return res.status(400).json({ ok: false, error: 'Unsupported favicon format', code: 'BAD_REQUEST' });
     const name = `favicon-${Date.now()}${ext}`;
-    await fsp.writeFile(join(getBrandingDir(), name), await uploadedBuffer(req.file));
+    await fsp.writeFile(join(getBrandingDir(), name), req.file.buffer);
     const saved = await saveBrandingSettings({ ...(await loadBrandingSettings()), faviconUrl: `${basePath}/media/branding/${encodeURIComponent(name)}` });
     res.json({ ok: true, settings: saved });
   } catch (err) { res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' }); }
@@ -2403,7 +3259,7 @@ app.get(`${basePath}/api/intro/videos`, async (req, res) => {
 
 app.post(`${basePath}/api/intro/upload`, upload.single('intro'), async (req, res) => {
   try {
-    if (!req.file?.size) {
+    if (!req.file?.buffer?.length) {
       return res.status(400).json({ ok: false, error: 'No intro video uploaded', code: 'BAD_REQUEST' });
     }
     const ext = extname(String(req.file.originalname || '')).toLowerCase();
@@ -2420,7 +3276,7 @@ app.post(`${basePath}/api/intro/upload`, upload.single('intro'), async (req, res
       fullPath = join(introDir, fileName);
       counter += 1;
     }
-    await fsp.writeFile(fullPath, await uploadedBuffer(req.file));
+    await fsp.writeFile(fullPath, req.file.buffer);
     const intros = await listIntroVideos();
     const uploaded = intros.find((intro) => intro.filename === fileName) || null;
     const saved = await saveIntroSettings({ ...(await loadIntroSettings()), selectedIntroId: uploaded?.id || '' });
@@ -2475,7 +3331,7 @@ app.get(`${basePath}/api/music/tracks`, async (req, res) => {
 
 app.post(`${basePath}/api/music/upload`, upload.single('track'), async (req, res) => {
   try {
-    if (!req.file?.size) {
+    if (!req.file?.buffer?.length) {
       return res.status(400).json({ ok: false, error: 'No audio file uploaded', code: 'BAD_REQUEST' });
     }
     const ext = extname(String(req.file.originalname || '')).toLowerCase();
@@ -2492,7 +3348,7 @@ app.post(`${basePath}/api/music/upload`, upload.single('track'), async (req, res
       fullPath = join(musicDir, fileName);
       counter += 1;
     }
-    await fsp.writeFile(fullPath, await uploadedBuffer(req.file));
+    await fsp.writeFile(fullPath, req.file.buffer);
     const tracks = await listMusicTracks();
     const uploaded = tracks.find((track) => track.filename === fileName) || null;
     const saved = await saveMusicSettings({ ...(await loadMusicSettings()), selectedTrackId: uploaded?.id || '' });
@@ -2611,6 +3467,7 @@ app.post(`${basePath}/api/settings/voice`, async (req, res) => {
       fishAudioApiBase: String(body.fishAudioApiBase || existing.fishAudioApiBase || 'https://your-domain.example/aichat').trim(),
       fishVoiceId: body.fishVoiceId !== undefined ? String(body.fishVoiceId || '').trim() : (existing.fishVoiceId || ''),
       fishSessionCookie: body.fishSessionCookie ? String(body.fishSessionCookie).trim() : existing.fishSessionCookie,
+      fishApiKey: body.fishApiKey !== undefined ? String(body.fishApiKey || '').trim() : (existing.fishApiKey || ''),
       fishFormat: String(body.fishFormat || existing.fishFormat || 'mp3').trim(),
       fishIncludeAsteriskNarration: body.fishIncludeAsteriskNarration === true,
       fishPlaybackMode: String(body.fishPlaybackMode || existing.fishPlaybackMode || 'auto').trim(),
@@ -2638,6 +3495,7 @@ app.post(`${basePath}/api/settings/voice`, async (req, res) => {
         fishVoiceId: saved.fishVoiceId,
         hasFishSessionCookie: !!saved.fishSessionCookie,
         fishSessionCookieMasked: maskSessionCookie(saved.fishSessionCookie),
+        hasFishApiKey: !!saved.fishApiKey,
         fishFormat: saved.fishFormat,
         fishIncludeAsteriskNarration: saved.fishIncludeAsteriskNarration === true,
         fishPlaybackMode: saved.fishPlaybackMode || 'auto',
@@ -2704,7 +3562,7 @@ app.post(`${basePath}/api/setup/test`, async (req, res) => {
     });
   }
 
-  if (!relayOnlyMode && bridgeStatus.lastAuthError) {
+  if (bridgeStatus.lastAuthError) {
     checks.push({
       key: 'gateway-auth',
       ok: false,
@@ -2786,6 +3644,7 @@ app.post(`${basePath}/api/settings/voice/fish/preview`, async (req, res) => {
       ...existing,
       fishAudioApiBase: String(body.fishAudioApiBase || existing.fishAudioApiBase || 'https://your-domain.example/aichat').trim(),
       fishSessionCookie: body.fishSessionCookie ? String(body.fishSessionCookie).trim() : existing.fishSessionCookie,
+      fishApiKey: body.fishApiKey !== undefined ? String(body.fishApiKey || '').trim() : (existing.fishApiKey || ''),
       fishFormat: String(body.fishFormat || existing.fishFormat || 'mp3').trim(),
       fishIncludeAsteriskNarration: body.fishIncludeAsteriskNarration === true,
     };
@@ -2812,6 +3671,7 @@ app.post(`${basePath}/api/settings/voice/fish/search`, async (req, res) => {
       ...existing,
       fishAudioApiBase: String(body.fishAudioApiBase || existing.fishAudioApiBase || 'https://your-domain.example/aichat').trim(),
       fishSessionCookie: body.fishSessionCookie ? String(body.fishSessionCookie).trim() : existing.fishSessionCookie,
+      fishApiKey: body.fishApiKey !== undefined ? String(body.fishApiKey || '').trim() : (existing.fishApiKey || ''),
     };
     const result = await searchFishAudioVoices(query, settings, {
       limit: body.limit || 8,
@@ -2882,7 +3742,7 @@ app.post(`${basePath}/api/settings/wake/keyword`, upload.single('keyword'), asyn
     const fs = await import('node:fs/promises');
     const targetDir = join(__dirname, '..', 'public', 'wakewords');
     await fs.mkdir(targetDir, { recursive: true });
-    await fs.writeFile(join(targetDir, safeName), await uploadedBuffer(req.file));
+    await fs.writeFile(join(targetDir, safeName), req.file.buffer);
 
     const existing = await loadWakeSettings();
     const saved = await saveWakeSettings({
@@ -2997,7 +3857,7 @@ function summarizeWebSearchResult(result = '') {
   };
 }
 
-function sendToAgent(agentId, message) {
+function sendToAgent(agentId, message, options = {}) {
   const cleanMessage = String(message || '').trim();
   if (!cleanMessage) {
     console.log('[agent] Skipping empty message');
@@ -3006,12 +3866,42 @@ function sendToAgent(agentId, message) {
 
   const roster = getRoster();
   const target = agentId || roster.primaryAgentId || 'main';
+  const attachmentContext = String(options.attachmentContext || '').trim();
+  const attachmentImages = Array.isArray(options.attachmentImages) ? options.attachmentImages.filter(Boolean) : [];
+  const hasAttachments = !!attachmentContext || attachmentImages.length > 0;
   console.log(`[agent] Sending to ${target}: "${cleanMessage.slice(0, 80)}..."`);
 
   broadcast({
     type: 'agent:thinking',
     data: { agent: target, status: 'Processing...' },
   });
+
+  if (hasAttachments) {
+    const session = {
+      id: `browser_send_${target}`,
+      agent: target,
+      mode: 'agent',
+      messages: [{ role: 'user', text: cleanMessage, timestamp: new Date().toISOString(), meta: {} }],
+      metadata: { skipBackchannel: true, source: 'browser-send' },
+    };
+    runApiChatTurn({ session, latestMessage: cleanMessage, attachmentContext, attachmentImages })
+      .then((result) => {
+        const response = String(result?.text || '').trim();
+        console.log(`[agent] Response from ${target}: "${response.slice(0, 80)}..."`);
+        broadcast({
+          type: 'agent:responding',
+          data: { agent: target, message: response },
+        });
+      })
+      .catch((err) => {
+        console.error(`[agent] Error from ${target}:`, err.message);
+        broadcast({
+          type: 'agent:error',
+          data: { agent: target, message: err.message },
+        });
+      });
+    return;
+  }
 
   const openclawBin = process.env.OPENCLAW_BIN || 'openclaw';
   const thinkingLevel = (target === roster.primaryAgentId || target === 'main') ? 'low' : 'off';
@@ -3051,7 +3941,7 @@ app.post(`${basePath}/api/voice/transcribe`, upload.single('audio'), async (req,
     const roster = getRoster();
     const targetAgent = req.body?.targetAgent || roster.primaryAgentId || 'main';
     console.log(`[voice] Transcribing ${req.file.size} bytes for agent: ${targetAgent}`);
-    const text = await transcribe(await uploadedBuffer(req.file), req.file.originalname || 'audio.webm');
+    const text = await transcribe(req.file.buffer, req.file.originalname || 'audio.webm');
     console.log(`[voice] Transcribed: "${text}"`);
 
     if (!String(text || '').trim()) {
@@ -3141,8 +4031,7 @@ app.post(`${basePath}/api/wake/detect`, upload.single('audio'), async (req, res)
   try {
     if (!req.file) return res.status(400).json({ error: 'No audio file provided' });
 
-    const audioBuffer = await uploadedBuffer(req.file);
-    const keywordMatch = await detectWakeKeyword(audioBuffer, req.file.originalname || 'wake.webm').catch(() => null);
+    const keywordMatch = await detectWakeKeyword(req.file.buffer, req.file.originalname || 'wake.webm').catch(() => null);
     if (keywordMatch?.agentId && String(keywordMatch.alias || '').length > 3) {
       const agent = buildWakeAliases().find((a) => a.agentId === keywordMatch.agentId);
       return res.json({
@@ -3156,7 +4045,7 @@ app.post(`${basePath}/api/wake/detect`, upload.single('audio'), async (req, res)
       });
     }
 
-    const text = await transcribeWakeAudio(audioBuffer, req.file.originalname || 'wake.webm');
+    const text = await transcribeWakeAudio(req.file.buffer, req.file.originalname || 'wake.webm');
     const match = detectWakeAgent(text);
     res.json({ ok: true, text, match });
   } catch (err) {
@@ -3172,12 +4061,38 @@ app.post(`${basePath}/api/browser/send`, async (req, res) => {
     const target = agent || roster.primaryAgentId || 'main';
     if (!text) return res.status(400).json({ error: 'No text provided' });
 
+    const normalizedFileIds = (() => {
+      const ids = [];
+      if (Array.isArray(req.body?.fileIds)) ids.push(...req.body.fileIds);
+      if (Array.isArray(req.body?.attachments)) {
+        for (const attachment of req.body.attachments) {
+          if (attachment == null) continue;
+          if (typeof attachment === 'string' || typeof attachment === 'number') {
+            ids.push(String(attachment));
+            continue;
+          }
+          if (typeof attachment === 'object') {
+            const candidate = attachment.id ?? attachment.fileId ?? attachment.file_id;
+            if (candidate != null && String(candidate).trim()) ids.push(String(candidate));
+          }
+        }
+      }
+      return Array.from(new Set(ids.map((id) => String(id).trim()).filter(Boolean)));
+    })();
+
+    const attachedFiles = await resolveChatFiles(normalizedFileIds);
+    const attachmentPayload = apiAttachmentPayload(attachedFiles.map(toChatFileRecord));
+    const attachmentBundle = await buildAttachmentBundle(attachedFiles);
+
     broadcast({
       type: 'voice:transcription',
-      data: { text, agent: target, timestamp: Date.now() },
+      data: { text, agent: target, timestamp: Date.now(), files: attachmentPayload },
     });
-    sendToAgent(target, text);
-    res.json({ ok: true, agent: target, text });
+    sendToAgent(target, text, {
+      attachmentContext: attachmentBundle.context,
+      attachmentImages: attachmentBundle.imagePaths,
+    });
+    res.json({ ok: true, agent: target, text, files: attachmentPayload });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -3193,7 +4108,7 @@ app.get(`${basePath}/api/chat/files`, async (req, res) => {
   }
 });
 
-app.post(`${basePath}/api/chat/files/upload`, upload.array('files', 10), enforceUploadBudget({ maxFiles: 10, maxBytes: 25 * 1024 * 1024 }), async (req, res) => {
+app.post(`${basePath}/api/chat/files/upload`, upload.array('files', 10), async (req, res) => {
   try {
     await ensureChatLibrary();
     const files = Array.isArray(req.files) ? req.files : [];
@@ -3208,14 +4123,14 @@ app.post(`${basePath}/api/chat/files/upload`, upload.array('files', 10), enforce
       const safeOriginal = sanitizeName(file.originalname || `upload${ext}`);
       const savedName = `${id}${ext}`;
       const savedPath = join(chatFilesDir, savedName);
-      await fsp.writeFile(savedPath, await uploadedBuffer(file));
+      await fsp.writeFile(savedPath, file.buffer);
       const item = {
         id,
         kind: 'file',
         name: safeOriginal,
         originalName: file.originalname || safeOriginal,
         mimeType: file.mimetype || 'application/octet-stream',
-        size: file.size || 0,
+        size: file.size || file.buffer?.length || 0,
         createdAt: Date.now(),
         path: savedPath,
         ext,
@@ -3446,9 +4361,9 @@ app.post(`${basePath}/api/call/:id/recording`, upload.single('video'), async (re
   try {
     const sessionId = String(req.params.id || '').trim();
     if (!sessionId) return res.status(400).json({ ok: false, error: 'Missing session id' });
-    if (!req.file?.size) return res.status(400).json({ ok: false, error: 'Missing recording video' });
+    if (!req.file?.buffer?.length) return res.status(400).json({ ok: false, error: 'Missing recording video' });
     const record = await saveFairyRecording({
-      buffer: await uploadedBuffer(req.file),
+      buffer: req.file.buffer,
       mimeType: String(req.body?.mimeType || req.file.mimetype || 'video/webm').trim(),
       sessionId,
       startedAt: String(req.body?.startedAt || '').trim(),
@@ -4817,17 +5732,17 @@ app.post(`${basePath}/api/v1/sessions/:id/messages`, async (req, res) => {
     let session = await getApiSession(sessionId);
     if (!session) return res.status(404).json({ ok: false, error: 'Session not found', code: 'SESSION_NOT_FOUND' });
 
-    const { files: attachedFiles, bundle: attachmentBundle } = await resolveAttachmentBundle(fileIds);
+    const attachedFiles = await resolveChatFiles(fileIds);
     const attachmentPayload = apiAttachmentPayload(attachedFiles.map(toChatFileRecord));
-    const attachmentContext = attachmentBundle.context;
+    const attachmentBundle = await buildAttachmentBundle(attachedFiles);
 
     const userAppend = await appendApiSessionMessage(session.id, { role: 'user', text, meta: { files: attachmentPayload } });
     session = userAppend.session;
 
     const sessionMode = String(session.mode || 'agent') === 'roleplay' ? 'roleplay' : 'agent';
     const result = sessionMode === 'roleplay'
-      ? await runRoleplayChatTurn({ session, latestMessage: text, attachmentContext, model: session.model || String(req.body?.model || '').trim() })
-      : await runApiChatTurn({ session, latestMessage: text, attachmentContext, attachmentImages: attachmentBundle.images, attachmentStatuses: attachmentBundle.statuses });
+      ? await runRoleplayChatTurn({ session, latestMessage: text, attachmentContext: attachmentBundle.context, model: session.model || String(req.body?.model || '').trim() })
+      : await runApiChatTurn({ session, latestMessage: text, attachmentContext: attachmentBundle.context, attachmentImages: attachmentBundle.imagePaths });
     session = await maybePersistHermesSession(session, result);
     const assistantMeta = { files: [], mode: sessionMode, model: result.model || session.model || '' };
     let audioPayload = null;
@@ -4854,7 +5769,6 @@ app.post(`${basePath}/api/v1/sessions/:id/messages`, async (req, res) => {
       message: userAppend.message,
       response: assistantAppend.message,
       files: attachmentPayload,
-      attachmentStatuses: result.attachmentStatuses || attachmentBundle.statuses,
       audio: audioPayload,
     });
   } catch (err) {
@@ -4882,9 +5796,9 @@ app.post(`${basePath}/api/v1/sessions/:id/messages/stream`, async (req, res) => 
       return;
     }
 
-    const { files: attachedFiles, bundle: attachmentBundle } = await resolveAttachmentBundle(fileIds);
+    const attachedFiles = await resolveChatFiles(fileIds);
     const attachmentPayload = apiAttachmentPayload(attachedFiles.map(toChatFileRecord));
-    const attachmentContext = attachmentBundle.context;
+    const attachmentBundle = await buildAttachmentBundle(attachedFiles);
 
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -4900,18 +5814,15 @@ app.post(`${basePath}/api/v1/sessions/:id/messages/stream`, async (req, res) => 
       ? await runRoleplayChatTurn({
           session,
           latestMessage: text,
-          attachmentContext,
+          attachmentContext: attachmentBundle.context,
           model: session.model || String(req.body?.model || '').trim(),
-          attachmentImages: attachmentBundle.images,
-          attachmentStatuses: attachmentBundle.statuses,
           onEvent: (event) => sendEvent(event.type, event.data || {}),
         })
       : await runApiChatTurn({
           session,
           latestMessage: text,
-          attachmentContext,
-          attachmentImages: attachmentBundle.images,
-          attachmentStatuses: attachmentBundle.statuses,
+          attachmentContext: attachmentBundle.context,
+          attachmentImages: attachmentBundle.imagePaths,
           onEvent: (event) => sendEvent(event.type, event.data || {}),
         });
     session = await maybePersistHermesSession(session, result);
@@ -4933,7 +5844,7 @@ app.post(`${basePath}/api/v1/sessions/:id/messages/stream`, async (req, res) => 
       sendEvent('audio', audioEvent);
     }
     const assistantAppend = await appendApiSessionMessage(session.id, { role: 'assistant', text: result.text, meta: assistantMeta });
-    sendEvent('done', { ok: true, sessionId: session.id, responseId: assistantAppend.message.id, audio: !!audioEvent, attachmentStatuses: result.attachmentStatuses || attachmentBundle.statuses });
+    sendEvent('done', { ok: true, sessionId: session.id, responseId: assistantAppend.message.id, audio: !!audioEvent });
     res.end();
   } catch (err) {
     if (!res.headersSent) {
@@ -4965,13 +5876,13 @@ app.post(`${basePath}/api/v1/chat`, async (req, res) => {
       session = await createApiSession({ agent: requestedAgent, title, metadata: req.body?.metadata || {} });
     }
 
-    const { files: attachedFiles, bundle: attachmentBundle } = await resolveAttachmentBundle(fileIds);
+    const attachedFiles = await resolveChatFiles(fileIds);
     const attachmentPayload = apiAttachmentPayload(attachedFiles.map(toChatFileRecord));
-    const attachmentContext = attachmentBundle.context;
+    const attachmentBundle = await buildAttachmentBundle(attachedFiles);
 
     const userAppend = await appendApiSessionMessage(session.id, { role: 'user', text: message, meta: { files: attachmentPayload } });
     session = userAppend.session;
-    const result = await runApiChatTurn({ session, latestMessage: message, attachmentContext, attachmentImages: attachmentBundle.images, attachmentStatuses: attachmentBundle.statuses });
+    const result = await runApiChatTurn({ session, latestMessage: message, attachmentContext: attachmentBundle.context, attachmentImages: attachmentBundle.imagePaths });
     session = await maybePersistHermesSession(session, result);
     const assistantMeta = { files: [] };
     let audioPayload = null;
@@ -4997,7 +5908,6 @@ app.post(`${basePath}/api/v1/chat`, async (req, res) => {
       message: userAppend.message,
       response: assistantAppend.message,
       files: attachmentPayload,
-      attachmentStatuses: result.attachmentStatuses || attachmentBundle.statuses,
       audio: audioPayload,
     });
   } catch (err) {
@@ -5034,16 +5944,17 @@ app.post(`${basePath}/api/chat/sessions`, async (req, res) => {
     const agent = String(req.body?.agent || '').trim();
     const title = String(req.body?.title || '').trim();
     const requestedMode = String(req.body?.mode || 'agent').trim() === 'roleplay' ? 'roleplay' : 'agent';
-    const mode = relayAgentSource.getAgent(agent) ? 'agent' : requestedMode;
     const model = String(req.body?.model || '').trim();
-    const metadata = mergeAgentTransportMetadata(agent, req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {});
     const roleplayProvider = req.body?.roleplayProvider && typeof req.body.roleplayProvider === 'object' ? req.body.roleplayProvider : null;
-    if (mode === 'roleplay' && roleplayProvider) metadata.roleplayProvider = roleplayProvider;
+    const mode = relayAgentSource.getAgent(agent) ? 'agent' : requestedMode;
+    const metadata = mergeAgentTransportMetadata(agent, applyRequestedRoleplayProvider(
+      req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {},
+      mode === 'roleplay' ? roleplayProvider : null,
+    ));
     if (!agent) return res.status(400).json({ ok: false, error: 'agent is required' });
-    const currentRoster = getRoster();
-    const exists = currentRoster.agents.some((item) => item.id === agent);
+    const exists = roster.agents.some((item) => item.id === agent);
     if (!exists) return res.status(404).json({ ok: false, error: 'Agent not found' });
-    const session = await createApiSession({ agent, title, metadata, mode, model: mode === 'roleplay' ? model : '' });
+    const session = await createApiSession({ agent, title, metadata, mode, model });
     res.json({ ok: true, session: getApiSessionMeta(session) });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -5062,7 +5973,78 @@ app.get(`${basePath}/api/chat/sessions/:id/messages`, async (req, res) => {
   }
 });
 
-app.post([`${basePath}/api/chat/direct`, `${basePath}/api/v1/chat/direct`], async (req, res) => {
+app.post(`${basePath}/api/chat/sessions/:id/branch`, async (req, res) => {
+  try {
+    const session = await getApiSession(String(req.params.id || ''));
+    if (!session) return res.status(404).json({ ok: false, error: 'Session not found' });
+    if (String(session.mode || 'agent') !== 'roleplay') return res.status(400).json({ ok: false, error: 'Branching is only available in roleplay mode' });
+    const messageId = String(req.body?.messageId || '').trim();
+    if (!messageId) return res.status(400).json({ ok: false, error: 'messageId is required' });
+    const idx = (session.messages || []).findIndex((message) => String(message.id || '') === messageId);
+    if (idx === -1) return res.status(404).json({ ok: false, error: 'Message not found' });
+    const target = session.messages[idx];
+    if (target.role !== 'assistant' || !String(target.text || '').trim()) return res.status(400).json({ ok: false, error: 'Only generated agent messages can be branched' });
+    const branched = await createApiSession({
+      agent: session.agent,
+      title: buildBranchName(session.title || ''),
+      metadata: session.metadata || {},
+      mode: 'roleplay',
+      model: session.model || '',
+    });
+    const saved = await saveApiSession({ ...branched, messages: (session.messages || []).slice(0, idx + 1) });
+    res.json({ ok: true, session: getApiSessionMeta(saved) });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not branch roleplay session' });
+  }
+});
+
+app.post(`${basePath}/api/chat/sessions/:id/regenerate`, async (req, res) => {
+  try {
+    let session = await getApiSession(String(req.params.id || ''));
+    if (!session) return res.status(404).json({ ok: false, error: 'Session not found' });
+    if (String(session.mode || 'agent') !== 'roleplay') return res.status(400).json({ ok: false, error: 'Regeneration is only available in roleplay mode' });
+    const messageId = String(req.body?.messageId || '').trim();
+    if (!messageId) return res.status(400).json({ ok: false, error: 'messageId is required' });
+    const idx = (session.messages || []).findIndex((message) => String(message.id || '') === messageId);
+    if (idx === -1) return res.status(404).json({ ok: false, error: 'Message not found' });
+    const target = session.messages[idx];
+    if (target.role !== 'assistant' || !String(target.text || '').trim()) return res.status(400).json({ ok: false, error: 'Only generated agent messages can be regenerated' });
+    const prior = (session.messages || []).slice(0, idx);
+    const latestUser = [...prior].reverse().find((message) => message.role === 'user' && String(message.text || '').trim());
+    if (!latestUser) return res.status(400).json({ ok: false, error: 'Could not find the triggering user message for regeneration' });
+    const requestedRoleplayProvider = req.body?.roleplayProvider && typeof req.body.roleplayProvider === 'object' ? req.body.roleplayProvider : null;
+    session = await saveApiSession({
+      ...session,
+      messages: prior,
+      model: String(req.body?.model || session.model || '').trim() || session.model || '',
+      metadata: applyRequestedRoleplayProvider(session.metadata || {}, requestedRoleplayProvider),
+    });
+    const result = await runRoleplayChatTurn({ session, latestMessage: latestUser.text, model: session.model || '', roleplayProvider: requestedRoleplayProvider || session.metadata?.roleplayProvider || null });
+    const assistantAppend = await appendApiSessionMessage(session.id, { role: 'assistant', text: result.text, meta: { files: [], mode: 'roleplay', model: result.model || session.model || '' } });
+    res.json({ ok: true, session: getApiSessionMeta(assistantAppend.session), response: assistantAppend.message });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not regenerate roleplay session message' });
+  }
+});
+
+app.delete(`${basePath}/api/chat/sessions/:id`, async (req, res) => {
+  try {
+    const ok = await deleteApiSession(String(req.params.id || ''));
+    if (!ok) return res.status(404).json({ ok: false, error: 'Session not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || 'Could not delete session' });
+  }
+});
+
+function applyRequestedRoleplayProvider(metadata = {}, requestedRoleplayProvider = null) {
+  const next = metadata && typeof metadata === 'object' ? { ...metadata } : {};
+  if (requestedRoleplayProvider && typeof requestedRoleplayProvider === 'object') next.roleplayProvider = requestedRoleplayProvider;
+  else delete next.roleplayProvider;
+  return next;
+}
+
+app.post(`${basePath}/api/chat/direct`, async (req, res) => {
   try {
     const incomingText = req.body?.message ?? req.body?.text;
     const userText = String(incomingText || '').trim();
@@ -5088,68 +6070,66 @@ app.post([`${basePath}/api/chat/direct`, `${basePath}/api/v1/chat/direct`], asyn
       session = await createApiSession({
         agent: target,
         title,
-        metadata: mergeAgentTransportMetadata(target, {
-          ...(req.body?.metadata || {}),
-          ...(createdMode === 'roleplay' && requestedRoleplayProvider ? { roleplayProvider: requestedRoleplayProvider } : {}),
-        }),
+        metadata: mergeAgentTransportMetadata(target, applyRequestedRoleplayProvider(req.body?.metadata || {}, createdMode === 'roleplay' ? requestedRoleplayProvider : null)),
         mode: createdMode,
         model: createdMode === 'roleplay' ? requestedModel : '',
       });
     }
 
-    if (String(session.mode || 'agent') === 'roleplay' && (requestedModel || requestedRoleplayProvider)) {
+    if (String(session.mode || 'agent') === 'roleplay' && (requestedModel || requestedRoleplayProvider || session.metadata?.roleplayProvider)) {
       session = await saveApiSession({
         ...session,
         model: requestedModel || session.model,
-        metadata: {
-          ...(session.metadata || {}),
-          ...(requestedRoleplayProvider ? { roleplayProvider: requestedRoleplayProvider } : {}),
-        },
+        metadata: applyRequestedRoleplayProvider(session.metadata || {}, requestedRoleplayProvider),
       });
     }
 
-    const { files: attachedFiles, bundle: attachmentBundle } = await resolveAttachmentBundle(fileIds);
+    const attachedFiles = await resolveChatFiles(fileIds);
     const attachmentPayload = apiAttachmentPayload(attachedFiles.map(toChatFileRecord));
-    const attachmentContext = attachmentBundle.context;
+    const attachmentBundle = await buildAttachmentBundle(attachedFiles);
 
     const userAppend = await appendApiSessionMessage(session.id, { role: 'user', text: userText, meta: { files: attachmentPayload } });
     session = userAppend.session;
     const sessionMode = String(session.mode || 'agent') === 'roleplay' ? 'roleplay' : 'agent';
     const usesRelayTransport = session?.metadata?.chatTransport === 'relay';
 
-    if (!usesRelayTransport) broadcast({
-      type: 'agent:thinking',
-      data: {
-        agent: session.agent,
-        status: sessionMode === 'roleplay' ? 'Roleplay mode...' : 'Processing...',
-        source: 'direct-chat',
-        chat: true,
-        sessionId: session.id,
-        fileIds: attachedFiles.map((file) => file.id),
-        mode: sessionMode,
-        model: session.model || '',
-      },
-    });
+    if (!usesRelayTransport) {
+      broadcast({
+        type: 'agent:thinking',
+        data: {
+          agent: session.agent,
+          status: sessionMode === 'roleplay' ? 'Roleplay mode...' : 'Processing...',
+          source: 'direct-chat',
+          chat: true,
+          sessionId: session.id,
+          fileIds: attachedFiles.map((file) => file.id),
+          mode: sessionMode,
+          model: session.model || '',
+        },
+      });
+    }
 
     const result = sessionMode === 'roleplay'
-      ? await runRoleplayChatTurn({ session, latestMessage: userText, attachmentContext, model: session.model || requestedModel, roleplayProvider: requestedRoleplayProvider })
-      : await runApiChatTurn({ session, latestMessage: userText, attachmentContext, attachmentImages: attachmentBundle.images, attachmentStatuses: attachmentBundle.statuses });
+      ? await runRoleplayChatTurn({ session, latestMessage: userText, attachmentContext: attachmentBundle.context, model: session.model || requestedModel, roleplayProvider: requestedRoleplayProvider })
+      : await runApiChatTurn({ session, latestMessage: userText, attachmentContext: attachmentBundle.context, attachmentImages: attachmentBundle.imagePaths });
     session = await maybePersistHermesSession(session, result);
     const assistantMeta = { files: [], mode: sessionMode, model: result.model || session.model || '' };
     const assistantAppend = await appendApiSessionMessage(session.id, { role: 'assistant', text: result.text, meta: assistantMeta });
 
-    if (!usesRelayTransport) broadcast({
-      type: 'agent:responding',
-      data: {
-        agent: session.agent,
-        message: result.text,
-        source: 'direct-chat',
-        chat: true,
-        sessionId: session.id,
-        mode: sessionMode,
-        model: result.model || session.model || '',
-      },
-    });
+    if (!usesRelayTransport) {
+      broadcast({
+        type: 'agent:responding',
+        data: {
+          agent: session.agent,
+          message: result.text,
+          source: 'direct-chat',
+          chat: true,
+          sessionId: session.id,
+          mode: sessionMode,
+          model: result.model || session.model || '',
+        },
+      });
+    }
 
     res.json({
       ok: true,
@@ -5159,7 +6139,6 @@ app.post([`${basePath}/api/chat/direct`, `${basePath}/api/v1/chat/direct`], asyn
       model: result.model || session.model || '',
       text: userText,
       fileIds: attachedFiles.map((file) => file.id),
-      attachmentStatuses: result.attachmentStatuses || attachmentBundle.statuses,
       message: userAppend.message,
       response: assistantAppend.message,
       agentMessage: {
@@ -5176,30 +6155,7 @@ app.post([`${basePath}/api/chat/direct`, `${basePath}/api/v1/chat/direct`], asyn
   }
 });
 
-await relayAgentSource.configure(await loadDirectChatSettings().catch(() => ({})));
-
-const wsPath = `${basePath || ''}/ws` || '/ws';
-const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
-
-server.on('upgrade', async (req, socket, head) => {
-  try {
-    const pathname = new URL(req.url || '/', `${useHttps ? 'https' : 'http'}://localhost`).pathname;
-    if (pathname !== wsPath) {
-      socket.destroy();
-      return;
-    }
-    const authorization = authorizeWebSocketRequest(req, { validateSession: isValidSession });
-    if (!authorization.ok) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-      socket.destroy();
-      return;
-    }
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
-  } catch {
-    socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-    socket.destroy();
-  }
-});
+const wss = new WebSocketServer({ server, path: `${basePath || ''}/ws` || '/ws' });
 
 wss.on('connection', (ws) => {
   console.log(`[ws] Client connected (total: ${wss.clients.size})`);
@@ -5267,11 +6223,25 @@ function broadcast(msg) {
 export { broadcast, wss };
 
 const bridge = new OpenClawBridge();
+await relayAgentSource.configure(await loadDirectChatSettings().catch(() => ({})));
 const stopSessionMonitor = startSessionMonitor({ broadcast, roster, emitResponses: true });
 const stopHermesSessionMonitor = startHermesSessionMonitor({ broadcast });
 
 app.get(`${basePath}/api/session-monitor/debug`, (req, res) => {
   res.json({ ok: true, agents: typeof stopSessionMonitor.getDebugState === 'function' ? stopSessionMonitor.getDebugState() : [] });
+});
+
+bridge.on('connected', (info) => {
+  console.log(`[bridge] Connected (${info.mode} mode)`);
+  broadcast({ type: 'bridge:connected', data: info });
+});
+
+bridge.on('disconnected', () => {
+  broadcast({ type: 'bridge:disconnected' });
+});
+
+bridge.on('event', (event) => {
+  broadcast(event);
 });
 
 relayAgentSource.on('connected', (info) => {
@@ -5293,26 +6263,16 @@ relayAgentSource.on('event', (event) => {
 });
 
 relayAgentSource.on('error', (error) => {
-  console.warn('[relay] error:', error?.message || error);
-});
-
-bridge.on('connected', (info) => {
-  console.log(`[bridge] Connected (${info.mode} mode)`);
-  broadcast({ type: 'bridge:connected', data: info });
-});
-
-bridge.on('disconnected', () => {
-  broadcast({ type: 'bridge:disconnected' });
-});
-
-bridge.on('event', (event) => {
-  broadcast(event);
+  console.error('[relay] Source error:', error?.message || error);
 });
 
 app.use((err, req, res, next) => {
   if (!err) return next();
   if (err instanceof multer.MulterError) {
-    return res.status(400).json({ ok: false, error: err.message, code: err.code || 'UPLOAD_ERROR' });
+    const message = err.code === 'LIMIT_FILE_SIZE'
+      ? `Uploaded file is too large. Limit is ${Math.round(VISUAL_UPLOAD_FILE_LIMIT_BYTES / 1024 / 1024)} MB per file.`
+      : err.message;
+    return res.status(400).json({ ok: false, error: message, code: err.code || 'UPLOAD_ERROR' });
   }
   const accept = String(req.headers.accept || '');
   const wantsJson = req.path.startsWith(`${basePath}/api/`) || accept.includes('application/json');
@@ -5333,17 +6293,17 @@ server.listen(config.port, config.host, () => {
   }).catch((err) => {
     console.error('[update] Failed to start auto-update scheduler:', err.message);
   });
-  loadWakeSettings().then((settings) => {
-    const enabled = !!settings.porcupineAccessKey || Object.keys(settings.wakeWords || {}).length > 0;
-    if (!enabled) {
-      console.log('[wake] Optional wake workers disabled by configuration');
-      return;
-    }
-    warmWakeTranscriber().then(() => console.log('[wake] Warm transcriber ready'))
-      .catch((err) => console.warn('[wake] Transcriber unavailable:', err.message));
-    warmWakeKeywordDetector().then(() => console.log('[wake] Keyword detector ready'))
-      .catch((err) => console.warn('[wake] Keyword detector unavailable:', err.message));
-  }).catch((err) => console.warn('[wake] Could not read wake settings:', err.message));
+  warmWakeTranscriber().then(() => {
+    console.log('[wake] Warm transcriber ready');
+  }).catch((err) => {
+    console.error('[wake] Failed to warm transcriber:', err.message);
+  });
+
+  warmWakeKeywordDetector().then(() => {
+    console.log('[wake] Keyword detector ready');
+  }).catch((err) => {
+    console.error('[wake] Failed to warm keyword detector:', err.message);
+  });
 
   try {
     bridge.start();

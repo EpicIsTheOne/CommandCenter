@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CommandCenter Live2D Viewer</title>
+  <style>
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; color: #d7f9ff; font-family: Inter, system-ui, sans-serif; }
+    #stage { position: fixed; inset: 0; width: 100%; height: 100%; }
+    #status { position: fixed; left: 16px; right: 16px; bottom: 14px; padding: 10px 12px; border: 1px solid rgba(139,213,255,.3); border-radius: 12px; background: rgba(7,13,24,.72); backdrop-filter: blur(10px); font-size: 12px; line-height: 1.45; }
+    #status.hidden { display: none; }
+    .bad { color: #ff9aa8; }
+    .muted { color: rgba(215,249,255,.72); }
+  </style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <div id="status">Loading Live2D viewer…</div>
+  <script src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js"></script>
+  <script src="js/live2d-viewer.js?v=20260531-live2dfix5"></script>
+</body>
+</html>

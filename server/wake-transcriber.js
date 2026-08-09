@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import crypto from 'node:crypto';
 import readline from 'node:readline';
-import { resolvePython } from './platform-capabilities.js';
 
 const ROOT = process.cwd();
 const PYTHONPATH = join(ROOT, '.pydeps');
@@ -13,7 +12,6 @@ const WHISPER_CACHE_DIR = join(ROOT, '.cache', 'whisper');
 let worker = null;
 let rl = null;
 const pending = [];
-let unavailableReason = '';
 
 async function ensureDirs() {
   await mkdir(WHISPER_CACHE_DIR, { recursive: true });
@@ -32,12 +30,7 @@ export async function warmWakeTranscriber() {
   await ensureDirs();
   if (worker && !worker.killed) return;
 
-  const python = await resolvePython();
-  if (!python) {
-    unavailableReason = 'Python 3 is not available.';
-    throw new Error(unavailableReason);
-  }
-  worker = spawn(python.command, [...python.args, join(ROOT, 'server', 'wake_transcriber.py')], {
+  worker = spawn('python3', [join(ROOT, 'server', 'wake_transcriber.py')], {
     env: {
       ...process.env,
       PYTHONPATH,
@@ -46,14 +39,6 @@ export async function warmWakeTranscriber() {
       WAKE_WHISPER_COMPUTE_TYPE: process.env.WAKE_WHISPER_COMPUTE_TYPE || 'int8',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
-  });
-
-  worker.once('error', (err) => {
-    unavailableReason = `Wake transcriber unavailable: ${err.message}`;
-    while (pending.length) pending.shift().reject(new Error(unavailableReason));
-    worker = null;
-    rl?.close();
-    rl = null;
   });
 
   rl = readline.createInterface({ input: worker.stdout });
@@ -83,10 +68,6 @@ export async function warmWakeTranscriber() {
   });
 }
 
-export function getWakeTranscriberStatus() {
-  return { available: !!worker && !worker.killed, reason: unavailableReason };
-}
-
 async function toWavFile(audioBuffer, filename = 'wake.webm') {
   const id = crypto.randomBytes(8).toString('hex');
   const inFile = join(tmpdir(), `wake-${id}-${filename.replace(/[^a-zA-Z0-9_.-]/g, '_')}`);
@@ -107,7 +88,6 @@ export async function transcribeWakeAudio(audioBuffer, filename = 'wake.webm') {
   try {
     const text = await new Promise((resolve, reject) => {
       pending.push({ resolve, reject });
-      if (!worker?.stdin?.writable) return reject(new Error(unavailableReason || 'Wake transcriber is unavailable'));
       worker.stdin.write(JSON.stringify({ audio: wavFile }) + '\n');
     });
     return text;

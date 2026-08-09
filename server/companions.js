@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, writeFile, copyFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile, copyFile, rm } from 'node:fs/promises';
 import { dirname, basename, join, extname } from 'node:path';
 
 const DATA_DIR = join(process.cwd(), 'data', 'companions');
@@ -40,6 +40,7 @@ const BUILT_IN_COMPANIONS = [
 
 const DEFAULT_SETTINGS = {
   agentVisuals: {},
+  singleAgentVisuals: {},
 };
 
 function slugify(value = '') {
@@ -51,7 +52,34 @@ function slugify(value = '') {
 }
 
 function normalizeMode(mode = '') {
-  return String(mode) === 'companion' ? 'companion' : 'default';
+  const value = String(mode || '').trim().toLowerCase();
+  if (value === 'companion') return 'companion';
+  if (value === 'live2d') return 'live2d';
+  if (value === 'vrm') return 'vrm';
+  return 'default';
+}
+
+function normalizeLive2dConfig(config = {}) {
+  return {
+    modelUrl: String(config?.modelUrl || config?.live2dModelUrl || '').trim(),
+    bridgeUrl: String(config?.bridgeUrl || config?.live2dBridgeUrl || '').trim(),
+  };
+}
+
+function normalizeVrmConfig(config = {}) {
+  return {
+    modelUrl: String(config?.modelUrl || config?.vrmModelUrl || '').trim(),
+    idleAnimUrl: String(config?.idleAnimUrl || config?.vrmIdleAnimUrl || '').trim(),
+    thinkingAnimUrl: String(config?.thinkingAnimUrl || config?.vrmThinkingAnimUrl || '').trim(),
+    speakingAnimUrl: String(config?.speakingAnimUrl || config?.vrmSpeakingAnimUrl || '').trim(),
+    scale: normalizeScale(config?.scale ?? config?.vrmScale),
+    cameraY: Number.isFinite(Number(config?.cameraY ?? config?.vrmCameraY)) ? Math.max(-2, Math.min(4, Math.round(Number(config?.cameraY ?? config?.vrmCameraY) * 100) / 100)) : 1.25,
+    cameraZoom: Number.isFinite(Number(config?.cameraZoom ?? config?.vrmCameraZoom)) ? Math.max(0.4, Math.min(3, Math.round(Number(config?.cameraZoom ?? config?.vrmCameraZoom) * 100) / 100)) : 1,
+    lookAtCamera: config?.lookAtCamera !== false && config?.vrmLookAtCamera !== false,
+    idleMotion: String(config?.idleMotion || config?.vrmIdleMotion || 'breathing').trim() || 'breathing',
+    speakingMotion: String(config?.speakingMotion || config?.vrmSpeakingMotion || 'talk').trim() || 'talk',
+    visemeMode: String(config?.visemeMode || config?.vrmVisemeMode || 'synthetic').trim() || 'synthetic',
+  };
 }
 
 function normalizeScale(value) {
@@ -308,16 +336,24 @@ export async function loadCompanionSettings() {
   }
 }
 
-function normalizeSettings(input = {}) {
-  const agentVisuals = {};
-  for (const [agentId, config] of Object.entries(input?.agentVisuals || {})) {
-    agentVisuals[String(agentId)] = {
+function normalizeVisualMap(input = {}) {
+  const visuals = {};
+  for (const [agentId, config] of Object.entries(input || {})) {
+    visuals[String(agentId)] = {
       mode: normalizeMode(config?.mode),
       companionId: String(config?.companionId || '').trim(),
       scale: normalizeScale(config?.scale),
+      live2d: normalizeLive2dConfig(config?.live2d || config),
+      vrm: normalizeVrmConfig(config?.vrm || config),
     };
   }
-  return { agentVisuals };
+  return visuals;
+}
+
+function normalizeSettings(input = {}) {
+  const agentVisuals = normalizeVisualMap(input?.agentVisuals || {});
+  const singleAgentVisuals = normalizeVisualMap(input?.singleAgentVisuals || {});
+  return { agentVisuals, singleAgentVisuals };
 }
 
 export async function saveCompanionSettings(input = {}) {
@@ -327,15 +363,72 @@ export async function saveCompanionSettings(input = {}) {
   return settings;
 }
 
-export async function loadCompanionRegistry(publicBase = '') {
-  let stored = [];
+async function writeStoredCompanionItems(items = []) {
+  await mkdir(DATA_DIR, { recursive: true });
+  await writeFile(REGISTRY_FILE, JSON.stringify({ items: items || [] }, null, 2) + '\n', { mode: 0o600 });
+}
+
+async function loadStoredCompanionItems() {
   try {
-    if (existsSync(REGISTRY_FILE)) {
-      const raw = await readFile(REGISTRY_FILE, 'utf8');
-      const parsed = JSON.parse(raw);
-      stored = Array.isArray(parsed?.items) ? parsed.items : [];
-    }
-  } catch {}
+    if (!existsSync(REGISTRY_FILE)) return [];
+    const raw = await readFile(REGISTRY_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed?.items) ? parsed.items : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function upsertStoredCompanionItem(item = {}) {
+  if (!item?.id) throw new Error('Companion item id is required');
+  const stored = await loadStoredCompanionItems();
+  const next = stored.filter((entry) => String(entry?.id || '') !== String(item.id));
+  next.push(item);
+  await writeStoredCompanionItems(next);
+  return item;
+}
+
+export async function removeStoredCompanionItem(companionId = '') {
+  const id = String(companionId || '').trim();
+  if (!id) return;
+  const stored = await loadStoredCompanionItems();
+  const next = stored.filter((entry) => String(entry?.id || '') !== id);
+  if (next.length !== stored.length) await writeStoredCompanionItems(next);
+}
+
+export async function deleteImportedCompanionPackage(companionId = '', publicBase = '') {
+  const id = String(companionId || '').trim();
+  if (!id) {
+    const err = new Error('Companion id is required');
+    err.code = 'BAD_REQUEST';
+    throw err;
+  }
+  const registry = await loadCompanionRegistry(publicBase);
+  const item = registry.find((entry) => String(entry?.id || '') === id) || null;
+  if (!item) {
+    const err = new Error('Companion not found');
+    err.code = 'COMPANION_NOT_FOUND';
+    throw err;
+  }
+  const deletableTypes = new Set(['codex-import', 'live2d-import', 'vrm-import']);
+  if (!deletableTypes.has(item.sourceType)) {
+    const err = new Error('Only imported visual packages can be deleted');
+    err.code = 'PROTECTED_COMPANION';
+    throw err;
+  }
+  const slug = slugify(item.importDirSlug || item.importedPet?.id || id.replace(/^(codex|live2d|vrm)-/, '') || item.name || '');
+  if (!slug) {
+    const err = new Error('Could not resolve imported package folder');
+    err.code = 'BAD_REQUEST';
+    throw err;
+  }
+  await rm(join(IMPORTS_DIR, slug), { recursive: true, force: true });
+  await removeStoredCompanionItem(id);
+  return { deletedId: id, deletedSlug: slug, item };
+}
+
+export async function loadCompanionRegistry(publicBase = '') {
+  const stored = await loadStoredCompanionItems();
   const imported = await loadImportedCompanions(publicBase);
   const merged = [...BUILT_IN_COMPANIONS, ...stored.filter((item) => item?.id && !BUILT_IN_COMPANIONS.find((builtIn) => builtIn.id === item.id)), ...imported];
   const deduped = [];
@@ -377,8 +470,16 @@ export function resolveAgentVisual(agentId = '', settings = {}, registry = []) {
   const companionId = String(config.companionId || '').trim();
   const companion = registry.find((item) => String(item.id) === companionId) || null;
   const scale = normalizeScale(config.scale);
-  if (mode !== 'companion' || !companion) {
-    return { agentId: String(agentId), mode: 'default', companionId: '', scale, companion: null };
+  const live2d = normalizeLive2dConfig(config.live2d || config);
+  const vrm = normalizeVrmConfig(config.vrm || config);
+  if (mode === 'live2d') {
+    return { agentId: String(agentId), mode: 'live2d', companionId: '', scale, companion: null, live2d, vrm };
   }
-  return { agentId: String(agentId), mode: 'companion', companionId, scale, companion };
+  if (mode === 'vrm') {
+    return { agentId: String(agentId), mode: 'vrm', companionId: '', scale, companion: null, live2d, vrm };
+  }
+  if (mode !== 'companion' || !companion) {
+    return { agentId: String(agentId), mode: 'default', companionId: '', scale, companion: null, live2d, vrm };
+  }
+  return { agentId: String(agentId), mode: 'companion', companionId, scale, companion, live2d, vrm };
 }

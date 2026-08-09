@@ -204,11 +204,11 @@ export function detectRelayAgents() {
     source: 'relay',
     label: 'Relay',
     enabled: status.enabled,
-    available: status.enabled && agents.length > 0,
+    available: agents.length > 0,
     connected: status.connected,
     url: status.url,
     agents,
-    error: status.lastError || '',
+    error: status.enabled && !status.connected ? 'Relay enabled but not connected yet.' : '',
   };
 }
 

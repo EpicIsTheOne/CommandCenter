@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>OpenClaw Command Center</title>
-  <script src="js/base-path.js?v=20260714-basepath1"></script>
+  <script>window.__BASE_PATH__ = (location.pathname.replace(/\/$/, '').match(/^(.*\/commandcenter)(?:\/.*)?$/)?.[1] || '');</script>
   <link rel="manifest" href="manifest.webmanifest">
   <meta name="theme-color" content="#0b1018">
   <meta name="mobile-web-app-capable" content="yes">
@@ -13,7 +13,7 @@
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=VT323&family=Inter:wght@400;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/styles.css?v=20260518-fairy-image2">
+  <link rel="stylesheet" href="css/styles.css?v=20260601-pawanfix1">
 </head>
 <body>
   <div id="command-center">
@@ -276,27 +276,211 @@
         <details id="direct-chat-settings-group" class="setting-group collapsible-setting">
           <summary class="collapsible-setting-summary">
             <span>Direct Chat</span>
-            <span class="setting-hint">Relay-backed agents</span>
+            <span class="setting-hint">Roleplay defaults + agent backchannel limits</span>
           </summary>
           <div class="collapsible-setting-body">
             <div class="setting-group nested-setting-group">
-              <label style="display:flex; align-items:center; gap:8px;">
-                <input id="direct-chat-relay-enabled" type="checkbox">
-                <span>Enable relay agents</span>
-              </label>
-              <div class="setting-hint">Pulls remote/device agents from a Project Reika relay.</div>
+              <div class="setting-row between" style="align-items:center; gap:10px; flex-wrap:wrap;">
+                <label>Backchannel conversations</label>
+                <button id="save-direct-chat-settings-btn" class="primary-button" type="button">SAVE DIRECT CHAT SETTINGS</button>
+              </div>
+              <div id="direct-chat-settings-status" class="setting-hint">Loading direct chat settings…</div>
+              <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-top:12px;">
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label for="direct-chat-random-turn-cap">Scheduled random chat turn cap</label>
+                  <input id="direct-chat-random-turn-cap" type="number" min="2" max="20" step="1" value="8">
+                  <div class="setting-hint">Max turns for the 4× daily Astra↔Nyxie chats.</div>
+                </div>
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label for="direct-chat-manual-turn-cap">Manual thread turn cap</label>
+                  <input id="direct-chat-manual-turn-cap" type="number" min="2" max="40" step="1" value="24">
+                  <div class="setting-hint">Safety cap for Ask Agent To Reply threads.</div>
+                </div>
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label style="display:flex; align-items:center; gap:8px; margin-top:28px;">
+                    <input id="direct-chat-natural-stop" type="checkbox" checked>
+                    <span>Stop naturally before cap</span>
+                  </label>
+                  <div class="setting-hint">Ends scheduled chats early when the latest reply looks final.</div>
+                </div>
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label style="display:flex; align-items:center; gap:8px; margin-top:28px;">
+                    <input id="direct-chat-roleplay-auto-speak" type="checkbox" checked>
+                    <span>Auto-speak roleplay replies</span>
+                  </label>
+                  <div class="setting-hint">When off, roleplay and roleplay group chats keep manual VOICE buttons but stop automatic TTS playback.</div>
+                </div>
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label style="display:flex; align-items:center; gap:8px; margin-top:28px;">
+                    <input id="direct-chat-relay-enabled" type="checkbox">
+                    <span>Enable relay agents</span>
+                  </label>
+                  <div class="setting-hint">Lets Direct Chat pull remote/device agents from a Project Reika relay.</div>
+                </div>
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label style="display:flex; align-items:center; gap:8px; margin-top:28px;">
+                    <input id="direct-chat-relay-show-device-labels" type="checkbox" checked>
+                    <span>Show device labels for relay agents</span>
+                  </label>
+                  <div class="setting-hint">Turn this off if you want the roster/chat UI to hide the device origin badges.</div>
+                </div>
+              </div>
+              <div class="setting-group nested-setting-group" style="margin-top:12px;">
+                <label for="direct-chat-relay-url">Relay URL</label>
+                <input id="direct-chat-relay-url" type="text" placeholder="wss://relay.example.com/v1/app or https://relay.example.com">
+                <div class="setting-hint">CommandCenter connects server-side. You can paste a base URL or a full <code>/v1/app</code> websocket URL.</div>
+              </div>
             </div>
             <div class="setting-group nested-setting-group">
-              <label for="direct-chat-relay-url">Relay URL</label>
-              <input id="direct-chat-relay-url" type="text" placeholder="wss://relay.example.com/v1/app or https://relay.example.com">
-              <div class="setting-hint">CommandCenter connects server-side. Paste a base URL or full <code>/v1/app</code> websocket URL.</div>
+              <label>Roleplay agent files</label>
+              <div class="setting-row between" style="align-items:center; gap:10px; flex-wrap:wrap; margin-top:8px;">
+                <div id="direct-chat-roleplay-agent-files-status" class="setting-hint">Loading roleplay agent files…</div>
+                <button id="refresh-roleplay-agent-files-btn" class="secondary-button" type="button">REFRESH ROLEPLAY FILES</button>
+              </div>
+              <div id="direct-chat-roleplay-agent-files-list" class="agent-voice-list roleplay-agent-files-list" style="margin-top:12px;"></div>
             </div>
             <div class="setting-group nested-setting-group">
-              <label style="display:flex; align-items:center; gap:8px;">
-                <input id="direct-chat-relay-show-device-labels" type="checkbox" checked>
-                <span>Show device labels for relay agents</span>
-              </label>
-              <div class="setting-hint">Hide this if you want relay agents to blend into the normal CommandCenter roster.</div>
+              <label>Roleplay defaults</label>
+              <div style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-top:8px;">
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label for="direct-chat-roleplay-default-model">Default roleplay model</label>
+                  <select id="direct-chat-roleplay-default-model">
+                    <option value="z-ai/glm-5">Z.ai GLM-5 (OpenRouter default)</option>
+                    <option value="pkrd/cosmosrp-2.1">CosmosRP 2.1 (Pawan.krd free)</option>
+                    <option value="pkrd/cosmosrp-3.5">CosmosRP 3.5 (Pawan.krd)</option>
+                    <option value="pkrd/cosmosrp-3.5:it">CosmosRP 3.5 Instructed (Pawan.krd)</option>
+                    <option value="pkrd/cosmosrp-3.5:msr">CosmosRP 3.5 MSR (Pawan.krd)</option>
+                    <option value="pkrd/cosmosrp-3.5:msr:it">CosmosRP 3.5 MSR-Instructed (Pawan.krd)</option>
+                    <option value="pkrd/cosmosrp-4.0">CosmosRP 4.0 (Pawan.krd)</option>
+                    <option value="pkrd/cosmosrp-4.0:lite">CosmosRP 4.0 Lite (Pawan.krd)</option>
+                    <option value="pkrd/cosmosrp-4.0-pro">CosmosRP 4.0 Pro (Pawan.krd)</option>
+                    <option value="anthropic/claude-sonnet-4.5">Claude Sonnet 4.5</option>
+                    <option value="openai/gpt-5.5">GPT-5.5</option>
+                    <option value="anthracite-org/magnum-v4-72b">Magnum v4 72B</option>
+                    <option value="sao10k/l3.1-euryale-70b">Euryale 70B</option>
+                    <option value="sophosympatheia/rogue-rose-103b-v0.2">Rogue Rose 103B</option>
+                    <option value="__custom_openai__">Custom OpenAI-compatible...</option>
+                  </select>
+                </div>
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label for="direct-chat-pawan-api-key">Pawan.krd API key</label>
+                  <input id="direct-chat-pawan-api-key" type="password" placeholder="pk-...">
+                  <label style="display:flex; align-items:center; gap:8px; margin-top:8px; font-size:0.82rem; color:var(--text-dim);">
+                    <input id="direct-chat-pawan-clear-key" type="checkbox">
+                    <span>Clear saved Pawan.krd key</span>
+                  </label>
+                </div>
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label for="direct-chat-roleplay-custom-url">Custom base URL</label>
+                  <input id="direct-chat-roleplay-custom-url" type="url" placeholder="http://localhost:1234/v1">
+                </div>
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label for="direct-chat-roleplay-custom-model">Custom model ID</label>
+                  <input id="direct-chat-roleplay-custom-model" type="text" placeholder="model-id">
+                </div>
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label for="direct-chat-roleplay-custom-key">Custom API key</label>
+                  <input id="direct-chat-roleplay-custom-key" type="password" placeholder="Leave blank to keep existing key">
+                  <label style="display:flex; align-items:center; gap:8px; margin-top:8px; font-size:0.82rem; color:var(--text-dim);">
+                    <input id="direct-chat-roleplay-clear-key" type="checkbox">
+                    <span>Clear saved custom key</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+        </details>
+
+        <details id="agent-comms-settings-group" class="setting-group collapsible-setting">
+          <summary class="collapsible-setting-summary">
+            <span>Backchannel</span>
+            <span class="setting-hint">Private agent-to-agent comms</span>
+          </summary>
+          <div class="collapsible-setting-body">
+            <div class="setting-group nested-setting-group">
+              <div class="setting-row between" style="align-items:center; gap:10px; flex-wrap:wrap;">
+                <label>Internal comms</label>
+                <div class="settings-inline-actions" style="display:flex; gap:8px; flex-wrap:wrap;">
+                  <button id="refresh-agent-comms-btn" class="secondary-button" type="button">REFRESH</button>
+                </div>
+              </div>
+              <div id="agent-comms-status" class="setting-hint">Loading backchannel…</div>
+              <div class="agent-comms-filters" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin:12px 0;">
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label for="agent-comms-filter-from">Filter from</label>
+                  <select id="agent-comms-filter-from"></select>
+                </div>
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label for="agent-comms-filter-to">Filter to</label>
+                  <select id="agent-comms-filter-to"></select>
+                </div>
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label for="agent-comms-filter-scope-type">Filter scope</label>
+                  <select id="agent-comms-filter-scope-type">
+                    <option value="">Any</option>
+                    <option value="global">Global</option>
+                    <option value="chat">Chat</option>
+                    <option value="task">Task</option>
+                    <option value="call">Call</option>
+                  </select>
+                </div>
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label for="agent-comms-filter-scope-id">Filter scope ID</label>
+                  <input id="agent-comms-filter-scope-id" type="text" placeholder="commandcenter_api_123">
+                </div>
+                <div class="setting-group nested-setting-group" style="margin:0;">
+                  <label for="agent-comms-filter-unread-for">Unread for</label>
+                  <select id="agent-comms-filter-unread-for"></select>
+                </div>
+              </div>
+              <div id="agent-comms-list" class="agent-comms-list" style="display:grid; gap:10px; max-height:260px; overflow:auto; margin-bottom:16px;"></div>
+              <div class="setting-group nested-setting-group">
+                <div class="setting-row between" style="align-items:center; gap:10px; flex-wrap:wrap;">
+                  <label>Send internal comm</label>
+                  <span class="setting-hint">Ctrl/Cmd + Enter to send</span>
+                </div>
+                <div class="agent-comms-compose" style="display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-top:8px;">
+                  <div class="setting-group nested-setting-group" style="margin:0;">
+                    <label for="agent-comms-from-agent">From</label>
+                    <select id="agent-comms-from-agent"></select>
+                  </div>
+                  <div class="setting-group nested-setting-group" style="margin:0;">
+                    <label for="agent-comms-to-agent">To</label>
+                    <select id="agent-comms-to-agent"></select>
+                  </div>
+                  <div class="setting-group nested-setting-group" style="margin:0;">
+                    <label for="agent-comms-type">Type</label>
+                    <select id="agent-comms-type">
+                      <option value="note">Note</option>
+                      <option value="context">Context</option>
+                      <option value="handoff">Handoff</option>
+                      <option value="warning">Warning</option>
+                      <option value="reply">Reply</option>
+                      <option value="status">Status</option>
+                    </select>
+                  </div>
+                  <div class="setting-group nested-setting-group" style="margin:0;">
+                    <label for="agent-comms-scope-type">Scope</label>
+                    <select id="agent-comms-scope-type">
+                      <option value="global">Global</option>
+                      <option value="chat">Chat</option>
+                      <option value="task">Task</option>
+                      <option value="call">Call</option>
+                    </select>
+                  </div>
+                  <div class="setting-group nested-setting-group" style="margin:0; grid-column:span 2; min-width:220px;">
+                    <label for="agent-comms-scope-id">Scope ID</label>
+                    <input id="agent-comms-scope-id" type="text" placeholder="Optional for global; required otherwise" disabled>
+                  </div>
+                </div>
+                <div class="setting-group nested-setting-group" style="margin-top:10px;">
+                  <label for="agent-comms-text">Message</label>
+                  <textarea id="agent-comms-text" rows="4" placeholder="Astra → Nyxie: He needs truth, not optimization. Behave."></textarea>
+                </div>
+                <div class="settings-inline-actions" style="display:flex; justify-content:flex-end; margin-top:8px;">
+                  <button id="agent-comms-send-btn" class="primary-button" type="button">SEND INTERNAL COMM</button>
+                </div>
+              </div>
             </div>
           </div>
         </details>
@@ -790,27 +974,18 @@
               </div>
               <div class="setting-hint">Set each agent to keep the current CommandCenter look or use a companion-style animated character instead.</div>
               <div class="setting-row companion-import-row">
-                <input id="companion-import-source" type="text" autocomplete="off" placeholder="Paste extracted Codex pet folder path containing pet.json + spritesheet asset">
-                <button id="import-companion-btn" class="secondary-button" type="button">IMPORT CODEX PET</button>
-              </div>
-              <div class="setting-row companion-import-row">
                 <label class="companion-upload-field">
-                  <input id="companion-import-folder" type="file" webkitdirectory directory multiple>
-                  <span>Choose Codex pet folder</span>
+                  <input id="companion-import-universal" type="file" multiple accept=".zip,.vrm,.json,.model3.json,.model.json,.png,.webp,.jpg,.jpeg,.gif,.moc3,.physics3.json,.motion3.json,.atlas">
+                  <span>Choose visual package</span>
                 </label>
                 <select id="companion-import-agent">
                   <option value="">Do not auto-assign</option>
                 </select>
-                <button id="import-companion-folder-btn" class="secondary-button" type="button">UPLOAD FOLDER</button>
+                <button id="import-companion-universal-btn" class="secondary-button" type="button">UPLOAD VISUAL</button>
               </div>
-              <div class="setting-row companion-import-row">
-                <label class="companion-upload-field">
-                  <input id="companion-import-zip" type="file" accept=".zip,application/zip">
-                  <span>Choose Codex pet zip</span>
-                </label>
-                <button id="import-companion-zip-btn" class="secondary-button" type="button">UPLOAD ZIP</button>
-              </div>
+              <div class="setting-hint">Auto-detects Codex pet zips/files, Live2D model packages, and VRM files. Use a zip for full folders so relative assets stay together.</div>
               <div id="companion-import-status" class="setting-hint"></div>
+              <div id="companion-import-library" class="agent-voice-list compact-list"></div>
               <div id="agent-companion-list" class="agent-voice-list"></div>
             </div>
           </div>
@@ -1162,6 +1337,6 @@
 
   <script src="vendor/picovoice/web-voice-processor.js"></script>
   <script src="vendor/picovoice/porcupine-web.js"></script>
-  <script type="module" src="js/app.js?v=20260708-relay1"></script>
+  <script type="module" src="js/app.js?v=20260601-pawanfix1"></script>
 </body>
 </html>

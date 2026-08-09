@@ -1,6 +1,7 @@
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { readJsonStore, updateJsonStore, writeJsonStore } from './json-store.js';
 
 const ROOT = process.cwd();
 const DATA_DIR = join(ROOT, 'data');
@@ -70,19 +71,27 @@ function scoreEntry(entry = {}, query = '', scope = DEFAULT_SCOPE) {
 }
 
 export async function loadFairyMemory() {
-  return normalizeStore(await readJsonStore(MEMORY_FILE, { defaultValue: { version: 1, entries: [] } }));
+  try {
+    if (!existsSync(MEMORY_FILE)) return { version: 1, entries: [] };
+    const raw = await readFile(MEMORY_FILE, 'utf8');
+    return normalizeStore(JSON.parse(raw));
+  } catch {
+    return { version: 1, entries: [] };
+  }
 }
 
 export async function saveFairyMemory(store = {}) {
   const normalized = normalizeStore(store);
-  await writeJsonStore(MEMORY_FILE, normalized, { mode: 0o600 });
+  await mkdir(DATA_DIR, { recursive: true });
+  await writeFile(MEMORY_FILE, JSON.stringify(normalized, null, 2) + '\n', { mode: 0o600 });
   return normalized;
 }
 
 export async function addFairyMemoryEntry({ text, tags = [], scope = DEFAULT_SCOPE, pinned = false, source = 'fairy-live' } = {}) {
   const entry = normalizeEntry({ text, tags, scope, pinned, source });
   if (!entry) throw new Error('Missing memory text');
-  const next = await updateJsonStore(MEMORY_FILE, { defaultValue: { version: 1, entries: [] }, normalize: normalizeStore }, (store) => ({ ...store, entries: [...store.entries, entry] }));
+  const store = await loadFairyMemory();
+  const next = await saveFairyMemory({ ...store, entries: [...store.entries, entry] });
   return { entry, store: next };
 }
 
@@ -98,23 +107,27 @@ export function selectRelevantFairyMemory({ store = {}, query = '', scope = DEFA
 
 export async function removeFairyMemoryEntry(id = '') {
   const target = cleanText(id, 96);
-  let removed = false;
-  const next = await updateJsonStore(MEMORY_FILE, { defaultValue: { version: 1, entries: [] }, normalize: normalizeStore }, (store) => {
-    const entries = store.entries.filter((entry) => String(entry.id || '') !== target);
-    removed = entries.length !== store.entries.length;
-    return { ...store, entries };
-  });
-  return { ok: removed, store: next };
+  const store = await loadFairyMemory();
+  const before = store.entries.length;
+  const nextEntries = store.entries.filter((entry) => String(entry.id || '') !== target);
+  const next = await saveFairyMemory({ ...store, entries: nextEntries });
+  return { ok: nextEntries.length !== before, store: next };
 }
 
 export async function updateFairyMemoryEntry(id = '', patch = {}) {
   const target = cleanText(id, 96);
+  const store = await loadFairyMemory();
   let found = false;
-  const next = await updateJsonStore(MEMORY_FILE, { defaultValue: { version: 1, entries: [] }, normalize: normalizeStore }, (store) => ({ ...store, entries: store.entries.map((entry) => {
-      if (String(entry.id || '') !== target) return entry;
-      found = true;
-      return normalizeEntry({ ...entry, ...patch, updatedAt: new Date().toISOString() });
-    }).filter(Boolean) }));
+  const entries = store.entries.map((entry) => {
+    if (String(entry.id || '') !== target) return entry;
+    found = true;
+    return normalizeEntry({
+      ...entry,
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    });
+  }).filter(Boolean);
+  const next = await saveFairyMemory({ ...store, entries });
   return { ok: found, store: next, entry: found ? next.entries.find((entry) => String(entry.id) === target) || null : null };
 }
 
