@@ -59,22 +59,39 @@ function getHermesBin() {
   return process.env.HERMES_BIN || 'hermes';
 }
 
-function buildHermesArgs(prompt, session, attachmentImages = []) {
+function resolveAttachmentImagePath(image) {
+  return typeof image === 'string'
+    ? image.trim()
+    : String(image?.path || '').trim();
+}
+
+export function buildHermesArgs(prompt, session, attachmentImages = []) {
   const provider = String(process.env.HERMES_INFERENCE_PROVIDER || '').trim();
   const resolvedAgent = getHermesTarget(session);
   const model = String(process.env.HERMES_INFERENCE_MODEL || resolvedAgent?.model || process.env.HERMES_AGENT_MODEL || '').trim();
   const resumeSessionId = getHermesSessionId(session);
   const profile = String(resolvedAgent?.hermesProfile || '').trim();
+  const imagePath = resolveAttachmentImagePath(attachmentImages[0]);
   return [
     ...(profile ? ['--profile', profile] : []),
     'chat',
     '-q', prompt,
-    ...(attachmentImages[0] ? ['--image', attachmentImages[0]] : []),
     '-Q',
     '--source', 'commandcenter',
     ...(resumeSessionId ? ['--resume', resumeSessionId] : []),
     ...(model ? ['--model', model] : []),
     ...(provider ? ['--provider', provider] : []),
+    ...(imagePath ? ['--image', imagePath] : []),
+  ];
+}
+
+export function buildOpenClawArgs(prompt, session, target, thinkingLevel) {
+  const openClawSessionId = getOpenClawSessionId(session);
+  return [
+    'agent', '--agent', target,
+    ...(openClawSessionId ? ['--session-id', openClawSessionId] : []),
+    '--thinking', thinkingLevel,
+    '--message', prompt,
   ];
 }
 
@@ -147,15 +164,9 @@ export function runApiChatTurn({ session, latestMessage, attachmentContext = '',
       }
     }
 
-    const openClawSessionId = getOpenClawSessionId(session);
     const args = useHermes
       ? buildHermesArgs(prompt, session, attachmentImages)
-      : [
-          'agent', '--agent', target,
-          ...(openClawSessionId ? ['--session-id', openClawSessionId] : []),
-          '--thinking', thinkingLevel,
-          '--message', prompt,
-        ];
+      : buildOpenClawArgs(prompt, session, target, thinkingLevel);
 
     execFile(useHermes ? hermesBin : openclawBin, args, {
       timeout: 120000,

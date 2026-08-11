@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
 const ROOT = process.cwd();
-const DATA_DIR = join(ROOT, 'data');
+const DATA_DIR = String(process.env.COMMANDCENTER_DATA_DIR || '').trim() || join(ROOT, 'data');
 const AUTH_FILE = join(DATA_DIR, 'ui-auth.json');
 const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 

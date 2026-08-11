@@ -182,9 +182,9 @@ async function getUpdateSummary({ refresh = true } = {}) {
   };
 }
 
-function buildRestartScript({ branch, remote, currentPid, runInstall }) {
+export function buildRestartScript({ branch, remote, currentPid, runInstall, previousSha }) {
   const installStep = runInstall
-    ? `npm install --no-fund --no-audit || npm install`
+    ? (existsSync(join(REPO_DIR, 'package-lock.json')) ? 'npm ci --no-fund --no-audit' : 'npm install --no-fund --no-audit')
     : `echo '[update] package install skipped'`;
   return `
 set -e
@@ -194,7 +194,12 @@ git fetch ${JSON.stringify(remote)} ${JSON.stringify(branch)} --tags >> ${JSON.s
 echo "[update] pulling ${remote}/${branch}" >> ${JSON.stringify(TMP_LOG)}
 git pull --ff-only ${JSON.stringify(remote)} ${JSON.stringify(branch)} >> ${JSON.stringify(TMP_LOG)} 2>&1
 echo "[update] installing dependencies" >> ${JSON.stringify(TMP_LOG)}
-${installStep} >> ${JSON.stringify(TMP_LOG)} 2>&1
+if ! ${installStep} >> ${JSON.stringify(TMP_LOG)} 2>&1; then
+  echo "[update] install failed; rolling back" >> ${JSON.stringify(TMP_LOG)}
+  git reset --hard ${JSON.stringify(previousSha || '')} >> ${JSON.stringify(TMP_LOG)} 2>&1
+  ${installStep} >> ${JSON.stringify(TMP_LOG)} 2>&1 || true
+  exit 1
+fi
 sleep 1
 kill ${Number(currentPid) || process.pid} >/dev/null 2>&1 || true
 nohup npm start >> ${JSON.stringify(TMP_LOG)} 2>&1 &
@@ -251,6 +256,7 @@ export async function applyUpdate({ requestedBy = 'manual' } = {}) {
     remote: status.repo.remote,
     currentPid: process.pid,
     runInstall,
+    previousSha: status.repo.localSha,
   });
   const child = spawn('bash', ['-lc', script], {
     cwd: REPO_DIR,

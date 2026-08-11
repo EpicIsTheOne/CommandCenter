@@ -4,13 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import crypto from 'node:crypto';
 import readline from 'node:readline';
+import { resolvePython } from './platform-capabilities.js';
 
 const ROOT = process.cwd();
-const VENV_PYTHON = join(ROOT, '.venv', 'bin', 'python');
-
 let worker = null;
 let rl = null;
 const pending = [];
+let unavailableReason = '';
 
 function run(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
@@ -25,8 +25,21 @@ async function ensureWorker() {
   await mkdir(join(ROOT, '.cache'), { recursive: true });
   if (worker && !worker.killed) return;
 
-  worker = spawn(VENV_PYTHON, [join(ROOT, 'server', 'wake_keyword_detector.py')], {
+  const python = await resolvePython();
+  if (!python) {
+    unavailableReason = 'Python 3 is not available.';
+    throw new Error(unavailableReason);
+  }
+  worker = spawn(python.command, [...python.args, join(ROOT, 'server', 'wake_keyword_detector.py')], {
     stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  worker.once('error', (err) => {
+    unavailableReason = `Wake keyword detector unavailable: ${err.message}`;
+    while (pending.length) pending.shift().reject(new Error(unavailableReason));
+    worker = null;
+    rl?.close();
+    rl = null;
   });
 
   rl = readline.createInterface({ input: worker.stdout });
@@ -72,12 +85,17 @@ export async function warmWakeKeywordDetector() {
   await ensureWorker();
 }
 
+export function getWakeKeywordDetectorStatus() {
+  return { available: !!worker && !worker.killed, reason: unavailableReason };
+}
+
 export async function detectWakeKeyword(audioBuffer, filename = 'wake.webm') {
   await ensureWorker();
   const { inFile, wavFile } = await toWavFile(audioBuffer, filename);
   try {
     return await new Promise((resolve, reject) => {
       pending.push({ resolve, reject });
+      if (!worker?.stdin?.writable) return reject(new Error(unavailableReason || 'Wake keyword detector is unavailable'));
       worker.stdin.write(JSON.stringify({ audio: wavFile }) + '\n');
     });
   } finally {

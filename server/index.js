@@ -45,6 +45,7 @@ import { applyUpdate, finalizePostRestartUpdateState, getUpdatePayload, startAut
 import { ALLOWED_SCOPE_TYPES, ALLOWED_TYPES, buildAgentCommPromptBlock, createAgentComm, getAgentComm, listAgentComms, listAgentCommThread, markAgentCommsRead } from './agent-comms.js';
 import { appendRoleplayGroupMessages, createRoleplayGroup, deleteRoleplayGroup, getRoleplayGroup, listRoleplayGroups, saveRoleplayGroup } from './roleplay-group-store.js';
 import { authorizeWebSocketRequest } from './request-security.js';
+import { getPlatformCapabilities } from './platform-capabilities.js';
 import { RelayManager } from './relay-manager.js';
 import { RELAY_OWNER_ID } from './relay-protocol.js';
 import { createRelayDeviceUpgrade } from './relay-ws.js';
@@ -735,15 +736,12 @@ app.use(async (req, res, next) => {
   if (!req.path.startsWith(`${basePath}/api/`)) return next();
   if (req.path.startsWith(`${basePath}/api/auth/`)) return next();
   if (req.path.startsWith(`${basePath}/api/v1/`)) return next();
-  if (req.path.startsWith(`${basePath}/api/fairy/`)) return next();
-  if (req.path.startsWith(`${basePath}/api/call/`)) return next();
-  if (req.path.startsWith(`${basePath}/api/live/`)) return next();
   const configuredApiKey = String(config.apiKey || '').trim();
   const authHeader = String(req.headers.authorization || '').trim();
   const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   if (configuredApiKey && bearerToken === configuredApiKey) return next();
   const auth = await loadUiAuthConfig();
-  if (!auth.enabled) return next();
+  if (!auth.enabled) return res.status(403).json({ ok: false, error: 'Operator password setup is required.', code: 'SETUP_REQUIRED' });
   const token = parseCookies(req).cc_auth;
   if (!isValidSession(token)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
   return next();
@@ -777,6 +775,10 @@ app.post(`${basePath}/api/relay/v1/devices/:id/revoke`, async (req, res) => {
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message || 'Could not revoke relay device', code: 'INTERNAL_ERROR' });
   }
+});
+
+app.get(`${basePath}/api/setup/capabilities`, async (_req, res) => {
+  res.json({ ok: true, capabilities: await getPlatformCapabilities() });
 });
 
 
