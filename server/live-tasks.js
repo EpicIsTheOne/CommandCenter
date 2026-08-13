@@ -3,6 +3,8 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { getHermesAgent } from './agents.js';
+import { runApiChatTurn } from './api-chat-runner.js';
+import relayAgentSource from './relay-agent-source.js';
 
 const ROOT = process.cwd();
 const DATA_DIR = join(ROOT, 'data');
@@ -103,10 +105,151 @@ function parseHermesTaskOutput(raw = '') {
   return { text: kept.join('\n').trim(), hermesSessionId };
 }
 
+function relayRuntimeLabel(agent = {}) {
+  const provider = String(agent.relayProviderLabel || agent.relayProviderId || 'Relay').trim();
+  const device = String(agent.relayDeviceName || agent.relayDeviceId || '').trim();
+  return `${provider} relay${device ? ` on ${device}` : ''}`;
+}
+
+function runRelayLiveTask(task, { broadcast } = {}) {
+  const target = String(task.agent || '').trim();
+  const relayAgent = relayAgentSource.getAgent(target);
+  const runtimeLabel = relayRuntimeLabel(relayAgent || {});
+  const startedAt = Date.now();
+  let finished = false;
+
+  function publish(updated) {
+    if (updated) broadcast?.({ type: 'live_task:update', data: updated });
+  }
+
+  function summarize(stage = 'working', extra = '') {
+    const elapsed = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+    const elapsedText = elapsed < 2 ? 'just started' : `${elapsed}s elapsed`;
+    return `${runtimeLabel} ${stage}${extra ? ` - ${extra}` : ''} - ${elapsedText}`.slice(0, 280);
+  }
+
+  async function pushUpdate(patch = {}) {
+    const updated = await updateLiveTask(task.id, patch);
+    publish(updated);
+    return updated;
+  }
+
+  if (!relayAgent) {
+    pushUpdate({
+      status: 'failed',
+      runtime: 'relay',
+      summary: 'Relay agent is no longer available.',
+      error: `Relay target ${target || '(missing)'} is not currently connected.`,
+    }).catch(() => {});
+    return;
+  }
+
+  const relayFields = {
+    runtime: 'relay',
+    relayDeviceId: relayAgent.relayDeviceId,
+    relayDeviceName: relayAgent.relayDeviceName,
+    relayProviderId: relayAgent.relayProviderId,
+    relayProviderLabel: relayAgent.relayProviderLabel,
+    relayAgentId: relayAgent.relayAgentId,
+  };
+  pushUpdate({
+    ...relayFields,
+    status: 'working',
+    summary: summarize('routing', 'sending the request to the remote agent'),
+    error: '',
+  }).catch(() => {});
+
+  const heartbeatTimer = setInterval(() => {
+    if (finished) return;
+    pushUpdate({
+      ...relayFields,
+      status: 'working',
+      summary: summarize('working', 'waiting for the remote response'),
+    }).catch(() => {});
+  }, 6000);
+  const killTimer = setTimeout(() => {
+    if (finished) return;
+    finished = true;
+    clearInterval(heartbeatTimer);
+    const timeoutPatch = {
+      ...relayFields,
+      status: 'failed',
+      summary: summarize('timed out'),
+      error: 'Relay task timed out while waiting for the remote agent.',
+    };
+    pushUpdate(timeoutPatch).catch(() => {});
+  }, 20 * 60 * 1000);
+
+  const session = {
+    id: `fairy_relay_${String(task.id || '').replace(/[^a-z0-9_-]/gi, '_')}`,
+    agent: target,
+    mode: 'agent',
+    metadata: {
+      ...relayAgentSource.buildSessionMetadata(target),
+      skipBackchannel: true,
+      source: 'fairy-live-task',
+    },
+    messages: [],
+  };
+
+  runApiChatTurn({
+    session,
+    latestMessage: task.prompt,
+    onEvent: (event = {}) => {
+      const data = event.data || {};
+      if (event.type !== 'thinking' && !String(event.type || '').startsWith('agent:')) return;
+      const activity = String(data.message || data.status || data.tool || 'processing').replace(/\s+/g, ' ').trim();
+      pushUpdate({
+        ...relayFields,
+        status: 'working',
+        summary: summarize('working', activity || 'processing'),
+        relayActivity: {
+          status: String(data.status || '').slice(0, 80),
+          message: String(data.message || '').slice(0, 240),
+          tool: String(data.tool || '').slice(0, 120),
+          updatedAt: nowIso(),
+        },
+      }).catch(() => {});
+    },
+  }).then(async (result = {}) => {
+    if (finished) return;
+    finished = true;
+    clearInterval(heartbeatTimer);
+    clearTimeout(killTimer);
+    const text = String(result.text || '').trim();
+    const needsInputMatch = text.match(/(?:^|\n)NEEDS_INPUT\s*:\s*([\s\S]+)/i);
+    const patch = {
+      ...relayFields,
+      status: needsInputMatch ? 'needs_input' : 'completed',
+      summary: (needsInputMatch ? String(needsInputMatch[1] || '').trim() : text).slice(0, 280)
+        || (needsInputMatch ? 'Remote agent needs more input.' : `${runtimeLabel} background task completed.`),
+      result: text.slice(0, 12000),
+      error: '',
+      relayProviderSessionId: String(result.providerSessionId || '').slice(0, 240),
+      relayRemoteSessionId: String(result.sessionId || '').slice(0, 240),
+    };
+    await pushUpdate(patch);
+  }).catch(async (error) => {
+    if (finished) return;
+    finished = true;
+    clearInterval(heartbeatTimer);
+    clearTimeout(killTimer);
+    await pushUpdate({
+      ...relayFields,
+      status: 'failed',
+      summary: `${runtimeLabel} task failed.`.slice(0, 280),
+      error: String(error?.message || error || 'Relay task failed').slice(0, 4000),
+    });
+  });
+}
+
 export function runLiveTask(task, { broadcast, roster }) {
   const openclawBin = process.env.OPENCLAW_BIN || 'openclaw';
   const hermesBin = process.env.HERMES_BIN || 'hermes';
   const target = task.agent || roster?.primaryAgentId || 'orchestrator';
+  if (String(task.runtime || '').trim() === 'relay' || relayAgentSource.getAgent(target)) {
+    return runRelayLiveTask(task, { broadcast, roster });
+  }
   const hermesAgent = getHermesAgent(target, roster);
   const useHermes = String(task.runtime || '').trim() === 'hermes' || !!hermesAgent;
   const runtimeLabel = useHermes ? 'Hermes' : 'OpenClaw';

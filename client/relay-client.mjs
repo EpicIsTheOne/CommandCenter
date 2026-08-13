@@ -920,6 +920,15 @@ export class CommandCenterRelayClient extends EventEmitter {
     return this.sendEnvelope('relay.chat.response', payload, socket, { replyTo: requestId });
   }
 
+  sendAgentActivity(socket, requestId, agentId, status, message = '', tool = '') {
+    return this.sendEnvelope('agent.activity', {
+      agent: boundedText(agentId, '', 128),
+      status: boundedText(status, '', 32),
+      ...(message ? { message: boundedText(message, '', 240) } : {}),
+      ...(tool ? { tool: boundedText(tool, '', 120) } : {}),
+    }, socket, { replyTo: requestId });
+  }
+
   async executeHermesChat(profile, payload) {
     if (this.hermesBackend) {
       try {
@@ -987,6 +996,7 @@ export class CommandCenterRelayClient extends EventEmitter {
     }
     this.chatInFlight.set(request.id, true);
     try {
+      this.sendAgentActivity(socket, request.id, request.payload.agentId, 'thinking', 'Hermes is processing the request.');
       const result = await this.executeHermesChat(profile, request.payload);
       this.sendChatResponse(socket, request.id, {
         ok: true,
@@ -995,7 +1005,9 @@ export class CommandCenterRelayClient extends EventEmitter {
         providerSessionId: request.payload.providerSessionId,
         ...(profile.model ? { model: profile.model } : {}),
       });
+      this.sendAgentActivity(socket, request.id, request.payload.agentId, 'idle', 'Hermes is ready.');
     } catch (error) {
+      this.sendAgentActivity(socket, request.id, request.payload.agentId, 'error', 'Hermes could not complete the request.');
       this.sendChatResponse(socket, request.id, {
         ok: false,
         errorCode: /^[A-Za-z0-9_.:-]{1,64}$/.test(String(error?.code || '')) ? error.code : 'HERMES_CHAT_FAILED',

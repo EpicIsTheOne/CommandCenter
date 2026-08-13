@@ -72,6 +72,31 @@ test('local relay connection lifecycle is owner-bound and does not trust payload
   assert.equal(source.getAgents()[0].relayDeviceId, 'device-bound');
 });
 
+test('relay activity remains available for agent inspection without an active chat request', () => {
+  const source = new RelayAgentSource();
+  const manager = new EventEmitter();
+  manager.listPresence = () => [{ ownerId: RELAY_OWNER_ID, deviceId: 'device-activity', state: 'online' }];
+  source.attachLocalManager(manager);
+  manager.emit('message', snapshot('device-activity', {
+    device: { name: 'Activity Device', platform: 'win32' },
+    activeProviderId: 'hermes',
+    providers: [{ id: 'hermes', name: 'Hermes' }],
+  }));
+  manager.emit('message', roster('device-activity', [{ id: 'hermes:default', name: 'Reika', status: 'online' }]));
+  manager.emit('message', {
+    ownerId: RELAY_OWNER_ID,
+    deviceId: 'device-activity',
+    type: 'agent.activity',
+    payload: { agent: 'hermes:default', status: 'tool_use', message: 'Inspecting the repository.', tool: 'workspace' },
+  });
+
+  const agent = source.getAgents()[0];
+  assert.equal(agent.relayAgentStatus, 'tool_use');
+  assert.equal(agent.relayAgentMessage, 'Inspecting the repository.');
+  assert.equal(agent.relayAgentTool, 'workspace');
+  assert.equal(agent.relayDeviceState, 'online');
+});
+
 test('local device chat uses the authenticated manager transport and correlation binding', async () => {
   const source = new RelayAgentSource();
   const manager = new EventEmitter();

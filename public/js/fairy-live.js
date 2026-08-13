@@ -540,7 +540,7 @@ export async function sendDirectChatMessage(text = '') {
   if (!value) return { ok: false, error: 'No text provided' };
   if (!state.sessionId) throw new Error(`Start ${personaName()} Live before sending text.`);
   appendTranscript('user', value, 'Epic');
-  setStatus('thinking', `${personaName()} is deciding whether to answer or hand this to Astra…`);
+  setStatus('thinking', `${personaName()} is deciding whether to answer or hand this to an agent…`);
   await fetchJson(`${BASE}/api/call/${encodeURIComponent(state.sessionId)}/event`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2000,7 +2000,7 @@ async function sendTextTurn() {
   }
   els.text.value = '';
   appendTranscript('user', text, 'Epic');
-  setStatus('thinking', `${personaName()} is deciding whether to answer or hand this to Astra…`);
+  setStatus('thinking', `${personaName()} is deciding whether to answer or hand this to an agent…`);
   try {
     await fetchJson(`${BASE}/api/call/${encodeURIComponent(state.sessionId)}/event`, {
       method: 'POST',
@@ -2012,13 +2012,24 @@ async function sendTextTurn() {
   }
 }
 
+function taskRuntimeLabel(task = {}) {
+  const runtime = String(task.runtime || '').trim().toLowerCase();
+  if (runtime === 'relay') {
+    const provider = String(task.relayProviderLabel || task.relayProviderId || '').trim();
+    const device = String(task.relayDeviceName || task.relayDeviceId || '').trim();
+    return `${provider || 'Relay agent'}${device ? ` on ${device}` : ''}`;
+  }
+  return runtime === 'hermes' ? 'Hermes' : 'Astra/OpenClaw';
+}
+
 function handleTaskUpdate(task) {
   if (!task?.id) return;
   state.tasks.set(task.id, task);
   state.lastTaskSummary = String(task.summary || task.result || task.error || '').trim();
+  const runtimeLabel = taskRuntimeLabel(task);
   if (state.lastTaskId && state.lastTaskId === task.id) {
     renderHandoff(`
-      <strong>Handed to Astra/OpenClaw:</strong> ${escapeHtml(task.title || task.id)}<br>
+      <strong>Handed to ${escapeHtml(runtimeLabel)}:</strong> ${escapeHtml(task.title || task.id)}<br>
       <span>Status: ${escapeHtml(task.status || 'queued')}</span><br>
       <span>${escapeHtml(task.summary || '')}</span>
     `, task.status === 'failed' ? 'error' : task.status === 'completed' ? 'done' : '');
@@ -2026,7 +2037,7 @@ function handleTaskUpdate(task) {
     const overlayDuration = task.status === 'working' ? 4200 : 9000;
     showOverlay(`${escapeHtml(task.title || task.id)} · ${escapeHtml(task.status || 'queued')}${task.summary ? `<br>${escapeHtml(task.summary)}` : ''}`, overlayTone, overlayDuration);
     if (task.status === 'working') {
-      setStatus('task_running', `Astra/OpenClaw is actively working. ${personaName()} is tracking it.`);
+      setStatus('task_running', `${runtimeLabel} is actively working. ${personaName()} is tracking it.`);
       markEvent('task working');
       return;
     }
@@ -2461,9 +2472,10 @@ export function handleEvent(msg = {}) {
   if (type === 'call:handoff.started' && data.sessionId === state.sessionId) {
     state.lastRoutingDecision = 'handoff-started';
     state.lastTaskSummary = String(data.summary || '').trim();
-    setStatus('handing_off', `${personaName()} is handing that to Astra/OpenClaw…`);
-    renderHandoff(`<strong>Routing to Astra/OpenClaw:</strong> ${escapeHtml(data.title || 'Background task')}<br><span>${escapeHtml(data.summary || '')}</span>`);
-    showOverlay(`Routing to Astra: ${escapeHtml(data.title || 'Background task')}${data.summary ? `<br>${escapeHtml(data.summary)}` : ''}`, 'tool', 9000);
+    const runtimeLabel = taskRuntimeLabel(data);
+    setStatus('handing_off', `${personaName()} is handing that to ${runtimeLabel}…`);
+    renderHandoff(`<strong>Routing to ${escapeHtml(runtimeLabel)}:</strong> ${escapeHtml(data.title || 'Background task')}<br><span>${escapeHtml(data.summary || '')}</span>`);
+    showOverlay(`Routing to ${escapeHtml(runtimeLabel)}: ${escapeHtml(data.title || 'Background task')}${data.summary ? `<br>${escapeHtml(data.summary)}` : ''}`, 'tool', 9000);
     emitLog(`${personaName()} handed off: ${data.title || 'Background task'}`, 'info');
     markEvent('handoff started');
     return;
@@ -2472,7 +2484,7 @@ export function handleEvent(msg = {}) {
   if (type === 'call:handoff.task_created' && data.sessionId === state.sessionId) {
     state.lastTaskId = data.taskId || data.task?.id || '';
     state.lastRoutingDecision = 'task-created';
-    setStatus('task_running', `Astra/OpenClaw has the task now. ${personaName()} is watching the board.`);
+    setStatus('task_running', `${taskRuntimeLabel(data.task || data)} has the task now. ${personaName()} is watching the board.`);
     handleTaskUpdate(data.task || { id: state.lastTaskId, title: data.title, status: 'queued' });
     markEvent('task created');
     return;

@@ -204,6 +204,10 @@ test('Windows client executes only bounded Hermes chat requests and correlates r
   assert.equal(first.payload.ok, true);
   assert.equal(first.payload.text, 'Reika response');
   assert.deepEqual(calls[0], buildHermesChatArgs({ profile: { name: 'default' }, message: 'hello' }));
+  const firstActivity = server.messages
+    .filter((message) => message.type === 'agent.activity' && message.replyTo === 'chat-request-1')
+    .map((message) => message.payload.status);
+  assert.deepEqual(firstActivity, ['thinking', 'idle']);
 
   const secondResponse = waitForResponse();
   assert.equal(server.relayManager.sendChatRequest(DEVICE.id, {

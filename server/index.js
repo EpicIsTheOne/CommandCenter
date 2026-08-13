@@ -1196,14 +1196,31 @@ function inferTaskDomain(text = '') {
 function getAgentRuntimeInfo(agentId = '', roster) {
   const agents = Array.isArray(roster?.agents) ? roster.agents : [];
   const agent = agents.find((item) => item.id === agentId) || {};
-  const runtime = agent.source === 'hermes' || agent.bridge === 'hermes' ? 'hermes' : 'openclaw';
-  const label = compactForSpeech(agent.label || agent.name || agent.id || agentId || (runtime === 'hermes' ? 'Hermes' : 'OpenClaw'), 80);
+  const isRelay = agent.source === 'relay' || agent.bridge === 'relay' || agent.relay === true;
+  const runtime = isRelay ? 'relay' : (agent.source === 'hermes' || agent.bridge === 'hermes' ? 'hermes' : 'openclaw');
+  const label = compactForSpeech(agent.label || agent.name || agent.id || agentId || (runtime === 'hermes' ? 'Hermes' : runtime === 'relay' ? 'Relay agent' : 'OpenClaw'), 80);
   return { agent, runtime, label };
+}
+
+function getTaskRuntimeLabel(task = {}, activeRoster = getRoster()) {
+  const runtime = String(task.runtime || '').trim().toLowerCase();
+  if (runtime === 'relay') {
+    const agent = (activeRoster?.agents || []).find((item) => item.id === task.agent) || relayAgentSource.getAgent(task.agent) || {};
+    const provider = compactForSpeech(agent.relayProviderLabel || agent.relayProviderId || task.relayProviderLabel || 'Relay', 60);
+    const device = compactForSpeech(agent.relayDeviceName || agent.relayDeviceId || task.relayDeviceName || '', 80);
+    return `${provider} relay${device ? ` on ${device}` : ''}`;
+  }
+  return runtime === 'hermes' ? 'Hermes' : 'OpenClaw';
 }
 
 function describeAgentChoice(agentId = '', roster) {
   const { agent, runtime, label } = getAgentRuntimeInfo(agentId, roster);
   const domain = inferTaskDomain(`${agent.id || ''} ${agent.label || ''} ${agent.name || ''}`);
+  if (runtime === 'relay') {
+    const provider = agent.relayProviderLabel || agent.relayProviderId || 'Relay';
+    const device = agent.relayDeviceName || agent.relayDeviceId || '';
+    return { label, runtime, reason: `Remote ${provider} agent${device ? ` on ${device}` : ''}. Routing it through the relay.` };
+  }
   if (domain === 'ui') return { label, runtime, reason: 'UI issue. Routing the visual specialist.' };
   if (domain === 'backend') return { label, runtime, reason: 'Backend job. Routing the systems brain.' };
   if (domain === 'qa') return { label, runtime, reason: 'Validation problem. Routing QA.' };
@@ -1268,6 +1285,80 @@ function chooseIdleAgent(preferred = '', roster = getRoster()) {
     })
     .sort((a, b) => a.score - b.score);
   return ordered[0]?.id || preferredId || String(roster?.primaryAgentId || 'orchestrator').trim();
+}
+
+function sanitizeFairyReportText(value = '', maxChars = 900) {
+  return compactForSpeech(value, maxChars)
+    .replace(/(api[_ -]?key|password|passwd|token|secret|cookie|credential)\s*[:=]\s*\S+/ig, '$1: [redacted]');
+}
+
+function fairyAgentMatches(agent = {}, query = '') {
+  const needle = String(query || '').trim().toLowerCase();
+  if (!needle) return true;
+  return [agent.id, agent.label, agent.name, ...(Array.isArray(agent.aliases) ? agent.aliases : [])]
+    .filter(Boolean)
+    .some((value) => String(value).trim().toLowerCase() === needle);
+}
+
+async function buildFairyAgentReport({ agent = '', taskId = '', includeAgents = true } = {}) {
+  const activeRoster = getRoster();
+  const mergedAgents = [...(Array.isArray(activeRoster?.agents) ? activeRoster.agents : [])];
+  for (const relayAgent of relayAgentSource.getAgents()) {
+    if (!mergedAgents.some((item) => item.id === relayAgent.id)) mergedAgents.push(relayAgent);
+  }
+  const selectedAgents = mergedAgents.filter((item) => fairyAgentMatches(item, agent));
+  const selectedIds = new Set(selectedAgents.map((item) => item.id));
+  const tasks = await listLiveTasks();
+  const relevantTasks = tasks
+    .filter((task) => {
+      if (taskId && task.id !== taskId) return false;
+      if (agent && !selectedIds.has(task.agent)) return false;
+      return true;
+    })
+    .slice(0, taskId ? 1 : 12)
+    .map((task) => ({
+      id: task.id,
+      title: sanitizeFairyReportText(task.title, 180),
+      agent: task.agent,
+      runtime: task.runtime || 'openclaw',
+      runtimeLabel: getTaskRuntimeLabel(task, activeRoster),
+      status: task.status,
+      summary: sanitizeFairyReportText(task.summary, 700),
+      result: sanitizeFairyReportText(task.result, 1200),
+      error: sanitizeFairyReportText(task.error, 700),
+      updatedAt: task.updated_at,
+    }));
+  const agentReport = selectedAgents.map((item) => {
+    const activity = agentActivity.get(item.id) || {};
+    const status = String(activity.state || item.relayAgentStatus || item.status || item.relayDeviceState || 'unknown').trim();
+    return {
+      id: item.id,
+      label: item.label || item.name || item.id,
+      source: item.source || item.bridge || 'local',
+      runtime: item.source === 'relay' || item.bridge === 'relay' || item.relay === true ? 'relay' : item.source === 'hermes' || item.bridge === 'hermes' ? 'hermes' : 'openclaw',
+      provider: item.relayProviderLabel || item.relayProviderId || '',
+      device: item.relayDeviceName || item.relayDeviceId || '',
+      platform: item.relayPlatform || '',
+      transport: item.relayTransport || '',
+      status,
+      activity: sanitizeFairyReportText(activity.message || item.relayAgentMessage || '', 420),
+      tool: sanitizeFairyReportText(activity.tool || item.relayAgentTool || '', 180),
+      model: item.model || '',
+    };
+  });
+  const workingTasks = relevantTasks.filter((task) => ['queued', 'working'].includes(task.status)).length;
+  return {
+    ok: true,
+    query: String(agent || '').trim(),
+    taskId: String(taskId || '').trim(),
+    relay: relayAgentSource.getStatus(),
+    primaryAgentId: activeRoster?.primaryAgentId || '',
+    agents: includeAgents ? agentReport : [],
+    tasks: relevantTasks,
+    summary: selectedAgents.length
+      ? `${selectedAgents.length} agent${selectedAgents.length === 1 ? '' : 's'} visible; ${workingTasks} related task${workingTasks === 1 ? '' : 's'} active.`
+      : `No agent matched ${String(agent || '').trim() || 'that query'}.`,
+  };
 }
 
 async function maybeQueueFairyMemoryUpdate(session = null) {
@@ -1346,10 +1437,12 @@ function maybeAnnounceLiveTaskProgress(msg) {
   if (!taskId || status !== 'working') return;
   const session = findSessionForLiveTask(taskId);
   if (!session) return;
+  const runtimeLabel = getTaskRuntimeLabel(task);
+  const defaultSummary = `${runtimeLabel} is working on it.`;
   const updated = updateCallSession(session.id, {
     handoffTaskId: taskId,
     handoffTitle: task.title || session.handoffTitle || '',
-    lastTaskSummary: task.summary || (String(task.runtime || '').trim() === 'hermes' ? 'Hermes is working on it.' : 'OpenClaw is working on it.'),
+    lastTaskSummary: task.summary || defaultSummary,
   });
   broadcastCallDebugState(session.id);
   broadcast({
@@ -1358,7 +1451,7 @@ function maybeAnnounceLiveTaskProgress(msg) {
       sessionId: session.id,
       taskId,
       status,
-      summary: task.summary || (String(task.runtime || '').trim() === 'hermes' ? 'Hermes is working on it.' : 'OpenClaw is working on it.'),
+      summary: task.summary || defaultSummary,
       title: task.title || session.handoffTitle || 'Background task',
       session: updated || session,
     },
@@ -1992,8 +2085,7 @@ function maybeAnnounceLiveTaskResult(msg) {
     if (oldest) announcedLiveTaskResults.delete(oldest);
   }
 
-  const runtime = String(task.runtime || '').trim() === 'hermes' ? 'hermes' : 'openclaw';
-  const runtimeLabel = runtime === 'hermes' ? 'Hermes' : 'OpenClaw';
+  const runtimeLabel = getTaskRuntimeLabel(task);
   const title = compactForSpeech(task.title || session.handoffTitle || `${runtimeLabel} task`, 180);
   const agent = compactForSpeech(task.agent || session.agent || runtimeLabel, 80);
   const summary = compactForSpeech(task.summary || '', 700);
@@ -4524,6 +4616,18 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
               const name = String(fc?.name || '').trim();
               const id = String(fc?.id || '').trim();
               const args = fc?.args && typeof fc.args === 'object' ? fc.args : {};
+              if (name === 'inspect_agents') {
+                const report = await buildFairyAgentReport({ agent: args.agent, includeAgents: true });
+                broadcast({ type: 'call:agents.inspected', data: { sessionId: session.id, ...report } });
+                functionResponses.push({ name, id, response: report });
+                continue;
+              }
+              if (name === 'check_agent_progress') {
+                const report = await buildFairyAgentReport({ agent: args.agent, taskId: args.taskId, includeAgents: false });
+                broadcast({ type: 'call:agents.progress', data: { sessionId: session.id, ...report } });
+                functionResponses.push({ name, id, response: report });
+                continue;
+              }
               if (name === 'update_live_memory') {
                 const text = String(args.text || '').trim();
                 const tags = Array.isArray(args.tags) ? args.tags.map((tag) => String(tag || '').trim()).filter(Boolean).slice(0, 8) : [];
@@ -4778,12 +4882,14 @@ Tell Epic briefly that you put the image on screen and that he can copy the link
               const prompt = String(args.prompt || '').trim();
               const title = String(args.title || prompt.slice(0, 80) || 'Agent task').trim();
               const requestedAgent = String(args.agent || session.agent || 'orchestrator').trim();
-              const agent = roster.agents.some((item) => item.id === requestedAgent)
+              const activeRoster = getRoster();
+              const agent = activeRoster.agents.some((item) => item.id === requestedAgent)
                 ? requestedAgent
-                : String(roster.primaryAgentId || session.agent || 'orchestrator').trim();
-              const selectedAgent = roster.agents.find((item) => item.id === agent) || null;
-              const runtime = selectedAgent?.source === 'hermes' || selectedAgent?.bridge === 'hermes' ? 'hermes' : 'openclaw';
-              const summary = String(args.summary || buildHandoffSpokenSummary(prompt, agent, roster)).trim();
+                : String(activeRoster.primaryAgentId || session.agent || 'orchestrator').trim();
+              const selectedAgent = activeRoster.agents.find((item) => item.id === agent) || relayAgentSource.getAgent(agent) || null;
+              const isRelay = selectedAgent?.source === 'relay' || selectedAgent?.bridge === 'relay' || selectedAgent?.relay === true;
+              const runtime = isRelay ? 'relay' : (selectedAgent?.source === 'hermes' || selectedAgent?.bridge === 'hermes' ? 'hermes' : 'openclaw');
+              const summary = String(args.summary || buildHandoffSpokenSummary(prompt, agent, activeRoster)).trim();
               if (!prompt) {
                 functionResponses.push({ name, id, response: { error: 'Missing prompt for handoff_to_agent' } });
                 continue;
@@ -4792,7 +4898,19 @@ Tell Epic briefly that you put the image on screen and that he can copy the link
                 handoffTitle: title,
                 handoffTaskId: '',
               });
-              broadcastCallHandoff('call:handoff.started', session.id, { title, summary, agent, runtime, session: handoffStarted });
+              broadcastCallHandoff('call:handoff.started', session.id, {
+                title,
+                summary,
+                agent,
+                runtime,
+                ...(isRelay ? {
+                  relayProviderId: selectedAgent?.relayProviderId || '',
+                  relayProviderLabel: selectedAgent?.relayProviderLabel || '',
+                  relayDeviceId: selectedAgent?.relayDeviceId || '',
+                  relayDeviceName: selectedAgent?.relayDeviceName || '',
+                } : {}),
+                session: handoffStarted,
+              });
               const task = await createLiveTask({ title, summary, prompt, agent, runtime });
               const handoffLinked = setCallSessionState(session.id, 'task_running', {
                 handoffTaskId: task.id,
@@ -4800,7 +4918,7 @@ Tell Epic briefly that you put the image on screen and that he can copy the link
               });
               broadcastCallHandoff('call:handoff.task_created', session.id, { taskId: task.id, task, session: handoffLinked });
               broadcast({ type: 'live_task:update', data: task });
-              runLiveTask(task, { broadcast, roster });
+              runLiveTask(task, { broadcast, roster: activeRoster });
               functionResponses.push({
                 name,
                 id,
@@ -5124,20 +5242,37 @@ app.post(`${basePath}/api/call/:id/event`, async (req, res) => {
       broadcast({ type: 'call:transcript.final', data: { sessionId, text, state: updated?.state || 'thinking' } });
 
       if (looksComplexRequest(text)) {
+        const activeRoster = getRoster();
+        const selectedAgent = activeRoster.agents.find((item) => item.id === session.agent) || relayAgentSource.getAgent(session.agent) || null;
+        const isRelay = selectedAgent?.source === 'relay' || selectedAgent?.bridge === 'relay' || selectedAgent?.relay === true;
+        const taskRuntime = isRelay ? 'relay' : (selectedAgent?.source === 'hermes' || selectedAgent?.bridge === 'hermes' ? 'hermes' : 'openclaw');
         const title = text.slice(0, 80) || 'Background task';
-        const summary = buildHandoffSpokenSummary(text, session.agent, roster);
+        const summary = buildHandoffSpokenSummary(text, session.agent, activeRoster);
         const started = setCallSessionState(sessionId, 'handing_off', {
           handoffTitle: title,
           handoffTaskId: '',
           lastRoutingDecision: 'complex-request-handoff',
           lastTaskSummary: summary,
         });
-        broadcastCallHandoff('call:handoff.started', sessionId, { title, summary, agent: session.agent, session: started });
+        broadcastCallHandoff('call:handoff.started', sessionId, {
+          title,
+          summary,
+          agent: session.agent,
+          runtime: taskRuntime,
+          ...(isRelay ? {
+            relayProviderId: selectedAgent?.relayProviderId || '',
+            relayProviderLabel: selectedAgent?.relayProviderLabel || '',
+            relayDeviceId: selectedAgent?.relayDeviceId || '',
+            relayDeviceName: selectedAgent?.relayDeviceName || '',
+          } : {}),
+          session: started,
+        });
         const task = await createLiveTask({
           title,
           summary,
           prompt: text,
           agent: session.agent,
+          runtime: taskRuntime,
         });
         const linked = setCallSessionState(sessionId, 'task_running', {
           handoffTitle: title,
@@ -5148,12 +5283,12 @@ app.post(`${basePath}/api/call/:id/event`, async (req, res) => {
         broadcastCallDebugState(sessionId);
         broadcastCallHandoff('call:handoff.task_created', sessionId, { taskId: task.id, task, session: linked });
         broadcast({ type: 'live_task:update', data: task });
-        runLiveTask(task, { broadcast, roster });
+        runLiveTask(task, { broadcast, roster: activeRoster });
         const spoken = summary;
         const after = updateCallSession(sessionId, { lastAssistantText: spoken, state: 'speaking' });
-        appendCallTranscriptEntry(sessionId, 'assistant', spoken, { source: 'openclaw-task', taskId: task.id });
+        appendCallTranscriptEntry(sessionId, 'assistant', spoken, { source: `${taskRuntime}-task`, taskId: task.id });
         broadcast({ type: 'call:response.text', data: { sessionId, text: spoken, taskId: task.id, state: after?.state || 'speaking' } });
-        return res.json({ ok: true, route: 'openclaw-task', taskId: task.id, spoken, session: after });
+        return res.json({ ok: true, route: `${taskRuntime}-task`, taskId: task.id, spoken, session: after });
       }
 
       const live = liveGeminiSessions.get(sessionId);
@@ -6298,7 +6433,7 @@ export { broadcast, wss };
 const bridge = new OpenClawBridge();
 await relayAgentSource.configure(await loadDirectChatSettings().catch(() => ({})));
 const stopSessionMonitor = startSessionMonitor({ broadcast, roster, emitResponses: true });
-const stopHermesSessionMonitor = startHermesSessionMonitor({ broadcast });
+const stopHermesSessionMonitor = startHermesSessionMonitor({ broadcast, roster });
 
 app.get(`${basePath}/api/session-monitor/debug`, (req, res) => {
   res.json({ ok: true, agents: typeof stopSessionMonitor.getDebugState === 'function' ? stopSessionMonitor.getDebugState() : [] });
@@ -6327,8 +6462,32 @@ relayAgentSource.on('disconnected', (info) => {
   broadcast({ type: 'relay:roster_updated', data: { status: info } });
 });
 
+function notifyFairyOfRelayRoster(info = {}) {
+  const agents = Array.isArray(info.agents) ? info.agents : relayAgentSource.getAgents();
+  const lines = agents.slice(0, 40).map((agent) => {
+    const provider = agent.relayProviderLabel || agent.relayProviderId || 'Relay';
+    const device = agent.relayDeviceName || agent.relayDeviceId || 'remote device';
+    const status = agent.relayAgentStatus || agent.relayDeviceState || 'available';
+    return `- ${agent.label || agent.name || agent.id} (${agent.id}) via ${provider} on ${device}; status ${status}`;
+  });
+  const event = [
+    'SYSTEM EVENT FOR LIVE CALL:',
+    'The remote relay roster or presence state changed.',
+    lines.length ? `Current relay agents:\n${lines.join('\n')}` : 'No remote relay agents are currently visible.',
+    'Use inspect_agents if Epic asks for exact availability or progress. Do not invent a remote agent.',
+  ].join('\n');
+  for (const [sessionId, live] of liveGeminiSessions.entries()) {
+    const session = getCallSession(sessionId);
+    if (!session?.active || session.persona !== 'fairy') continue;
+    try { live.sendTextTurn(event); } catch (error) {
+      broadcast({ type: 'call:error', data: { sessionId, message: error.message || 'Could not update Fairy with relay roster' } });
+    }
+  }
+}
+
 relayAgentSource.on('roster-updated', (info) => {
   broadcast({ type: 'relay:roster_updated', data: info });
+  notifyFairyOfRelayRoster(info);
 });
 
 relayAgentSource.on('event', (event) => {

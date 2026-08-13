@@ -56,18 +56,22 @@ function normalizeAgentRecord(agent = {}, index = 0) {
     label,
     name: cleanText(agent.name || label) || label,
     model: cleanText(agent.model),
+    status: cleanText(agent.status),
     index,
     raw: agent,
   };
 }
 
-function buildVirtualAgent(device = {}, provider = {}, agent = {}, index = 0, transport = 'legacy') {
+function buildVirtualAgent(device = {}, provider = {}, agent = {}, index = 0, transport = 'legacy', runtime = {}) {
   const remoteAgentId = cleanText(agent.id || agent.agentId || agent.name);
   if (!remoteAgentId) return null;
   const providerId = cleanText(provider.id || provider.providerId || provider.kind || provider.name) || 'provider';
   const deviceId = cleanText(device.id) || 'device';
   const label = cleanText(agent.label || agent.name || remoteAgentId) || remoteAgentId;
   const deviceLabel = pickDeviceLabel(device);
+  const activity = runtime.activity || {};
+  const presence = runtime.presence || {};
+  const status = cleanText(activity.status || agent.status || presence.state);
   return {
     id: relayAgentId(deviceId, providerId, remoteAgentId),
     label,
@@ -96,6 +100,11 @@ function buildVirtualAgent(device = {}, provider = {}, agent = {}, index = 0, tr
     relayAgentLabel: label,
     relayPlatform: cleanText(device.type || device.platform || ''),
     relayTransport: transport,
+    relayAgentStatus: status,
+    relayAgentMessage: cleanText(activity.message),
+    relayAgentTool: cleanText(activity.tool),
+    relayAgentActivityAt: activity.updatedAt || null,
+    relayDeviceState: cleanText(presence.state),
     deviceLabel,
     subtitle: `Relay · ${deviceLabel}`,
   };
@@ -129,6 +138,17 @@ export class RelayAgentSource extends EventEmitter {
     this.localConnected = false;
   }
 
+  updateDevicePresence(deviceId = '', presence = {}) {
+    const record = this.ensureDevice(deviceId);
+    if (!record) return null;
+    record.presence = {
+      ...(record.presence || {}),
+      ...presence,
+      deviceId: cleanText(deviceId),
+    };
+    return record;
+  }
+
   attachLocalManager(manager) {
     if (!manager || typeof manager.on !== 'function') throw new Error('A relay manager is required.');
     if (this.localManager === manager) return this;
@@ -139,17 +159,22 @@ export class RelayAgentSource extends EventEmitter {
     const isOwned = (entry = {}) => entry.ownerId === RELAY_OWNER_ID && !!cleanText(entry.deviceId);
     const refreshLocalConnectionState = () => {
       const presence = typeof manager.listPresence === 'function' ? manager.listPresence() : [];
+      for (const entry of presence) {
+        if (isOwned(entry)) this.updateDevicePresence(entry.deviceId, entry);
+      }
       this.localConnected = presence.some((entry) => isOwned(entry) && entry.state !== 'offline');
     };
     const onConnected = (entry = {}) => {
       if (!isOwned(entry)) return;
       this.localEnabled = true;
       this.localConnected = true;
+      this.updateDevicePresence(entry.deviceId, { ...entry, state: 'online' });
       this.emitRosterUpdated(true);
     };
     const onDisconnected = (entry = {}) => {
       if (!isOwned(entry)) return;
       this.localEnabled = true;
+      this.updateDevicePresence(entry.deviceId, { ...entry, state: 'offline' });
       refreshLocalConnectionState();
       this.rejectPendingForDevice(entry.deviceId);
       this.emitRosterUpdated(true);
@@ -166,7 +191,11 @@ export class RelayAgentSource extends EventEmitter {
   ingestLocalMessage(message = {}) {
     if (message?.ownerId !== RELAY_OWNER_ID || !cleanText(message?.deviceId)) return false;
     this.localEnabled = true;
-    this.ensureDevice(message.deviceId).transport = 'device';
+    const record = this.ensureDevice(message.deviceId);
+    record.transport = 'device';
+    if (!record.presence || record.presence.state === 'unknown') {
+      this.updateDevicePresence(message.deviceId, { ownerId: RELAY_OWNER_ID, state: 'online' });
+    }
     this.handleMessage(message);
     return true;
   }
@@ -268,7 +297,17 @@ export class RelayAgentSource extends EventEmitter {
       rawAgents.forEach((item, index) => {
         const normalized = normalizeAgentRecord(item, index);
         if (!normalized) return;
-        const virtual = buildVirtualAgent(record.device, activeProvider, normalized, index, record.transport || 'legacy');
+        const virtual = buildVirtualAgent(
+          record.device,
+          activeProvider,
+          normalized,
+          index,
+          record.transport || 'legacy',
+          {
+            presence: record.presence,
+            activity: record.activities?.get(normalized.id),
+          },
+        );
         if (virtual) agents.push(virtual);
       });
     }
@@ -410,6 +449,14 @@ export class RelayAgentSource extends EventEmitter {
       this.emitRosterUpdated();
       return;
     }
+    if (type === 'relay.presence' || type === 'relay.disconnect') {
+      this.updateDevicePresence(message.deviceId, {
+        ...(message.payload || {}),
+        state: type === 'relay.disconnect' ? 'offline' : cleanText(message.payload?.state) || 'online',
+      });
+      this.emitRosterUpdated(true);
+      return;
+    }
     if (type === 'agent.activity') {
       this.handleActivity(message);
       return;
@@ -437,6 +484,8 @@ export class RelayAgentSource extends EventEmitter {
         provider: agent.relayProviderId,
         remote: agent.relayAgentId,
         label: agent.label,
+        status: agent.relayAgentStatus,
+        activity: agent.relayAgentMessage,
       })),
     });
     if (!force && signature === this.lastRosterSignature) return;
@@ -454,6 +503,8 @@ export class RelayAgentSource extends EventEmitter {
         roster: [],
         activeProviderId: '',
         transport: 'legacy',
+        presence: { state: 'unknown' },
+        activities: new Map(),
       });
     }
     return this.devices.get(id);
@@ -468,6 +519,7 @@ export class RelayAgentSource extends EventEmitter {
     record.device = { ...record.device, ...device, id: deviceId };
     record.providers = Array.isArray(payload.providers) ? payload.providers : record.providers;
     record.activeProviderId = cleanText(payload.activeProviderId) || record.activeProviderId;
+    this.updateDevicePresence(deviceId, { ownerId: message.ownerId, state: 'online' });
   }
 
   ingestRosterSnapshot(message = {}) {
@@ -476,6 +528,7 @@ export class RelayAgentSource extends EventEmitter {
     const record = this.ensureDevice(deviceId);
     if (!record) return;
     record.roster = Array.isArray(payload.agents) ? payload.agents : [];
+    this.updateDevicePresence(deviceId, { ownerId: message.ownerId, state: 'online' });
   }
 
   findPendingForEnvelope(message = {}) {
@@ -486,28 +539,49 @@ export class RelayAgentSource extends EventEmitter {
 
   handleActivity(message = {}) {
     const pending = this.findPendingForEnvelope(message);
-    if (!pending) return;
     const payload = message.payload || {};
+    const deviceId = cleanText(message.deviceId || pending?.deviceId);
+    const remoteAgentId = cleanText(payload.agent || pending?.remoteAgentId);
+    const record = this.ensureDevice(deviceId);
+    if (record && remoteAgentId) {
+      const previous = record.activities?.get(remoteAgentId) || {};
+      record.activities.set(remoteAgentId, {
+        ...previous,
+        status: cleanText(payload.status),
+        message: cleanText(payload.message),
+        tool: cleanText(payload.tool),
+        input: payload.input,
+        updatedAt: new Date().toISOString(),
+      });
+      while (record.activities.size > 128) {
+        const oldest = record.activities.keys().next().value;
+        if (!oldest) break;
+        record.activities.delete(oldest);
+      }
+    }
+    const virtualAgent = this.getAgents().find((agent) => (
+      agent.relayDeviceId === deviceId && agent.relayAgentId === remoteAgentId
+    ));
     const normalized = {
       type: mapActivityStatus(payload.status),
       data: {
-        agent: pending.virtualAgentId,
+        agent: virtualAgent?.id || pending?.virtualAgentId || remoteAgentId,
         status: cleanText(payload.status),
         message: cleanText(payload.message),
         tool: cleanText(payload.tool),
         input: payload.input,
         source: 'direct-chat',
         chat: true,
-        sessionId: pending.sessionId,
+        sessionId: pending?.sessionId,
         relay: true,
-        relayDeviceId: pending.deviceId,
-        relayDeviceName: pending.deviceName || pending.deviceId,
-        relayProviderId: pending.providerId,
-        relayRemoteAgentId: pending.remoteAgentId,
-        platform: pending.platform,
+        relayDeviceId: pending?.deviceId || deviceId,
+        relayDeviceName: pending?.deviceName || record?.device?.name || deviceId,
+        relayProviderId: pending?.providerId,
+        relayRemoteAgentId: remoteAgentId,
+        platform: pending?.platform || cleanText(record?.device?.platform || record?.device?.type),
       },
     };
-    try { pending.onEvent?.(normalized); } catch {}
+    try { pending?.onEvent?.(normalized); } catch {}
     this.emit('event', normalized);
   }
 

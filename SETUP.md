@@ -194,7 +194,7 @@ npm start
 
 ## 5.5) Optional Windows relay client
 
-The repository includes a portable Windows client at `client/command-center-relay.cmd`. It enrolls with the dedicated V1 device WebSocket, discovers local Hermes profiles, and publishes only status, roster, presence, and heartbeat data. It does not send commands or chat requests.
+The repository includes a portable Windows client at `client/command-center-relay.cmd`. It enrolls with the dedicated V1 device WebSocket, discovers local Hermes profiles, and publishes status, roster, presence, heartbeat, and bounded activity data. It accepts one authenticated, correlated Hermes chat exchange so Fairy and Command Center can route work to the remote agent; it does not expose shell, generic command, or arbitrary action requests.
 
 See [client/README.md](./client/README.md) for pairing and DPAPI credential-storage instructions.
 
