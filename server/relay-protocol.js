@@ -3,11 +3,13 @@ export const RELAY_OWNER_ID = 'owner:default';
 export const RELAY_DEVICE_WS_PATH = '/relay/v1/device';
 export const RELAY_MAX_PAYLOAD_BYTES = 64 * 1024;
 export const RELAY_MAX_TEXT_BYTES = 16 * 1024;
+export const RELAY_CHAT_TEXT_MAX_BYTES = 48 * 1024;
 
 const TYPES = new Set([
   'relay.auth', 'relay.auth.ok', 'relay.auth.error', 'relay.heartbeat',
   'relay.presence', 'relay.disconnect', 'device.state.snapshot',
-  'agent.roster.snapshot', 'agent.activity',
+  'agent.roster.snapshot', 'agent.activity', 'relay.chat.request',
+  'relay.chat.response',
 ]);
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const AUTH_KEYS = new Set(['method', 'secret', 'deviceId', 'device']);
@@ -21,6 +23,8 @@ const SNAPSHOT_DEVICE_KEYS = new Set(['name', 'label', 'platform', 'type', 'vers
 const PROVIDER_KEYS = new Set(['id', 'providerId', 'kind', 'name', 'label', 'model', 'agents']);
 const AGENT_KEYS = new Set(['id', 'agentId', 'name', 'label', 'model', 'status']);
 const IDENTITY_KEYS = new Set(['ownerId', 'deviceId']);
+const CHAT_REQUEST_KEYS = new Set(['providerId', 'agentId', 'providerSessionId', 'sessionId', 'message']);
+const CHAT_RESPONSE_KEYS = new Set(['ok', 'text', 'sessionId', 'providerSessionId', 'model', 'errorCode', 'errorMessage']);
 
 export class RelayProtocolError extends Error {
   constructor(message, code = 'INVALID_MESSAGE') {
@@ -127,14 +131,87 @@ export function validateRelayAuth(input) {
   return { ...envelope, payload: { method, secret, ...(deviceId ? { deviceId: id(deviceId, 'deviceId') } : {}), ...(device ? { device } : {}) } };
 }
 
+function optionalId(value, field) {
+  if (value === undefined || value === null || value === '') return '';
+  return id(value, field);
+}
+
+function chatText(value, field) {
+  if (typeof value !== 'string' || !value) throw new RelayProtocolError(`Invalid ${field}.`, 'INVALID_SCHEMA');
+  if (Buffer.byteLength(value, 'utf8') > RELAY_CHAT_TEXT_MAX_BYTES) throw new RelayProtocolError(`${field} is too large.`, 'PAYLOAD_TOO_LARGE');
+  return value;
+}
+
+function assertNoPayloadIdentity(payload) {
+  if (payload?.ownerId !== undefined || payload?.deviceId !== undefined) throw new RelayProtocolError('Owner and device identity are server-bound.', 'IDENTITY_SPOOF');
+}
+
+export function validateRelayChatRequest(input) {
+  const envelope = validateRelayEnvelope(input);
+  if (envelope.type !== 'relay.chat.request') throw new RelayProtocolError('Expected a relay chat request.', 'UNSUPPORTED_TYPE');
+  if (envelope.replyTo !== undefined) throw new RelayProtocolError('Chat requests cannot reply to another message.', 'INVALID_SCHEMA');
+  const payload = envelope.payload;
+  assertNoPayloadIdentity(payload);
+  strictKeys(payload, CHAT_REQUEST_KEYS, 'chat request');
+  const providerId = id(payload.providerId, 'providerId');
+  if (providerId !== 'hermes') throw new RelayProtocolError('Only Hermes relay chat is supported.', 'UNSUPPORTED_TYPE');
+  const agentId = id(payload.agentId, 'agentId');
+  const providerSessionId = optionalId(payload.providerSessionId, 'providerSessionId');
+  const sessionId = optionalId(payload.sessionId, 'sessionId');
+  const message = chatText(payload.message, 'message');
+  if (!providerSessionId) throw new RelayProtocolError('Chat requests require providerSessionId.', 'INVALID_SCHEMA');
+  return {
+    ...envelope,
+    payload: {
+      providerId,
+      agentId,
+      providerSessionId,
+      ...(sessionId ? { sessionId } : {}),
+      message,
+    },
+  };
+}
+
+export function validateRelayChatResponse(input) {
+  const envelope = validateRelayEnvelope(input);
+  if (envelope.type !== 'relay.chat.response') throw new RelayProtocolError('Expected a relay chat response.', 'UNSUPPORTED_TYPE');
+  if (!envelope.replyTo) throw new RelayProtocolError('Chat responses require replyTo.', 'INVALID_SCHEMA');
+  const payload = envelope.payload;
+  assertNoPayloadIdentity(payload);
+  strictKeys(payload, CHAT_RESPONSE_KEYS, 'chat response');
+  if (typeof payload.ok !== 'boolean') throw new RelayProtocolError('Chat response ok must be boolean.', 'INVALID_SCHEMA');
+  const sessionId = optionalId(payload.sessionId, 'sessionId');
+  const providerSessionId = optionalId(payload.providerSessionId, 'providerSessionId');
+  const model = optionalText(payload.model, 256);
+  const textValue = payload.text === undefined ? '' : chatText(payload.text, 'response text');
+  const errorCode = optionalId(payload.errorCode, 'errorCode');
+  const errorMessage = payload.errorMessage === undefined ? '' : text(payload.errorMessage, 1024);
+  if (payload.ok && !textValue) throw new RelayProtocolError('Successful chat responses require text.', 'INVALID_SCHEMA');
+  if (!payload.ok && !errorCode && !errorMessage) throw new RelayProtocolError('Failed chat responses require an error.', 'INVALID_SCHEMA');
+  return {
+    ...envelope,
+    payload: {
+      ok: payload.ok,
+      ...(textValue ? { text: textValue } : {}),
+      ...(sessionId ? { sessionId } : {}),
+      ...(providerSessionId ? { providerSessionId } : {}),
+      ...(model ? { model } : {}),
+      ...(errorCode ? { errorCode } : {}),
+      ...(errorMessage ? { errorMessage } : {}),
+    },
+  };
+}
+
 export function validateDeviceEnvelope(input, { deviceId } = {}) {
   const envelope = validateRelayEnvelope(input);
   if (envelope.type === 'relay.auth') throw new RelayProtocolError('Authentication is only accepted as the first device message.', 'AUTH_REQUIRED');
   if (['relay.auth.ok', 'relay.auth.error'].includes(envelope.type)) throw new RelayProtocolError('Message type is not accepted from devices.', 'UNSUPPORTED_TYPE');
+  if (envelope.type === 'relay.chat.request') throw new RelayProtocolError('Chat requests are server-to-device only.', 'UNSUPPORTED_TYPE');
+  if (envelope.type === 'relay.chat.response') return validateRelayChatResponse(envelope);
   if (['relay.heartbeat', 'relay.presence', 'relay.disconnect'].includes(envelope.type)) {
     if (envelope.payload.deviceId !== undefined) throw new RelayProtocolError('Device identity is server-bound.', 'IDENTITY_SPOOF');
   }
-  if (envelope.payload.ownerId !== undefined || envelope.payload.deviceId !== undefined) throw new RelayProtocolError('Owner and device identity are server-bound.', 'IDENTITY_SPOOF');
+  assertNoPayloadIdentity(envelope.payload);
   if (envelope.type === 'relay.heartbeat') {
     strictKeys(envelope.payload, HEARTBEAT_KEYS, 'heartbeat');
     if (envelope.payload.sequence !== undefined && (!Number.isSafeInteger(envelope.payload.sequence) || envelope.payload.sequence < 0)) throw new RelayProtocolError('Invalid heartbeat sequence.');

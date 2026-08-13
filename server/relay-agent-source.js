@@ -1,7 +1,9 @@
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
+import { RELAY_OWNER_ID } from './relay-protocol.js';
 
 const REQUEST_TIMEOUT_MS = 120000;
+const MAX_PENDING_RELAY_CHATS = 8;
 
 function cleanText(value = '') {
   return String(value || '').trim();
@@ -59,7 +61,7 @@ function normalizeAgentRecord(agent = {}, index = 0) {
   };
 }
 
-function buildVirtualAgent(device = {}, provider = {}, agent = {}, index = 0) {
+function buildVirtualAgent(device = {}, provider = {}, agent = {}, index = 0, transport = 'legacy') {
   const remoteAgentId = cleanText(agent.id || agent.agentId || agent.name);
   if (!remoteAgentId) return null;
   const providerId = cleanText(provider.id || provider.providerId || provider.kind || provider.name) || 'provider';
@@ -93,6 +95,7 @@ function buildVirtualAgent(device = {}, provider = {}, agent = {}, index = 0) {
     relayAgentId: remoteAgentId,
     relayAgentLabel: label,
     relayPlatform: cleanText(device.type || device.platform || ''),
+    relayTransport: transport,
     deviceLabel,
     subtitle: `Relay · ${deviceLabel}`,
   };
@@ -120,6 +123,59 @@ export class RelayAgentSource extends EventEmitter {
     this.pending = new Map();
     this.reconnectTimer = null;
     this.lastRosterSignature = '';
+    this.localManager = null;
+    this.localManagerListeners = null;
+    this.localEnabled = false;
+    this.localConnected = false;
+  }
+
+  attachLocalManager(manager) {
+    if (!manager || typeof manager.on !== 'function') throw new Error('A relay manager is required.');
+    if (this.localManager === manager) return this;
+    if (this.localManager && this.localManagerListeners) {
+      for (const [event, listener] of Object.entries(this.localManagerListeners)) this.localManager.off?.(event, listener);
+    }
+    this.localManager = manager;
+    const isOwned = (entry = {}) => entry.ownerId === RELAY_OWNER_ID && !!cleanText(entry.deviceId);
+    const refreshLocalConnectionState = () => {
+      const presence = typeof manager.listPresence === 'function' ? manager.listPresence() : [];
+      this.localConnected = presence.some((entry) => isOwned(entry) && entry.state !== 'offline');
+    };
+    const onConnected = (entry = {}) => {
+      if (!isOwned(entry)) return;
+      this.localEnabled = true;
+      this.localConnected = true;
+      this.emitRosterUpdated(true);
+    };
+    const onDisconnected = (entry = {}) => {
+      if (!isOwned(entry)) return;
+      this.localEnabled = true;
+      refreshLocalConnectionState();
+      this.rejectPendingForDevice(entry.deviceId);
+      this.emitRosterUpdated(true);
+    };
+    const onMessage = (message = {}) => this.ingestLocalMessage(message);
+    this.localManagerListeners = { connected: onConnected, disconnected: onDisconnected, message: onMessage };
+    manager.on('connected', onConnected);
+    manager.on('disconnected', onDisconnected);
+    manager.on('message', onMessage);
+    refreshLocalConnectionState();
+    return this;
+  }
+
+  ingestLocalMessage(message = {}) {
+    if (message?.ownerId !== RELAY_OWNER_ID || !cleanText(message?.deviceId)) return false;
+    this.localEnabled = true;
+    this.ensureDevice(message.deviceId).transport = 'device';
+    this.handleMessage(message);
+    return true;
+  }
+
+  rejectPendingForDevice(deviceId = '') {
+    const id = cleanText(deviceId);
+    for (const pending of this.pending.values()) {
+      if (pending.deviceId === id) pending.reject(new Error('Relay device disconnected.'));
+    }
   }
 
   async configure(settings = {}) {
@@ -190,16 +246,18 @@ export class RelayAgentSource extends EventEmitter {
 
   getStatus() {
     return {
-      enabled: this.enabled,
+      enabled: this.enabled || this.localEnabled,
       url: this.url,
-      connected: this.connected,
+      connected: this.connected || this.localConnected,
+      legacyEnabled: this.enabled,
+      localEnabled: this.localEnabled,
       deviceCount: this.devices.size,
       agentCount: this.getAgents().length,
     };
   }
 
   getAgents() {
-    if (!this.enabled) return [];
+    if (!this.enabled && !this.localEnabled) return [];
     const agents = [];
     for (const record of this.devices.values()) {
       const providers = Array.isArray(record.providers) ? record.providers : [];
@@ -210,7 +268,7 @@ export class RelayAgentSource extends EventEmitter {
       rawAgents.forEach((item, index) => {
         const normalized = normalizeAgentRecord(item, index);
         if (!normalized) return;
-        const virtual = buildVirtualAgent(record.device, activeProvider, normalized, index);
+        const virtual = buildVirtualAgent(record.device, activeProvider, normalized, index, record.transport || 'legacy');
         if (virtual) agents.push(virtual);
       });
     }
@@ -235,6 +293,7 @@ export class RelayAgentSource extends EventEmitter {
       relayAgentId: agent.relayAgentId,
       relayAgentLabel: agent.relayAgentLabel,
       relayPlatform: agent.relayPlatform,
+      relayTransport: agent.relayTransport,
       relayVirtualAgentId: agent.id,
       chatTransport: 'relay',
     };
@@ -245,7 +304,6 @@ export class RelayAgentSource extends EventEmitter {
   }
 
   async runRelayChatTurn({ session, latestMessage, onEvent } = {}) {
-    if (!this.connected || !this.ws || this.ws.readyState !== WebSocket.OPEN) throw new Error('Relay is not connected.');
     const metadata = session?.metadata || {};
     const deviceId = cleanText(metadata.relayDeviceId);
     const providerId = cleanText(metadata.relayProviderId) || 'openclaw';
@@ -253,27 +311,47 @@ export class RelayAgentSource extends EventEmitter {
     const virtualAgentId = cleanText(metadata.relayVirtualAgentId || session?.agent);
     if (!deviceId) throw new Error('Relay session is missing relayDeviceId.');
     if (!remoteAgentId) throw new Error('Relay session is missing relayAgentId.');
+    const currentAgentTransport = cleanText(this.getAgent(virtualAgentId)?.relayTransport);
+    const relayTransport = currentAgentTransport || cleanText(metadata.relayTransport);
+    const useLocalDeviceTransport = relayTransport === 'device' && !!(this.localManager && typeof this.localManager.sendChatRequest === 'function');
+    if (useLocalDeviceTransport && providerId !== 'hermes') throw new Error('Only Hermes relay chat is supported.');
+    if (!useLocalDeviceTransport && (!this.connected || !this.ws || this.ws.readyState !== WebSocket.OPEN)) throw new Error('Relay device is not connected.');
+    if (this.pending.size >= MAX_PENDING_RELAY_CHATS) throw new Error('Relay chat is busy.');
 
     const requestId = `cc_relay_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const providerSessionId = cleanText(metadata.relayProviderSessionId) || `commandcenter_api_${cleanText(session?.id) || Date.now().toString(36)}`;
     const remoteSessionId = cleanText(metadata.relayRemoteSessionId);
 
-    const request = {
-      v: 1,
-      id: requestId,
-      type: 'agent.chat.request',
-      timestamp: new Date().toISOString(),
-      source: { kind: 'app', id: 'openclaw-command-center' },
-      target: { kind: 'device', id: deviceId },
-      deviceId,
-      payload: {
-        providerId,
-        agent: remoteAgentId,
-        ...(remoteSessionId ? { sessionId: remoteSessionId } : {}),
-        providerSessionId,
-        message: cleanText(latestMessage),
-      },
-    };
+    const request = useLocalDeviceTransport
+      ? {
+        v: 1,
+        id: requestId,
+        type: 'relay.chat.request',
+        timestamp: new Date().toISOString(),
+        payload: {
+          providerId,
+          agentId: remoteAgentId,
+          ...(remoteSessionId ? { sessionId: remoteSessionId } : {}),
+          providerSessionId,
+          message: cleanText(latestMessage),
+        },
+      }
+      : {
+        v: 1,
+        id: requestId,
+        type: 'agent.chat.request',
+        timestamp: new Date().toISOString(),
+        source: { kind: 'app', id: 'openclaw-command-center' },
+        target: { kind: 'device', id: deviceId },
+        deviceId,
+        payload: {
+          providerId,
+          agent: remoteAgentId,
+          ...(remoteSessionId ? { sessionId: remoteSessionId } : {}),
+          providerSessionId,
+          message: cleanText(latestMessage),
+        },
+      };
 
     return await new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -286,6 +364,7 @@ export class RelayAgentSource extends EventEmitter {
         virtualAgentId,
         deviceId,
         providerId,
+        providerSessionId,
         remoteAgentId,
         deviceName: cleanText(metadata.relayDeviceName),
         platform: cleanText(metadata.relayPlatform),
@@ -302,7 +381,19 @@ export class RelayAgentSource extends EventEmitter {
         },
         timer,
       });
-      this.ws.send(JSON.stringify(request));
+      let sent = false;
+      try {
+        sent = useLocalDeviceTransport
+          ? this.localManager.sendChatRequest(deviceId, request)
+          : this.ws.send(JSON.stringify(request));
+      } catch {
+        sent = false;
+      }
+      if (!sent) {
+        clearTimeout(timer);
+        this.pending.delete(requestId);
+        reject(new Error('Relay device is not connected.'));
+      }
     });
   }
 
@@ -324,6 +415,10 @@ export class RelayAgentSource extends EventEmitter {
       return;
     }
     if (type === 'agent.chat.response') {
+      this.handleResponse(message);
+      return;
+    }
+    if (type === 'relay.chat.response') {
       this.handleResponse(message);
       return;
     }
@@ -358,6 +453,7 @@ export class RelayAgentSource extends EventEmitter {
         providers: [],
         roster: [],
         activeProviderId: '',
+        transport: 'legacy',
       });
     }
     return this.devices.get(id);
@@ -418,13 +514,24 @@ export class RelayAgentSource extends EventEmitter {
   handleResponse(message = {}) {
     const pending = this.findPendingForEnvelope(message);
     if (!pending) return;
+    if (message.ownerId === RELAY_OWNER_ID && message.deviceId !== pending.deviceId) return;
     const payload = message.payload || {};
+    if (message.type === 'relay.chat.response') {
+      if (payload.providerSessionId && payload.providerSessionId !== pending.providerSessionId) {
+        pending.reject(new Error('Relay chat response session mismatch.'));
+        return;
+      }
+      if (payload.ok === false) {
+        pending.reject(new Error(cleanText(payload.errorMessage) || 'Relay chat failed.'));
+        return;
+      }
+    }
     pending.resolve({
       text: cleanText(payload.text),
       runtime: cleanText(payload.runtime) || 'relay',
       model: cleanText(payload.model),
       sessionId: cleanText(payload.sessionId) || pending.sessionId,
-      providerSessionId: cleanText(payload.providerSessionId),
+      providerSessionId: cleanText(payload.providerSessionId) || pending.providerSessionId,
       raw: message,
     });
   }

@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { RELAY_OWNER_ID, validateDeviceEnvelope } from './relay-protocol.js';
+import { RELAY_OWNER_ID, validateDeviceEnvelope, validateRelayChatRequest } from './relay-protocol.js';
 import { authenticateDevice, enrollWithPairing } from './relay-store.js';
 import { parseRelayMessage } from './relay-protocol.js';
 
@@ -39,6 +39,7 @@ export class RelayManager extends EventEmitter {
     return { ...device, device: record };
   }
   handle(ws, raw, deviceId) {
+    if (this.connections.get(deviceId) !== ws) { const error = new Error('Connection is no longer current.'); error.code = 'CONNECTION_REPLACED'; throw error; }
     const parsed = raw && typeof raw === 'object' && !Buffer.isBuffer(raw) ? raw : parseRelayMessage(raw);
     const message = validateDeviceEnvelope(parsed, { deviceId });
     if (message.id && this.sequences.get(deviceId)?.has(message.id)) { const error = new Error('Message was already processed.'); error.code = 'REPLAYED_MESSAGE'; throw error; }
@@ -61,5 +62,14 @@ export class RelayManager extends EventEmitter {
   }
   listPresence(now = Date.now()) { return [...this.presence.values()].map((entry) => ({ ...entry, state: entry.state === 'online' && now - Number(entry.lastHeartbeatAt || 0) > RELAY_STALE_AFTER_MS ? 'stale' : entry.state })); }
   closeDevice(deviceId, code = 4003, reason = 'Device closed') { const ws = this.connections.get(deviceId); if (!ws) return false; try { ws.close(code, reason); } catch {} return true; }
+  sendChatRequest(deviceId, request) {
+    const id = String(deviceId || '').trim();
+    if (!id || this.presence.get(id)?.ownerId !== RELAY_OWNER_ID) return false;
+    const message = validateRelayChatRequest(request);
+    const ws = this.connections.get(id);
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify(message));
+    return true;
+  }
   send(deviceId, message) { const ws = this.connections.get(deviceId); if (!ws || ws.readyState !== 1) return false; ws.send(JSON.stringify(message)); return true; }
 }

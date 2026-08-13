@@ -1,11 +1,11 @@
-const CACHE_NAME = 'command-center-shell-20260601-pawanfix1';
+const CACHE_NAME = 'command-center-shell-20260813-fairy-performance1';
 const SHELL_ASSETS = [
   './',
   './index.html',
   './manifest.webmanifest',
   './favicon.svg',
   './css/styles.css?v=20260601-pawanfix1',
-  './js/app.js?v=20260601-pawanfix1'
+  './js/app.js?v=20260813-fairy-performance1'
 ];
 
 self.addEventListener('install', (event) => {

@@ -2,7 +2,7 @@
 import * as terminal from './terminal.js?v=20260320j';
 import * as voice from './voice.js?v=20260524-singleagent6';
 import * as companions from './companions.js?v=20260531-vrmfix6';
-import * as fairyLive from './fairy-live.js?v=20260520-fairy-callmode1';
+import * as fairyLive from './fairy-live.js?v=20260813-fairy-performance1';
 
 const BASE = window.__BASE_PATH__ || '';
 
@@ -10,6 +10,9 @@ let roster = { agents: [], primaryAgentId: 'main' };
 let activeChatAgent = null;
 let activeChatSessionId = null;
 let isChatOpen = false;
+let isCreatingSession = false;
+let fairyMessageRenderTimer = null;
+let lastFairyLiveActive = null;
 let launcherEl = null;
 let panelEl = null;
 let agentListEl = null;
@@ -2135,7 +2138,12 @@ async function selectSession(sessionId) {
 }
 
 async function createNewSession() {
-  if (!activeChatAgent || isFairyAgent()) return;
+  if (!activeChatAgent || isFairyAgent() || isCreatingSession) return;
+  isCreatingSession = true;
+  if (newSessionBtnEl) {
+    newSessionBtnEl.disabled = true;
+    newSessionBtnEl.setAttribute('aria-busy', 'true');
+  }
   try {
     const res = await fetch(`${BASE}/api/chat/sessions`, {
       method: 'POST',
@@ -2162,6 +2170,12 @@ async function createNewSession() {
     messageInputEl?.focus();
   } catch (err) {
     terminal.log(`[chat] New session failed: ${err.message}`, 'error', true);
+  } finally {
+    isCreatingSession = false;
+    if (newSessionBtnEl) {
+      newSessionBtnEl.disabled = false;
+      newSessionBtnEl.removeAttribute('aria-busy');
+    }
   }
 }
 
@@ -2265,12 +2279,32 @@ async function sendMessage() {
   }
 }
 
-function syncFairyLiveAgent() {
+function syncFairyLiveAgent(detail = {}) {
+  const reason = String(detail?.reason || 'update');
+  const fairyActive = typeof detail?.active === 'boolean'
+    ? detail.active
+    : !!fairyLive.isLiveCallActive?.();
+  const availabilityChanged = lastFairyLiveActive !== fairyActive;
+  lastFairyLiveActive = fairyActive;
+  if (!isChatOpen) return;
+  if (reason === 'status' && !availabilityChanged) return;
+  if (reason === 'transcript' || reason === 'assistant-commit') {
+    if (activeChatAgent && isFairyAgent(activeChatAgent)) renderMessages();
+    return;
+  }
   renderAgentList();
   if (!activeChatAgent || !isFairyAgent(activeChatAgent)) return;
   updateSessionTitle('Live call');
   renderSessionList();
   renderMessages();
+}
+
+function scheduleFairyMessageRender() {
+  if (fairyMessageRenderTimer || !isChatOpen) return;
+  fairyMessageRenderTimer = setTimeout(() => {
+    fairyMessageRenderTimer = null;
+    if (isChatOpen && activeChatAgent && isFairyAgent(activeChatAgent)) renderMessages();
+  }, 120);
 }
 
 export function handleChatEvent(msg) {
@@ -2295,8 +2329,10 @@ export function handleChatEvent(msg) {
       if (data.done) {
         pendingByAgent[activeChatAgent] = false;
         removeTypingMessage(historyKey);
+        renderMessages();
+      } else {
+        scheduleFairyMessageRender();
       }
-      renderMessages();
       return;
     }
     if (type === 'call:assistant.interrupted' || type === 'call:error' || type === 'call:session.ended') {

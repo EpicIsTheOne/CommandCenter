@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 import { RelayManager } from '../server/relay-manager.js';
-import { RELAY_DEVICE_WS_PATH, RELAY_MAX_PAYLOAD_BYTES, RELAY_OWNER_ID, validateDeviceEnvelope, validateRelayAuth, parseRelayMessage } from '../server/relay-protocol.js';
+import { RELAY_CHAT_TEXT_MAX_BYTES, RELAY_DEVICE_WS_PATH, RELAY_MAX_PAYLOAD_BYTES, RELAY_OWNER_ID, validateDeviceEnvelope, validateRelayAuth, validateRelayChatRequest, validateRelayChatResponse, parseRelayMessage } from '../server/relay-protocol.js';
 import { createRelayDeviceUpgrade } from '../server/relay-ws.js';
 import { authorizeWebSocketRequest } from '../server/request-security.js';
 import { classifyApiRoute } from '../server/route-policy.js';
@@ -26,6 +26,14 @@ test('relay protocol enforces version, payload cap, and server-bound identity', 
   assert.throws(() => validateDeviceEnvelope({ ...base, type: 'device.state.snapshot', payload: { device: { id: 'spoofed' } } }, { deviceId: 'device-1' }), (error) => error.code === 'INVALID_SCHEMA');
   assert.throws(() => validateDeviceEnvelope({ ...base, type: 'device.state.snapshot', payload: { providers: [{ id: 'p', ownerId: 'spoofed' }] } }, { deviceId: 'device-1' }), (error) => error.code === 'IDENTITY_SPOOF');
   assert.throws(() => validateDeviceEnvelope({ ...base, type: 'agent.roster.snapshot', payload: { activeProviderId: 'x'.repeat(129) } }, { deviceId: 'device-1' }), (error) => error.code === 'INVALID_MESSAGE');
+  const chatRequest = validateRelayChatRequest({ ...base, id: 'chat-request', type: 'relay.chat.request', payload: { providerId: 'hermes', agentId: 'hermes:default', providerSessionId: 'cc-session-1', message: 'hello' } });
+  assert.equal(chatRequest.payload.agentId, 'hermes:default');
+  assert.throws(() => validateDeviceEnvelope({ ...chatRequest }, { deviceId: 'device-1' }), (error) => error.code === 'UNSUPPORTED_TYPE');
+  assert.throws(() => validateRelayChatRequest({ ...chatRequest, payload: { ...chatRequest.payload, ownerId: 'evil' } }), (error) => error.code === 'IDENTITY_SPOOF');
+  assert.throws(() => validateRelayChatRequest({ ...chatRequest, payload: { ...chatRequest.payload, message: 'x'.repeat(RELAY_CHAT_TEXT_MAX_BYTES + 1) } }), (error) => error.code === 'PAYLOAD_TOO_LARGE');
+  assert.throws(() => validateRelayChatResponse({ ...base, type: 'relay.chat.response', payload: { ok: true, text: 'hello' } }), (error) => error.code === 'INVALID_SCHEMA');
+  const chatResponse = validateRelayChatResponse({ ...base, id: 'chat-response', type: 'relay.chat.response', replyTo: 'chat-request', payload: { ok: true, text: 'hello', providerSessionId: 'cc-session-1' } });
+  assert.equal(chatResponse.replyTo, 'chat-request');
   for (const path of ['/api/relay/v1/pairings', '/api/relay/v1/devices', '/api/relay/v1/devices/device-1/revoke']) assert.equal(classifyApiRoute(path), 'ui-session');
 });
 
@@ -75,6 +83,7 @@ test('heartbeat sequence baseline resets for a replacement connection epoch', as
   const replacement = { readyState: 1, close() { this.closed = true; } };
   await manager.authenticate(replacement, auth, '198.51.100.9');
   assert.equal(first.closed, true);
+  assert.throws(() => manager.handle(first, { v: 1, id: 'old-connection', timestamp: new Date().toISOString(), type: 'relay.heartbeat', payload: { sequence: 0 } }, 'device-reconnect'), (error) => error.code === 'CONNECTION_REPLACED');
   assert.doesNotThrow(() => manager.handle(replacement, { v: 1, id: 'epoch-two-0', timestamp: new Date().toISOString(), type: 'relay.heartbeat', payload: { sequence: 0 } }, 'device-reconnect'));
   assert.throws(() => manager.handle(replacement, { v: 1, id: 'epoch-two-0', timestamp: new Date().toISOString(), type: 'relay.heartbeat', payload: { sequence: 0 } }, 'device-reconnect'), (error) => error.code === 'REPLAYED_MESSAGE');
   manager.handle(replacement, { v: 1, id: 'epoch-two-2', timestamp: new Date().toISOString(), type: 'relay.heartbeat', payload: { sequence: 2 } }, 'device-reconnect');

@@ -71,6 +71,15 @@ const getRoster = () => loadAgentRoster();
 const roster = getRoster();
 const basePath = config.basePath || '';
 const relayManager = new RelayManager();
+relayAgentSource.attachLocalManager(relayManager);
+
+function isAvailableAgent(agentId = '', activeRoster = null) {
+  const target = String(agentId || '').trim();
+  if (!target) return false;
+  if (relayAgentSource.getAgent(target)) return true;
+  const rosterToUse = activeRoster || getRoster();
+  return rosterToUse.agents.some((item) => item.id === target);
+}
 
 function getAgentIdentity(agentId = '', activeRoster = getRoster()) {
   const target = String(agentId || '').trim();
@@ -1083,7 +1092,7 @@ async function maybePersistHermesSession(session, result) {
       ...(hermesSessionId ? { hermesSessionId } : {}),
       ...(hermesProfile ? { hermesProfile } : {}),
       ...(relayProviderSessionId ? { relayProviderSessionId } : {}),
-      ...(relaySessionId ? { relayRemoteSessionId } : {}),
+      ...(relaySessionId ? { relayRemoteSessionId: relaySessionId } : {}),
     },
   });
 }
@@ -4825,7 +4834,7 @@ Tell Epic briefly that you put the image on screen and that he can copy the link
         if (event.type === 'response.audio') {
           const pcm16Base64 = String(event.data?.pcm16Base64 || '');
           const mimeType = String(event.data?.mimeType || 'audio/pcm;rate=24000');
-          const updated = setCallSessionState(session.id, 'speaking');
+          const updated = setCallSessionState(session.id, 'speaking', {}, { broadcastState: false });
           const finalText = event.data?.done ? String(getCallSession(session.id)?.lastAssistantText || '').trim() : '';
           broadcast({
             type: 'call:response.audio',
@@ -4850,7 +4859,6 @@ Tell Epic briefly that you put the image on screen and that he can copy the link
               },
             });
           }
-          broadcast({ type: 'call:debug', data: { sessionId: session.id, message: `Gemini audio chunk ${pcm16Base64.length}b ${mimeType}` } });
           return;
         }
         if (event.type === 'closed') {
@@ -5730,7 +5738,8 @@ app.post(`${basePath}/api/v1/sessions`, async (req, res) => {
     const model = String(req.body?.model || '').trim();
     const metadata = req.body?.metadata && typeof req.body.metadata === 'object' ? req.body.metadata : {};
     if (!agent) return res.status(400).json({ ok: false, error: 'agent is required', code: 'BAD_REQUEST' });
-    const exists = roster.agents.some((item) => item.id === agent);
+    const activeRoster = relayAgentSource.getAgent(agent) ? null : getRoster();
+    const exists = isAvailableAgent(agent, activeRoster);
     if (!exists) return res.status(404).json({ ok: false, error: 'Agent not found', code: 'AGENT_NOT_FOUND' });
     const session = await createApiSession({ agent, title, metadata, mode, model: mode === 'roleplay' ? model : '' });
     res.json({ ok: true, session: getApiSessionMeta(session) });
@@ -5909,7 +5918,8 @@ app.post(`${basePath}/api/v1/chat`, async (req, res) => {
       if (!session) return res.status(404).json({ ok: false, error: 'Session not found', code: 'SESSION_NOT_FOUND' });
     } else {
       if (!requestedAgent) return res.status(400).json({ ok: false, error: 'agent is required when sessionId is missing', code: 'BAD_REQUEST' });
-      const exists = roster.agents.some((item) => item.id === requestedAgent);
+      const activeRoster = relayAgentSource.getAgent(requestedAgent) ? null : getRoster();
+      const exists = isAvailableAgent(requestedAgent, activeRoster);
       if (!exists) return res.status(404).json({ ok: false, error: 'Agent not found', code: 'AGENT_NOT_FOUND' });
       session = await createApiSession({ agent: requestedAgent, title, metadata: req.body?.metadata || {} });
     }
@@ -5990,7 +6000,8 @@ app.post(`${basePath}/api/chat/sessions`, async (req, res) => {
       mode === 'roleplay' ? roleplayProvider : null,
     ));
     if (!agent) return res.status(400).json({ ok: false, error: 'agent is required' });
-    const exists = roster.agents.some((item) => item.id === agent);
+    const activeRoster = relayAgentSource.getAgent(agent) ? null : getRoster();
+    const exists = isAvailableAgent(agent, activeRoster);
     if (!exists) return res.status(404).json({ ok: false, error: 'Agent not found' });
     const session = await createApiSession({ agent, title, metadata, mode, model });
     res.json({ ok: true, session: getApiSessionMeta(session) });
@@ -6082,7 +6093,7 @@ function applyRequestedRoleplayProvider(metadata = {}, requestedRoleplayProvider
   return next;
 }
 
-app.post(`${basePath}/api/chat/direct`, async (req, res) => {
+app.post([`${basePath}/api/chat/direct`, `${basePath}/api/v1/chat/direct`], async (req, res) => {
   try {
     const incomingText = req.body?.message ?? req.body?.text;
     const userText = String(incomingText || '').trim();
@@ -6100,9 +6111,10 @@ app.post(`${basePath}/api/chat/direct`, async (req, res) => {
       session = await getApiSession(existingSessionId);
       if (!session) return res.status(404).json({ error: 'Session not found' });
     } else {
-      const roster = getRoster();
+      const relayAgent = requestedAgent ? relayAgentSource.getAgent(requestedAgent) : null;
+      const roster = relayAgent ? { agents: [relayAgent], primaryAgentId: requestedAgent } : getRoster();
       const target = requestedAgent || roster.primaryAgentId || 'main';
-      const exists = roster.agents.some((item) => item.id === target);
+      const exists = isAvailableAgent(target, roster);
       if (!exists) return res.status(404).json({ error: 'Agent not found' });
       const createdMode = relayAgentSource.getAgent(target) ? 'agent' : requestedMode;
       session = await createApiSession({

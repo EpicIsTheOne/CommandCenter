@@ -3,7 +3,7 @@ import * as mascot from './mascot.js?v=20260509y';
 import * as office from './office.js?v=20260516-rooms7';
 import * as voice from './voice.js?v=20260601-pawanfix1';
 import * as wake from './wake.js?v=20260320l';
-import * as directChat from './direct-chat.js?v=20260601-pawanfix1';
+import * as directChat from './direct-chat.js?v=20260812-sessionfix1';
 import * as singleAgent from './single-agent.js?v=20260601-pawanfix1';
 import * as companions from './companions.js?v=20260601-pawanfix1';
 import * as music from './music.js?v=20260514c';
@@ -11,10 +11,10 @@ import * as intro from './intro.js?v=20260514b';
 import * as appearance from './appearance.js?v=20260514b';
 import * as branding from './branding.js?v=20260514b';
 import * as layoutSettings from './layout-settings.js?v=20260514b';
-import * as fairyLive from './fairy-live.js?v=20260520-fairy-callmode1';
+import * as fairyLive from './fairy-live.js?v=20260813-fairy-performance1';
 import * as agentComms from './agent-comms.js?v=20260524-agentcomms1';
 
-const APP_BUILD = '20260601-pawanfix1';
+const APP_BUILD = '20260813-fairy-performance1';
 console.log('[CommandCenter] app build:', APP_BUILD);
 
 let roster = { agents: [], primaryAgentId: 'main' };
@@ -1269,7 +1269,7 @@ async function handleEvent(msg) {
 
   if (type === 'voice:transcription') return;
 
-  if (type?.startsWith?.('call:') && fairyLive.isLiveCallActive?.()) {
+  if (type === 'call:session.started' && fairyLive.isLiveCallActive?.()) {
     voice.stopPlayback();
   }
 

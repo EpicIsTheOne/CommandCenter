@@ -192,6 +192,12 @@ Most voice configuration is done in the **Settings** UI after boot.
 npm start
 ```
 
+## 5.5) Optional Windows relay client
+
+The repository includes a portable Windows client at `client/command-center-relay.cmd`. It enrolls with the dedicated V1 device WebSocket, discovers local Hermes profiles, and publishes only status, roster, presence, and heartbeat data. It does not send commands or chat requests.
+
+See [client/README.md](./client/README.md) for pairing and DPAPI credential-storage instructions.
+
 ## 6) Open the app
 
 Visit:

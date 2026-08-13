@@ -17,6 +17,7 @@ const VAD_INTERRUPT_MIN_SPEECH_MS = 220;
 const state = {
   sessionId: '',
   status: 'idle',
+  statusMessage: '',
   model: '',
   hasApiKey: false,
   lastTaskId: '',
@@ -116,6 +117,12 @@ const state = {
 };
 
 const els = {};
+
+const DIAGNOSTICS_RENDER_INTERVAL_MS = 250;
+let diagnosticsRenderTimer = null;
+let diagnosticsRenderFrame = 0;
+let diagnosticsRenderQueued = false;
+let lastDiagnosticsRenderAt = 0;
 
 
 function personaName() {
@@ -311,7 +318,7 @@ function renderDebugPanel() {
   ].join('');
 }
 
-function renderDiagnostics() {
+function renderDiagnosticsNow() {
   const html = `
     <div><strong>Key:</strong> ${state.hasApiKey ? 'configured' : 'missing'}</div>
     <div><strong>Session:</strong> ${state.sessionId ? state.sessionId.slice(0, 18) + '…' : 'none'}</div>
@@ -322,6 +329,35 @@ function renderDiagnostics() {
   `;
   if (els.diagnostics) els.diagnostics.innerHTML = html;
   renderDebugPanel();
+}
+
+function renderDiagnostics({ immediate = false } = {}) {
+  if (immediate) {
+    diagnosticsRenderQueued = false;
+    if (diagnosticsRenderTimer) clearTimeout(diagnosticsRenderTimer);
+    if (diagnosticsRenderFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(diagnosticsRenderFrame);
+    diagnosticsRenderTimer = null;
+    diagnosticsRenderFrame = 0;
+    lastDiagnosticsRenderAt = performance.now();
+    renderDiagnosticsNow();
+    return;
+  }
+  if (diagnosticsRenderQueued) return;
+  diagnosticsRenderQueued = true;
+  const elapsed = performance.now() - lastDiagnosticsRenderAt;
+  const delay = Math.max(0, DIAGNOSTICS_RENDER_INTERVAL_MS - elapsed);
+  const flush = () => {
+    diagnosticsRenderQueued = false;
+    diagnosticsRenderTimer = null;
+    diagnosticsRenderFrame = 0;
+    lastDiagnosticsRenderAt = performance.now();
+    renderDiagnosticsNow();
+  };
+  if (delay <= 16 && typeof requestAnimationFrame === 'function') {
+    diagnosticsRenderFrame = requestAnimationFrame(flush);
+  } else {
+    diagnosticsRenderTimer = setTimeout(flush, delay);
+  }
 }
 
 function markEvent(label) {
@@ -568,25 +604,31 @@ function updateCameraUi() {
 }
 
 function setStatus(status, message = '') {
-  state.status = status || 'idle';
+  const nextStatus = status || 'idle';
+  const nextMessage = String(message || '');
+  const statusChanged = state.status !== nextStatus;
+  const messageChanged = !!nextMessage && state.statusMessage !== nextMessage;
+  state.status = nextStatus;
+  if (nextMessage) state.statusMessage = nextMessage;
+  if (!statusChanged && !messageChanged) return;
   if (els.state) {
     els.state.className = `fairy-live-state state-${state.status}`;
     els.state.textContent = state.status.replace(/_/g, ' ').toUpperCase();
   }
-  if (els.status && message) els.status.textContent = message;
+  if (els.status && nextMessage) els.status.textContent = nextMessage;
   if (els.start) els.start.disabled = ['connecting', 'ready', 'listening', 'thinking', 'speaking', 'handing_off', 'task_running'].includes(state.status);
   if (els.end) els.end.disabled = !state.sessionId || ['idle', 'ended'].includes(state.status);
   updateLaunchUi();
   updateHeaderCallControls();
   updateMicUi();
   updateScreenUi();
-  emitDirectChatSync('status', { message });
+  emitDirectChatSync('status', { message: nextMessage });
   window.dispatchEvent(new CustomEvent('commandcenter:fairy-status', {
     detail: {
       sessionId: state.sessionId,
       active: isSessionActive(),
       status: state.status,
-      message,
+      message: nextMessage,
       personaName: personaName(),
       speaking: state.status === 'speaking',
       listening: state.status === 'listening',

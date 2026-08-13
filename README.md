@@ -76,6 +76,8 @@ With zero config, the app runs in **demo mode** with simulated agent activity.
 > Need the full install/config flow, troubleshooting, and live-mode details?
 > See **[SETUP.md](./SETUP.md)** for the complete setup guide.
 
+For a Windows machine that should publish local Hermes status to a deployed Command Center relay, use the portable status-only client documented in **[client/README.md](./client/README.md)**.
+
 For **live OpenClaw integration**:
 - set `DEMO_MODE=false`
 - point `GATEWAY_URL` at your OpenClaw gateway
