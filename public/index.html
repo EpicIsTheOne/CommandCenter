@@ -57,6 +57,7 @@
           <button id="fairy-live-screen-header-btn" class="header-button fairy-live-header-btn hidden" type="button" disabled>SCREEN OFF</button>
           <button id="fairy-live-camera-header-btn" class="header-button fairy-live-header-btn hidden" type="button" disabled>CAM OFF</button>
           <button id="fairy-live-camera-facing-header-btn" class="header-button fairy-live-header-btn hidden" type="button" disabled>BACK CAM</button>
+          <button id="control-plane-toggle" class="header-button" type="button" aria-expanded="false">CONTROL</button>
           <button id="settings-btn" class="header-button" type="button">SETTINGS</button>
         </div>
       </div>
@@ -149,6 +150,27 @@
       <button id="fairy-live-start" class="primary-button" type="button">START CALL</button>
       <button id="fairy-live-stop-audio" class="secondary-button" type="button">STOP AUDIO</button>
       <button id="fairy-live-end" class="secondary-button" type="button" disabled>END</button>
+    </div>
+  </section>
+
+  <section id="control-plane-panel" class="control-plane-panel hidden" aria-label="Command Center control plane">
+    <div class="control-plane-header">
+      <div>
+        <div class="control-plane-kicker">DURABLE CONTROL PLANE</div>
+        <h2>MISSION BOARD</h2>
+        <div id="control-plane-summary" class="control-plane-summary">Synchronizing tasks…</div>
+      </div>
+      <div class="control-plane-header-meta"><span id="control-plane-sequence">EVENT 0</span><span id="control-plane-status" data-tone="info">READY</span></div>
+    </div>
+    <div class="control-plane-compose">
+      <input id="control-plane-new-task" type="text" maxlength="12000" placeholder="Queue work for an agent…">
+      <button id="control-plane-new-task-btn" class="primary-button" type="button">QUEUE TASK</button>
+      <input id="control-plane-command" type="text" maxlength="5000" placeholder="Command palette: /status /steer /cancel /retry…" aria-label="Control plane command palette">
+    </div>
+    <div class="control-plane-grid">
+      <div class="control-plane-column control-plane-roster-column"><div class="control-section-label">NORMALIZED AGENTS</div><div id="control-plane-agents" class="control-plane-agents"></div></div>
+      <div class="control-plane-column control-plane-task-column"><div class="control-section-label">ALL TASKS</div><div id="control-plane-tasks" class="control-plane-tasks"></div></div>
+      <div class="control-plane-column control-plane-detail-column"><div class="control-section-label">TASK DRAWER</div><div id="control-plane-task-detail" class="control-plane-task-detail"></div><div class="control-section-label control-approval-label">APPROVALS</div><div id="control-plane-approvals" class="control-plane-approvals"></div></div>
     </div>
   </section>
 

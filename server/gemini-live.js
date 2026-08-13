@@ -257,6 +257,77 @@ export const FAIRY_LIVE_TOOLS = [{
       },
     },
   }, {
+    name: 'queue_task',
+    description: 'Queue a bounded follow-up or queued task in Command Center without replacing the currently running task. Use when Epic asks to queue more work or continue after the active task.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        taskId: { type: 'STRING', description: 'Existing task id to queue or queue behind.' },
+        title: { type: 'STRING', description: 'Short title for a follow-up task.' },
+        prompt: { type: 'STRING', description: 'Bounded follow-up task request.' },
+        expectedTaskRevision: { type: 'NUMBER', description: 'Optional revision guard from the latest task snapshot.' },
+      },
+      required: ['taskId'],
+    },
+  }, {
+    name: 'steer_task',
+    description: 'Send bounded guidance to a queued, running, approval-waiting, or blocked task. Use only when Epic explicitly changes direction.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        taskId: { type: 'STRING', description: 'Task id to steer.' },
+        guidance: { type: 'STRING', description: 'Short bounded direction for the task runtime.' },
+        expectedTaskRevision: { type: 'NUMBER', description: 'Optional revision guard from the latest task snapshot.' },
+      },
+      required: ['taskId', 'guidance'],
+    },
+  }, {
+    name: 'cancel_task',
+    description: 'Request cancellation of a Command Center task when Epic explicitly asks to stop it. Cancellation is bounded and cannot revive a terminal task.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        taskId: { type: 'STRING', description: 'Task id to cancel.' },
+        expectedTaskRevision: { type: 'NUMBER', description: 'Optional revision guard from the latest task snapshot.' },
+      },
+      required: ['taskId'],
+    },
+  }, {
+    name: 'retry_task',
+    description: 'Retry a failed Command Center task explicitly, creating a new auditable execution attempt without repeating the prior attempt side effects.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        taskId: { type: 'STRING', description: 'Failed task id to retry.' },
+        expectedTaskRevision: { type: 'NUMBER', description: 'Optional revision guard from the latest task snapshot.' },
+      },
+      required: ['taskId'],
+    },
+  }, {
+    name: 'approve_task',
+    description: 'Approve one visible, capability-scoped task approval only after Epic clearly confirms approval. Ambiguous voice confirmations must fail closed.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        approvalId: { type: 'STRING', description: 'Exact approval id shown in the Command Center approval card.' },
+        confirmation: { type: 'STRING', description: 'Clear confirmation phrase. Use only approve, approve it, or I approve.' },
+        expectedApprovalRevision: { type: 'NUMBER', description: 'Optional approval revision guard.' },
+      },
+      required: ['approvalId', 'confirmation'],
+    },
+  }, {
+    name: 'deny_task',
+    description: 'Deny one visible, capability-scoped task approval when Epic clearly says no. Ambiguous voice confirmations must fail closed.',
+    parameters: {
+      type: 'OBJECT',
+      properties: {
+        approvalId: { type: 'STRING', description: 'Exact approval id shown in the Command Center approval card.' },
+        confirmation: { type: 'STRING', description: 'Clear denial phrase. Use only deny, deny it, or no.' },
+        expectedApprovalRevision: { type: 'NUMBER', description: 'Optional approval revision guard.' },
+      },
+      required: ['approvalId', 'confirmation'],
+    },
+  }, {
     name: 'update_live_memory',
     description: 'Save a concise durable memory for future live calls when Epic explicitly asks Fairy to remember a preference, durable fact, or project context. Never store secrets, API keys, passwords, tokens, or credentials.',
     parameters: {

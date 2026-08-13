@@ -13,6 +13,7 @@ import * as branding from './branding.js?v=20260514b';
 import * as layoutSettings from './layout-settings.js?v=20260514b';
 import * as fairyLive from './fairy-live.js?v=20260813-fairy-performance1';
 import * as agentComms from './agent-comms.js?v=20260524-agentcomms1';
+import * as controlPlane from './control-plane.js?v=20260813-control-plane1';
 
 const APP_BUILD = '20260813-fairy-performance1';
 console.log('[CommandCenter] app build:', APP_BUILD);
@@ -23,6 +24,7 @@ let workspaceRooms = { version: 1, roomSize: 5, rooms: [] };
 let currentWorkspaceRoomId = '';
 const WORKSPACE_ROOM_STORAGE_KEY = 'commandcenter.currentWorkspaceRoomId';
 let ws = null;
+let controlEventSequence = Number(localStorage.getItem('commandcenter.controlEventSequence') || 0) || 0;
 let reconnectTimer = null;
 let isFullscreen = false;
 let playbackToken = 0;
@@ -1177,7 +1179,8 @@ function bootSequence() {
 
 function connect() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${protocol}//${location.host}${BASE}/ws`);
+  const cursor = controlEventSequence > 0 ? `?afterEventSequence=${encodeURIComponent(controlEventSequence)}` : '';
+  ws = new WebSocket(`${protocol}//${location.host}${BASE}/ws${cursor}`);
 
   ws.onopen = () => {
     terminal.log('[ws] Connected to server', 'info');
@@ -1216,8 +1219,13 @@ function isNoisyIdleEvent(type, data = {}) {
 
 async function handleEvent(msg) {
   fairyLive.handleEvent(msg);
+  controlPlane.handleEvent(msg);
   agentComms.handleEvent?.(msg);
   const { type, data } = msg;
+  if (type === 'control:event' && Number(data?.eventSequence || 0) > controlEventSequence) {
+    controlEventSequence = Number(data.eventSequence || 0);
+    localStorage.setItem('commandcenter.controlEventSequence', String(controlEventSequence));
+  }
 
   if (isNoisyIdleEvent(type, data)) {
     if (data?.agent && activeOfficeAgent === data.agent) {
@@ -2983,6 +2991,7 @@ async function main() {
   directChat.init();
   singleAgent.init();
   fairyLive.init();
+  controlPlane.init({ base: BASE });
   agentComms.initAgentComms({ base: BASE, fetchJson, initialRoster: roster });
   window.addEventListener('commandcenter:fairy-status', (event) => {
     const detail = event?.detail || {};

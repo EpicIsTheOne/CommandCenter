@@ -57,6 +57,8 @@ function normalizeAgentRecord(agent = {}, index = 0) {
     name: cleanText(agent.name || label) || label,
     model: cleanText(agent.model),
     status: cleanText(agent.status),
+    capabilities: Array.isArray(agent.capabilities) ? agent.capabilities.map((value) => cleanText(value)).filter(Boolean).slice(0, 64) : [],
+    steerSupported: agent.steerSupported === true,
     index,
     raw: agent,
   };
@@ -104,6 +106,9 @@ function buildVirtualAgent(device = {}, provider = {}, agent = {}, index = 0, tr
     relayAgentMessage: cleanText(activity.message),
     relayAgentTool: cleanText(activity.tool),
     relayAgentActivityAt: activity.updatedAt || null,
+    capabilities: Array.from(new Set([...(Array.isArray(agent.capabilities) ? agent.capabilities : []), 'agent.roster.read', 'agent.status.read', 'task.status.read', 'task.progress.read', 'task.review.read', 'task.start', 'task.queue', 'task.cancel', 'task.retry'])),
+    steerSupported: agent.steerSupported === true,
+    relayControlV2: agent.steerSupported === true || (Array.isArray(agent.capabilities) && agent.capabilities.includes('task.steer')),
     relayDeviceState: cleanText(presence.state),
     deviceLabel,
     subtitle: `Relay · ${deviceLabel}`,
@@ -130,6 +135,9 @@ export class RelayAgentSource extends EventEmitter {
     this.reconnectDelay = 1500;
     this.devices = new Map();
     this.pending = new Map();
+    this.pendingControl = new Map();
+    this.controlEventListeners = new Map();
+    this.controlEventIds = new Set();
     this.reconnectTimer = null;
     this.lastRosterSignature = '';
     this.localManager = null;
@@ -205,6 +213,14 @@ export class RelayAgentSource extends EventEmitter {
     for (const pending of this.pending.values()) {
       if (pending.deviceId === id) pending.reject(new Error('Relay device disconnected.'));
     }
+    for (const pending of this.pendingControl.values()) {
+      if (pending.deviceId === id) pending.reject(new Error('Relay device disconnected.'));
+    }
+    for (const [key, listener] of this.controlEventListeners) {
+      if (listener.deviceId !== id) continue;
+      clearTimeout(listener.timer);
+      this.controlEventListeners.delete(key);
+    }
   }
 
   async configure(settings = {}) {
@@ -237,6 +253,13 @@ export class RelayAgentSource extends EventEmitter {
       pending.reject(new Error('Relay connection stopped.'));
     }
     this.pending.clear();
+    for (const pending of this.pendingControl.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error('Relay connection stopped.'));
+    }
+    this.pendingControl.clear();
+    for (const listener of this.controlEventListeners.values()) clearTimeout(listener.timer);
+    this.controlEventListeners.clear();
   }
 
   connect() {
@@ -342,6 +365,112 @@ export class RelayAgentSource extends EventEmitter {
     return session?.metadata?.chatTransport === 'relay' || session?.metadata?.relay === true || !!this.getAgent(session?.agent || '');
   }
 
+  async sendRelayControlOperation({ session = null, task = null, operation = 'status', payload = {}, onEvent } = {}) {
+    const metadata = session?.metadata || {};
+    const virtualAgentId = cleanText(metadata.relayVirtualAgentId || session?.agent || task?.agent);
+    const virtualAgent = this.getAgent(virtualAgentId);
+    const deviceId = cleanText(metadata.relayDeviceId || virtualAgent?.relayDeviceId);
+    const providerId = cleanText(metadata.relayProviderId || virtualAgent?.relayProviderId) || 'hermes';
+    const remoteAgentId = cleanText(metadata.relayAgentId || virtualAgent?.relayAgentId || task?.agent);
+    if (!deviceId || !remoteAgentId) throw new Error('Relay control target is incomplete.');
+    const transport = cleanText(virtualAgent?.relayTransport || metadata.relayTransport);
+    const useLocalDeviceTransport = transport === 'device' && !!(this.localManager && typeof this.localManager.sendControlRequest === 'function');
+    if (!useLocalDeviceTransport && (!this.connected || !this.ws || this.ws.readyState !== WebSocket.OPEN)) throw new Error('Relay device is not connected.');
+    const operationId = cleanText(payload.operationId) || `control:${cleanText(task?.id || session?.id)}:${operation}:${Date.now().toString(36)}`;
+    const requestId = `cc_control_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const requestPayload = {
+      operation,
+      operationId,
+      taskId: cleanText(payload.taskId || task?.id),
+      threadId: cleanText(payload.threadId || task?.threadId || metadata.threadId),
+      attemptId: cleanText(payload.attemptId || task?.attemptId),
+      agentId: remoteAgentId,
+      providerId,
+      ...(payload.title ? { title: cleanText(payload.title).slice(0, 240) } : {}),
+      ...(payload.prompt ? { prompt: cleanText(payload.prompt).slice(0, 12000) } : {}),
+      ...(payload.guidance ? { guidance: cleanText(payload.guidance).slice(0, 4000) } : {}),
+      ...(payload.expectedTaskRevision !== undefined ? { expectedTaskRevision: Number(payload.expectedTaskRevision) } : {}),
+    };
+    const request = useLocalDeviceTransport
+      ? { v: 2, id: requestId, type: 'relay.control.request', timestamp: new Date().toISOString(), payload: requestPayload }
+      : { v: 2, id: requestId, type: 'agent.control.request', timestamp: new Date().toISOString(), source: { kind: 'app', id: 'openclaw-command-center' }, target: { kind: 'device', id: deviceId }, deviceId, payload: requestPayload };
+    const eventKey = `${deviceId}:${cleanText(task?.id || payload.taskId)}:${cleanText(task?.attemptId || payload.attemptId)}`;
+    const removeEventListener = () => {
+      const listener = this.controlEventListeners.get(eventKey);
+      if (!listener) return;
+      clearTimeout(listener.timer);
+      this.controlEventListeners.delete(eventKey);
+    };
+    if (onEvent) {
+      const eventTimer = setTimeout(removeEventListener, REQUEST_TIMEOUT_MS);
+      this.controlEventListeners.set(eventKey, { deviceId, taskId: cleanText(task?.id || payload.taskId), attemptId: cleanText(task?.attemptId || payload.attemptId), operationId, onEvent, timer: eventTimer });
+    }
+    return await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingControl.delete(requestId);
+        reject(new Error('Relay control request timed out.'));
+      }, REQUEST_TIMEOUT_MS);
+      this.pendingControl.set(requestId, {
+        requestId,
+        operationId,
+        sessionId: cleanText(session?.id),
+        taskId: cleanText(task?.id || payload.taskId),
+        virtualAgentId,
+        deviceId,
+        providerId,
+        remoteAgentId,
+        deviceName: cleanText(metadata.relayDeviceName || virtualAgent?.relayDeviceName),
+        platform: cleanText(metadata.relayPlatform || virtualAgent?.relayPlatform),
+        onEvent,
+        resolve: (value) => {
+          clearTimeout(timer);
+          this.pendingControl.delete(requestId);
+          if (!(operation === 'cancel' && value?.state === 'cancelling' && onEvent)) removeEventListener();
+          resolve(value);
+        },
+        reject: (error) => { clearTimeout(timer); this.pendingControl.delete(requestId); removeEventListener(); reject(error); },
+        timer,
+      });
+      let sent = false;
+      try {
+        if (useLocalDeviceTransport) sent = this.localManager.sendControlRequest(deviceId, request);
+        else { this.ws.send(JSON.stringify(request)); sent = true; }
+      } catch {}
+      if (!sent) {
+        clearTimeout(timer);
+        this.pendingControl.delete(requestId);
+        removeEventListener();
+        reject(new Error('Relay device is not connected.'));
+      }
+    });
+  }
+
+  async runRelayControlTask({ session, task, onEvent } = {}) {
+    const result = await this.sendRelayControlOperation({
+      session,
+      task,
+      operation: 'start',
+      onEvent,
+      payload: { title: task?.title, prompt: task?.prompt, taskId: task?.id, threadId: task?.threadId, attemptId: task?.attemptId, operationId: `task:${task?.id}:attempt:${task?.attemptId}:start` },
+    });
+    return {
+      text: cleanText(result.result || result.summary),
+      runtime: 'relay',
+      model: cleanText(result.model),
+      sessionId: cleanText(result.sessionId || session?.id),
+      providerSessionId: cleanText(result.providerSessionId),
+      raw: result.raw || result,
+    };
+  }
+
+  async steerRelayTask({ session, task, guidance, onEvent } = {}) {
+    return this.sendRelayControlOperation({ session, task, operation: 'steer', onEvent, payload: { guidance, taskId: task?.id, operationId: `task:${task?.id}:attempt:${task?.attemptId}:steer:${Date.now().toString(36)}` } });
+  }
+
+  async cancelRelayTask({ session, task, onEvent } = {}) {
+    return this.sendRelayControlOperation({ session, task, operation: 'cancel', onEvent, payload: { taskId: task?.id, operationId: `task:${task?.id}:attempt:${task?.attemptId}:cancel` } });
+  }
+
   async runRelayChatTurn({ session, latestMessage, onEvent } = {}) {
     const metadata = session?.metadata || {};
     const deviceId = cleanText(metadata.relayDeviceId);
@@ -422,9 +551,8 @@ export class RelayAgentSource extends EventEmitter {
       });
       let sent = false;
       try {
-        sent = useLocalDeviceTransport
-          ? this.localManager.sendChatRequest(deviceId, request)
-          : this.ws.send(JSON.stringify(request));
+        if (useLocalDeviceTransport) sent = this.localManager.sendChatRequest(deviceId, request);
+        else { this.ws.send(JSON.stringify(request)); sent = true; }
       } catch {
         sent = false;
       }
@@ -449,6 +577,11 @@ export class RelayAgentSource extends EventEmitter {
       this.emitRosterUpdated();
       return;
     }
+    if (type === 'relay.capabilities.snapshot' || type === 'agent.capabilities.snapshot') {
+      this.ingestCapabilitiesSnapshot(message);
+      this.emitRosterUpdated();
+      return;
+    }
     if (type === 'relay.presence' || type === 'relay.disconnect') {
       this.updateDevicePresence(message.deviceId, {
         ...(message.payload || {}),
@@ -467,6 +600,14 @@ export class RelayAgentSource extends EventEmitter {
     }
     if (type === 'relay.chat.response') {
       this.handleResponse(message);
+      return;
+    }
+    if (type === 'relay.control.response' || type === 'agent.control.response') {
+      this.handleControlResponse(message);
+      return;
+    }
+    if (type === 'relay.control.event' || type === 'agent.control.event' || type === 'relay.replay.response') {
+      this.handleControlEvent(message);
       return;
     }
     if (type === 'command.rejected' || type === 'command.failed') {
@@ -528,6 +669,24 @@ export class RelayAgentSource extends EventEmitter {
     const record = this.ensureDevice(deviceId);
     if (!record) return;
     record.roster = Array.isArray(payload.agents) ? payload.agents : [];
+    this.updateDevicePresence(deviceId, { ownerId: message.ownerId, state: 'online' });
+  }
+
+  ingestCapabilitiesSnapshot(message = {}) {
+    const payload = message.payload || {};
+    const deviceId = cleanText(message.deviceId || payload.deviceId);
+    const record = this.ensureDevice(deviceId);
+    if (!record || !Array.isArray(payload.agents)) return;
+    const capabilities = new Map(payload.agents.map((agent) => [cleanText(agent.id || agent.agentId || agent.name), agent]));
+    record.roster = (record.roster || []).map((agent) => {
+      const id = cleanText(agent.id || agent.agentId || agent.name);
+      const extra = capabilities.get(id) || {};
+      return { ...agent, capabilities: extra.capabilities || agent.capabilities || [], steerSupported: extra.steerSupported === true || agent.steerSupported === true };
+    });
+    for (const agent of payload.agents) {
+      const id = cleanText(agent.id || agent.agentId || agent.name);
+      if (id && !record.roster.some((item) => cleanText(item.id || item.agentId || item.name) === id)) record.roster.push(agent);
+    }
     this.updateDevicePresence(deviceId, { ownerId: message.ownerId, state: 'online' });
   }
 
@@ -608,6 +767,78 @@ export class RelayAgentSource extends EventEmitter {
       providerSessionId: cleanText(payload.providerSessionId) || pending.providerSessionId,
       raw: message,
     });
+  }
+
+  handleControlResponse(message = {}) {
+    const replyTo = cleanText(message.replyTo || message.correlationId);
+    const pending = replyTo ? this.pendingControl.get(replyTo) : null;
+    if (!pending) return;
+    if (message.ownerId === RELAY_OWNER_ID && message.deviceId !== pending.deviceId) return;
+    const payload = message.payload || {};
+    if (payload.operationId && payload.operationId !== pending.operationId) {
+      pending.reject(new Error('Relay control operation mismatch.'));
+      return;
+    }
+    if (payload.ok === false) {
+      const error = new Error(cleanText(payload.errorMessage) || 'Relay control operation failed.');
+      error.code = cleanText(payload.errorCode) || 'RELAY_CONTROL_FAILED';
+      pending.reject(error);
+      return;
+    }
+    pending.resolve({
+      ...payload,
+      runtime: 'relay',
+      raw: message,
+    });
+  }
+
+  handleControlEvent(message = {}) {
+    const eventId = cleanText(message.id);
+    if (eventId && this.controlEventIds.has(eventId)) return;
+    if (eventId) {
+      this.controlEventIds.add(eventId);
+      while (this.controlEventIds.size > 2000) this.controlEventIds.delete(this.controlEventIds.values().next().value);
+    }
+    const replyTo = cleanText(message.replyTo || message.correlationId);
+    const pending = this.pendingControl.get(replyTo);
+    const payload = message.payload || {};
+    const deviceId = cleanText(message.deviceId || pending?.deviceId);
+    const eventListener = !pending
+      ? [...this.controlEventListeners.values()].find((listener) => listener.deviceId === deviceId && listener.taskId === cleanText(payload.taskId) && (!listener.attemptId || listener.attemptId === cleanText(payload.attemptId)))
+      : null;
+    const context = pending || eventListener;
+    const record = this.ensureDevice(deviceId);
+    const remoteAgentId = cleanText(payload.agentId || pending?.remoteAgentId || eventListener?.remoteAgentId);
+    const virtualAgent = this.getAgents().find((agent) => agent.relayDeviceId === deviceId && agent.relayAgentId === remoteAgentId);
+    const state = cleanText(payload.state || payload.eventType);
+    const status = state === 'completed' ? 'idle' : state === 'failed' || state === 'cancelled' ? 'error' : 'working';
+    const normalized = {
+      type: mapActivityStatus(status),
+      data: {
+        agent: virtualAgent?.id || pending?.virtualAgentId || eventListener?.virtualAgentId || remoteAgentId,
+        status,
+        message: cleanText(payload.summary || payload.result || payload.eventType),
+        tool: 'control-plane',
+        source: 'relay-control',
+        chat: false,
+        relay: true,
+        relayDeviceId: context?.deviceId || deviceId,
+        relayDeviceName: context?.deviceName || record?.device?.name || deviceId,
+        relayProviderId: context?.providerId,
+        relayRemoteAgentId: remoteAgentId,
+        taskId: cleanText(payload.taskId || context?.taskId),
+        state,
+        revision: payload.revision,
+        progressSequence: payload.progressSequence,
+      },
+    };
+    try { context?.onEvent?.(normalized); } catch {}
+    if (['completed', 'failed', 'cancelled'].includes(state) && eventListener) {
+      clearTimeout(eventListener.timer);
+      for (const [key, listener] of this.controlEventListeners) if (listener === eventListener) this.controlEventListeners.delete(key);
+    }
+    this.emit('control:event', { ...message, normalized });
+    this.emit('event', normalized);
   }
 
   handleCommandFailure(message = {}) {

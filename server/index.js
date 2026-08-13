@@ -28,7 +28,10 @@ import { detectWakeKeyword, warmWakeKeywordDetector } from './wake-keyword-detec
 import { startSessionMonitor } from './session-monitor.js';
 import { startHermesSessionMonitor } from './hermes-session-monitor.js';
 import { FAIRY_CALL_MODE_OPTIONS, GEMINI_LIVE_VOICE_OPTIONS, loadGeminiRuntimeConfig, loadGeminiSettings, saveGeminiSettings, normalizeCallMode } from './gemini-config.js';
-import { createLiveTask, getLiveTask, listLiveTasks, looksComplexRequest, runLiveTask } from './live-tasks.js';
+import { canSteerLiveTask, createLiveTask, getLiveTask, listLiveTasks, looksComplexRequest, requestLiveTaskCancel, runLiveTask, steerLiveTask } from './live-tasks.js';
+import { canTransitionTask, controlPlane, initializeControlPlane, projectLegacyTask } from './control-plane.js';
+import { registerControlRoutes } from './control-api.js';
+import { buildCapabilityRegistry } from './control-capabilities.js';
 import { createCallSession, endCallSession, getCallSession, listCallSessions, updateCallSession } from './call-session-store.js';
 import { cleanupFairyRecordingIndex, getFairyRecording, getFairyRecordingPath, listFairyRecordings, saveFairyRecording } from './fairy-recordings.js';
 import { GeminiLiveSession, FAIRY_LIVE_VOICE_NAME, buildFairyLiveSystemPrompt } from './gemini-live.js';
@@ -945,6 +948,7 @@ await ensureMusicStorage();
 await ensureIntroStorage();
 await ensureAppearanceStorage();
 await ensureBrandingStorage();
+await initializeControlPlane();
 
 const liveGeminiSessions = new Map();
 const liveGeminiWatchdogs = new Map();
@@ -1256,11 +1260,29 @@ function appendCallTranscriptEntry(sessionId, role, text, meta = {}) {
       last.text = `${String(last.text || '').trim()} ${cleanText}`.replace(/\s+/g, ' ').trim();
       last.at = now;
       entries[entries.length - 1] = last;
-      return updateCallSession(sessionId, { transcriptEntries: entries.slice(-80) });
+      const updated = updateCallSession(sessionId, { transcriptEntries: entries.slice(-80) });
+      if (updated?.threadId) {
+        controlPlane.appendThreadMessage(updated.threadId, {
+          role: cleanRole === 'user' ? 'user' : cleanRole === 'assistant' ? 'assistant' : cleanRole,
+          text: cleanText,
+          meta: { ...meta, callSessionId: sessionId, transcriptMerge: true },
+          operationId: `call:${sessionId}:transcript:${randomUUID()}`,
+        }).catch(() => {});
+      }
+      return updated;
     }
   }
   entries.push({ role: cleanRole, text: cleanText, at: now, ...meta });
-  return updateCallSession(sessionId, { transcriptEntries: entries.slice(-80) });
+  const updated = updateCallSession(sessionId, { transcriptEntries: entries.slice(-80) });
+  if (updated?.threadId) {
+    controlPlane.appendThreadMessage(updated.threadId, {
+      role: cleanRole === 'user' ? 'user' : cleanRole === 'assistant' ? 'assistant' : cleanRole,
+      text: cleanText,
+      meta: { ...meta, callSessionId: sessionId },
+      operationId: `call:${sessionId}:transcript:${randomUUID()}`,
+    }).catch(() => {});
+  }
+  return updated;
 }
 
 function noteAgentActivity(agentId = '', state = 'active') {
@@ -1308,6 +1330,8 @@ async function buildFairyAgentReport({ agent = '', taskId = '', includeAgents = 
   }
   const selectedAgents = mergedAgents.filter((item) => fairyAgentMatches(item, agent));
   const selectedIds = new Set(selectedAgents.map((item) => item.id));
+  const capabilityRegistry = buildCapabilityRegistry({ roster: { ...activeRoster, agents: mergedAgents }, relayAgents: [] });
+  const capabilitiesById = new Map(capabilityRegistry.map((item) => [item.id, item]));
   const tasks = await listLiveTasks();
   const relevantTasks = tasks
     .filter((task) => {
@@ -1322,7 +1346,12 @@ async function buildFairyAgentReport({ agent = '', taskId = '', includeAgents = 
       agent: task.agent,
       runtime: task.runtime || 'openclaw',
       runtimeLabel: getTaskRuntimeLabel(task, activeRoster),
+      state: task.state || task.status,
       status: task.status,
+      revision: task.revision || 0,
+      threadId: task.threadId || task.thread_id || '',
+      attemptId: task.attemptId || task.attempt_id || '',
+      progressSequence: task.progressSequence || task.progress_sequence || 0,
       summary: sanitizeFairyReportText(task.summary, 700),
       result: sanitizeFairyReportText(task.result, 1200),
       error: sanitizeFairyReportText(task.error, 700),
@@ -1344,15 +1373,19 @@ async function buildFairyAgentReport({ agent = '', taskId = '', includeAgents = 
       activity: sanitizeFairyReportText(activity.message || item.relayAgentMessage || '', 420),
       tool: sanitizeFairyReportText(activity.tool || item.relayAgentTool || '', 180),
       model: item.model || '',
+      capabilities: capabilitiesById.get(item.id)?.capabilities || [],
+      riskyCapabilities: capabilitiesById.get(item.id)?.riskyCapabilities || [],
+      steerSupported: capabilitiesById.get(item.id)?.steerSupported === true,
     };
   });
-  const workingTasks = relevantTasks.filter((task) => ['queued', 'working'].includes(task.status)).length;
+  const workingTasks = relevantTasks.filter((task) => ['created', 'queued', 'running', 'waiting_for_approval', 'blocked', 'retrying'].includes(task.state)).length;
   return {
     ok: true,
     query: String(agent || '').trim(),
     taskId: String(taskId || '').trim(),
     relay: relayAgentSource.getStatus(),
     primaryAgentId: activeRoster?.primaryAgentId || '',
+    capabilities: capabilityRegistry,
     agents: includeAgents ? agentReport : [],
     tasks: relevantTasks,
     summary: selectedAgents.length
@@ -4534,11 +4567,18 @@ app.post(`${basePath}/api/call/start`, async (req, res) => {
       : String(currentRoster.primaryAgentId || 'orchestrator').trim();
     const activeCallMode = normalizeCallMode(runtime.callMode || 'universal');
     const initialModePolicy = buildEffectiveCallPolicy(activeCallMode, 'low', '');
+    const callThread = await controlPlane.createThread({
+      kind: 'fairy-call',
+      title: `Fairy call · ${new Date().toLocaleString()}`,
+      source: 'fairy-live',
+      operationId: `fairy-call-thread:${randomUUID()}`,
+    });
     const session = createCallSession({
       agent: sessionAgent,
       mode: 'gemini-live',
       persona: 'fairy',
       callMode: activeCallMode,
+      threadId: callThread.thread.id,
     });
     updateCallSession(session.id, {
       callMode: activeCallMode,
@@ -4875,6 +4915,68 @@ Tell Epic briefly that you put the image on screen and that he can copy the link
                 }, 50);
                 continue;
               }
+              if (['queue_task', 'steer_task', 'cancel_task', 'retry_task', 'approve_task', 'deny_task'].includes(name)) {
+                try {
+                  const operationId = `fairy:${session.id}:${name}:${randomUUID()}`;
+                  let result;
+                  if (name === 'queue_task') {
+                    result = await controlPlane.queueTask(String(args.taskId || '').trim(), {
+                      title: String(args.title || '').trim(),
+                      prompt: String(args.prompt || '').trim(),
+                      followUp: true,
+                      operationId,
+                      expectedTaskRevision: args.expectedTaskRevision,
+                      actor: 'fairy-voice',
+                    });
+                    if (result.task?.state === 'queued' && !result.childTask) runLiveTask(result.task, { broadcast, roster: getRoster() });
+                  } else if (name === 'steer_task') {
+                    const taskId = String(args.taskId || '').trim();
+                    const runtimeAccepted = canSteerLiveTask(taskId);
+                    result = await controlPlane.steerTask(taskId, String(args.guidance || '').trim(), {
+                      operationId,
+                      expectedTaskRevision: args.expectedTaskRevision,
+                      actor: 'fairy-voice',
+                      runtimeAccepted,
+                    });
+                    if (runtimeAccepted) await steerLiveTask(taskId, String(args.guidance || '').trim());
+                  } else if (name === 'cancel_task') {
+                    const taskId = String(args.taskId || '').trim();
+                    result = await controlPlane.requestCancel(taskId, {
+                      operationId,
+                      expectedTaskRevision: args.expectedTaskRevision,
+                      actor: 'fairy-voice',
+                    });
+                    if (result.task?.state === 'cancelling') await requestLiveTaskCancel(taskId);
+                  } else if (name === 'retry_task') {
+                    result = await controlPlane.retryTask(String(args.taskId || '').trim(), {
+                      operationId,
+                      expectedTaskRevision: args.expectedTaskRevision,
+                      actor: 'fairy-voice',
+                    });
+                    if (result.task?.state === 'queued') runLiveTask(result.task, { broadcast, roster: getRoster() });
+                  } else {
+                    const approvalId = String(args.approvalId || '').trim();
+                    const confirmation = String(args.confirmation || '').toLowerCase().replace(/[.!?,]/g, '').replace(/\s+/g, ' ').trim();
+                    const allowed = name === 'approve_task'
+                      ? new Set(['approve', 'approve it', 'i approve', 'yes approve'])
+                      : new Set(['deny', 'deny it', 'i deny', 'no']);
+                    if (!allowed.has(confirmation)) {
+                      result = { ok: false, code: 'AMBIGUOUS_APPROVAL', error: 'The spoken approval was ambiguous, so no approval change was made.' };
+                    } else {
+                      result = await controlPlane.decideApproval(approvalId, name === 'approve_task' ? 'approved' : 'denied', {
+                        operationId,
+                        expectedApprovalRevision: args.expectedApprovalRevision,
+                        actor: 'fairy-voice',
+                      });
+                      if (result.task?.state === 'queued') runLiveTask(result.task, { broadcast, roster: getRoster() });
+                    }
+                  }
+                  functionResponses.push({ name, id, response: result });
+                } catch (error) {
+                  functionResponses.push({ name, id, response: { ok: false, code: error.code || 'CONTROL_PLANE_ERROR', error: error.message || 'Control-plane operation failed.' } });
+                }
+                continue;
+              }
               if (name !== 'handoff_to_openclaw' && name !== 'handoff_to_agent') {
                 functionResponses.push({ name, id, response: { error: `Unsupported tool: ${name}` } });
                 continue;
@@ -4911,7 +5013,7 @@ Tell Epic briefly that you put the image on screen and that he can copy the link
                 } : {}),
                 session: handoffStarted,
               });
-              const task = await createLiveTask({ title, summary, prompt, agent, runtime });
+              const task = await createLiveTask({ title, summary, prompt, agent, runtime, threadId: session.threadId });
               const handoffLinked = setCallSessionState(session.id, 'task_running', {
                 handoffTaskId: task.id,
                 handoffTitle: title,
@@ -5273,6 +5375,7 @@ app.post(`${basePath}/api/call/:id/event`, async (req, res) => {
           prompt: text,
           agent: session.agent,
           runtime: taskRuntime,
+          threadId: session.threadId,
         });
         const linked = setCallSessionState(sessionId, 'task_running', {
           handoffTitle: title,
@@ -6365,13 +6468,24 @@ server.on('upgrade', async (req, socket, head) => {
   }
 });
 
-wss.on('connection', (ws) => {
+wss.on('connection', async (ws, req) => {
   console.log(`[ws] Client connected (total: ${wss.clients.size})`);
 
   ws.send(JSON.stringify({
     type: 'status',
     data: { ...bridge.getStatus(), voiceEnabled: true },
   }));
+
+  const afterEventSequence = Number(new URL(req?.url || '/', `${useHttps ? 'https' : 'http'}://localhost`).searchParams.get('afterEventSequence') || 0) || 0;
+  try {
+    const replay = await controlPlane.listEvents({ afterEventSequence, limit: 2000 });
+    for (const event of replay) {
+      if (ws.readyState !== 1) break;
+      ws.send(JSON.stringify({ type: 'control:event', data: event }));
+    }
+  } catch (error) {
+    if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'control:replay.error', data: { error: error.message || 'Could not replay control events' } }));
+  }
 
   ws.on('close', () => {
     console.log(`[ws] Client disconnected (total: ${wss.clients.size})`);
@@ -6427,6 +6541,17 @@ function broadcast(msg) {
     }
   }
 }
+
+controlPlane.on('event', (event) => {
+  broadcast({ type: 'control:event', data: event });
+});
+
+registerControlRoutes(app, {
+  basePath,
+  broadcast,
+  getRoster,
+  relayAgentSource,
+});
 
 export { broadcast, wss };
 
@@ -6488,6 +6613,36 @@ function notifyFairyOfRelayRoster(info = {}) {
 relayAgentSource.on('roster-updated', (info) => {
   broadcast({ type: 'relay:roster_updated', data: info });
   notifyFairyOfRelayRoster(info);
+});
+
+relayAgentSource.on('control:event', (message = {}) => {
+  const payload = message.payload || {};
+  if (payload.operation !== 'replay' || !payload.taskId || !Number.isSafeInteger(payload.eventSequence)) return;
+  const replayState = String(payload.state || '').trim();
+  const patch = {
+    ...(replayState ? { state: replayState } : {}),
+    ...(payload.summary ? { summary: String(payload.summary).slice(0, 1200) } : {}),
+    ...(payload.result ? { result: String(payload.result).slice(0, 16000) } : {}),
+    ...(payload.errorCode ? { error: String(payload.errorCode).slice(0, 4000) } : {}),
+  };
+  if (!Object.keys(patch).length) return;
+  void (async () => {
+    const current = await controlPlane.getTask(payload.taskId);
+    if (!current) return;
+    if (replayState && replayState !== current.state && !canTransitionTask(current.state, replayState)) return;
+    const result = await controlPlane.updateTask(payload.taskId, patch, {
+      operationId: `relay-replay:${message.deviceId}:${payload.eventSequence}`,
+      expectedAttemptId: payload.attemptId,
+      expectedProgressSequence: payload.progressSequence,
+      actor: 'relay-replay',
+      source: 'relay-replay',
+    });
+    if (result?.task) broadcast({ type: 'live_task:update', data: projectLegacyTask(result.task) });
+  })().catch((error) => {
+    if (!['STALE_EVENT', 'STALE_ATTEMPT', 'TASK_TERMINAL', 'INVALID_TRANSITION'].includes(error?.code)) {
+      console.error('[relay] Replayed control event could not be applied:', error?.message || error);
+    }
+  });
 });
 
 relayAgentSource.on('event', (event) => {

@@ -13,6 +13,7 @@
     "test:security": "node --test test/security.test.js test/websocket-auth.test.js",
     "test:integration": "node --test test/attachment-bundle.test.js test/startup.test.js",
     "check:syntax": "node scripts/check-syntax.cjs",
+    "smoke:control-plane": "node scripts/control-plane-live-smoke.cjs",
     "verify": "npm run check:syntax && npm test",
     "verify:fairy-recording": "node scripts/verify-fairy-recording.cjs",
     "verify:fairy-recording:autosave": "node scripts/verify-fairy-recording.cjs --autosave"

@@ -42,6 +42,11 @@ export function createRelayDeviceUpgrade({ basePath = '', relayManager, useHttps
           deviceId = enrolled.device.id;
           clearTimeout(authTimer);
           ws.send(JSON.stringify(authOkEnvelope(enrolled)));
+          relayManager.sendControlRequest(deviceId, {
+            operation: 'replay',
+            operationId: `relay-replay-${deviceId}-${relayManager.getReplayCursor(deviceId)}`,
+            afterEventSequence: relayManager.getReplayCursor(deviceId),
+          });
           return;
         }
         relayManager.handle(ws, raw, deviceId);

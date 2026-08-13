@@ -6,10 +6,11 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-export function createCallSession({ agent = 'orchestrator', mode = 'gemini-live', persona = 'fairy', callMode = 'universal' } = {}) {
+export function createCallSession({ agent = 'orchestrator', mode = 'gemini-live', persona = 'fairy', callMode = 'universal', threadId = '' } = {}) {
   const id = `call-${randomUUID()}`;
   const session = {
     id,
+    threadId: String(threadId || '').trim(),
     agent,
     mode,
     persona,

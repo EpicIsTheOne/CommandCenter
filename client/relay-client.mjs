@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 
 export const RELAY_CLIENT_SCHEMA_VERSION = 1;
+export const RELAY_CONTROL_SCHEMA_VERSION = 2;
 export const RELAY_CLIENT_VERSION = '1.0.0';
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000;
 export const DEFAULT_RECONNECT_DELAY_MS = 1_500;
@@ -184,6 +185,8 @@ function profileStatus(profile) {
 
 const CHAT_REQUEST_KEYS = new Set(['providerId', 'agentId', 'providerSessionId', 'sessionId', 'message']);
 const CHAT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const CONTROL_REQUEST_KEYS = new Set(['operation', 'operationId', 'taskId', 'threadId', 'attemptId', 'agentId', 'providerId', 'title', 'prompt', 'guidance', 'capability', 'summary', 'approvalId', 'decision', 'expectedTaskRevision', 'expectedApprovalRevision', 'afterEventSequence', 'eventSequence']);
+const CONTROL_OPERATIONS = new Set(['status', 'start', 'queue', 'steer', 'cancel', 'retry', 'review', 'approve', 'deny', 'replay']);
 
 function clientProtocolError(message, code = 'INVALID_SCHEMA') {
   const error = new Error(message);
@@ -221,6 +224,33 @@ function validateServerChatRequest(message) {
   const sessionId = optionalChatId(payload.sessionId, 'sessionId');
   const messageText = requiredChatText(payload.message, 'message', 48 * 1024);
   return { id: message.id, payload: { providerId, agentId, providerSessionId, ...(sessionId ? { sessionId } : {}), message: messageText } };
+}
+
+function validateServerControlRequest(message) {
+  if (!message || typeof message !== 'object' || Array.isArray(message)) throw clientProtocolError('Control request envelope must be an object.');
+  if (message.v !== RELAY_CONTROL_SCHEMA_VERSION || message.type !== 'relay.control.request') throw clientProtocolError('Unsupported relay control request.');
+  if (!requiredChatText(message.id, 'id') || !CHAT_ID_RE.test(message.id) || Number.isNaN(Date.parse(String(message.timestamp || '')))) throw clientProtocolError('Invalid control request envelope.');
+  if (message.replyTo !== undefined) throw clientProtocolError('Control requests cannot reply to another message.');
+  const payload = message.payload;
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw clientProtocolError('Control request payload must be an object.');
+  for (const key of Object.keys(payload)) if (!CONTROL_REQUEST_KEYS.has(key)) throw clientProtocolError('Unknown control request field.', 'INVALID_SCHEMA');
+  const operation = requiredChatText(payload.operation, 'operation', 32).toLowerCase();
+  if (!CONTROL_OPERATIONS.has(operation)) throw clientProtocolError('Unsupported control operation.', 'UNSUPPORTED_TYPE');
+  const operationId = requiredChatText(payload.operationId, 'operationId', 160);
+  if (!CHAT_ID_RE.test(operationId)) throw clientProtocolError('Invalid operationId.');
+  const taskId = payload.taskId ? optionalChatId(payload.taskId, 'taskId') : '';
+  const threadId = payload.threadId ? optionalChatId(payload.threadId, 'threadId') : '';
+  const attemptId = payload.attemptId ? optionalChatId(payload.attemptId, 'attemptId') : '';
+  const agentId = payload.agentId ? optionalChatId(payload.agentId, 'agentId') : '';
+  const providerId = payload.providerId ? requiredChatText(payload.providerId, 'providerId', 80) : '';
+  const title = payload.title ? requiredChatText(payload.title, 'title', 240) : '';
+  const prompt = payload.prompt ? requiredChatText(payload.prompt, 'prompt', 12 * 1024) : '';
+  const guidance = payload.guidance ? requiredChatText(payload.guidance, 'guidance', 4 * 1024) : '';
+  const expectedTaskRevision = payload.expectedTaskRevision === undefined ? undefined : payload.expectedTaskRevision;
+  if (expectedTaskRevision !== undefined && (!Number.isSafeInteger(expectedTaskRevision) || expectedTaskRevision < 0)) throw clientProtocolError('Invalid expectedTaskRevision.');
+  const afterEventSequence = payload.afterEventSequence === undefined ? undefined : payload.afterEventSequence;
+  if (afterEventSequence !== undefined && (!Number.isSafeInteger(afterEventSequence) || afterEventSequence < 0)) throw clientProtocolError('Invalid afterEventSequence.');
+  return { id: message.id, replyTo: undefined, payload: { operation, operationId, ...(taskId ? { taskId } : {}), ...(threadId ? { threadId } : {}), ...(attemptId ? { attemptId } : {}), ...(agentId ? { agentId } : {}), ...(providerId ? { providerId } : {}), ...(title ? { title } : {}), ...(prompt ? { prompt } : {}), ...(guidance ? { guidance } : {}), ...(expectedTaskRevision !== undefined ? { expectedTaskRevision } : {}), ...(afterEventSequence !== undefined ? { afterEventSequence } : {}) } };
 }
 
 function parseHermesChatOutput(stdout = '') {
@@ -611,6 +641,8 @@ export function buildHermesStatusFrames({ device = {}, profiles = [] } = {}) {
     name: profile.displayName || profile.name,
     model: profile.model || undefined,
     status: profileStatus(profile),
+    capabilities: ['agent.roster.read', 'agent.status.read', 'task.status.read', 'task.progress.read', 'task.review.read', 'task.start', 'task.queue', 'task.cancel', 'task.retry'],
+    steerSupported: false,
   }));
   const provider = {
     id: 'hermes',
@@ -723,9 +755,11 @@ export class FileCredentialStore {
   async clear() { await rm(this.filePath, { force: true }); }
 }
 
+const CONTROL_ENVELOPE_TYPES = new Set(['relay.control.response', 'relay.control.event', 'relay.capabilities.snapshot', 'relay.replay.response']);
+
 function makeEnvelope(type, payload) {
   return {
-    v: 1,
+    v: CONTROL_ENVELOPE_TYPES.has(type) ? RELAY_CONTROL_SCHEMA_VERSION : RELAY_CLIENT_SCHEMA_VERSION,
     id: nextEnvelopeId('ccw'),
     type,
     timestamp: new Date().toISOString(),
@@ -780,6 +814,12 @@ export class CommandCenterRelayClient extends EventEmitter {
     this.chatSessions = new Map();
     this.chatRequestIds = new Set();
     this.chatInFlight = new Map();
+    this.controlRequestIds = new Map();
+    this.controlInFlight = new Map();
+    this.controlEvents = new Map();
+    this.controlEventSequence = 0;
+    this.earlyControlRequests = [];
+    this.activeControlTasks = new Map();
     this.heartbeatTimer = null;
     this.reconnectTimer = null;
     this.onceMode = false;
@@ -855,6 +895,7 @@ export class CommandCenterRelayClient extends EventEmitter {
     this.authMethod = '';
     this.sequence = 0;
     this.chatRequestIds.clear();
+    this.earlyControlRequests = [];
     socket.on('open', () => { this.sendAuth(socket).catch((error) => this.failSocket(socket, error)); });
     socket.on('message', (raw) => { this.handleMessage(socket, raw).catch((error) => this.failSocket(socket, error)); });
     socket.on('error', () => {});
@@ -885,6 +926,16 @@ export class CommandCenterRelayClient extends EventEmitter {
       if (!this.authenticated) return this.failSocket(socket, clientProtocolError('Chat request received before authentication.', 'AUTH_REQUIRED'));
       return this.handleChatRequest(socket, message);
     }
+    if (message.type === 'relay.control.request') {
+      if (!this.authenticated) {
+        if (message.payload?.operation === 'replay') {
+          this.earlyControlRequests.push({ socket, message });
+          return;
+        }
+        return this.failSocket(socket, clientProtocolError('Control request received before authentication.', 'AUTH_REQUIRED'));
+      }
+      return this.handleControlRequest(socket, message);
+    }
     if (message.type !== 'relay.auth.ok' || this.authenticated) return;
     const payload = message.payload && typeof message.payload === 'object' ? message.payload : {};
     const deviceId = cleanText(payload.deviceId);
@@ -904,7 +955,12 @@ export class CommandCenterRelayClient extends EventEmitter {
     this.emit('authenticated', { deviceId, ownerId, method: this.authMethod, profiles: this.profiles.map((profile) => profile.displayName || profile.name) });
     this.sendEnvelope('relay.presence', { state: 'online' }, socket);
     for (const frame of this.statusFrames) this.sendEnvelope(frame.type, frame.payload, socket);
+    this.sendCapabilitiesSnapshot(socket);
     this.sendHeartbeat(socket);
+    const queuedControlRequests = this.earlyControlRequests.splice(0);
+    for (const queued of queuedControlRequests) {
+      if (queued.socket === socket) await this.handleControlRequest(socket, queued.message);
+    }
     clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = setInterval(() => this.sendHeartbeat(socket), this.heartbeatIntervalMs);
     if (this.onceMode) this.onceTimer = setTimeout(() => this.stop(), 350);
@@ -927,6 +983,125 @@ export class CommandCenterRelayClient extends EventEmitter {
       ...(message ? { message: boundedText(message, '', 240) } : {}),
       ...(tool ? { tool: boundedText(tool, '', 120) } : {}),
     }, socket, { replyTo: requestId });
+  }
+
+  sendCapabilitiesSnapshot(socket = this.ws) {
+    if (!this.authenticated || !socket || socket.readyState !== 1) return false;
+    const agents = this.profiles.slice(0, 200).map((profile) => ({
+      id: `hermes:${profile.name}`,
+      label: profile.displayName || profile.name,
+      name: profile.displayName || profile.name,
+      model: profile.model || undefined,
+      status: profileStatus(profile),
+      capabilities: ['agent.roster.read', 'agent.status.read', 'task.status.read', 'task.progress.read', 'task.review.read', 'task.start', 'task.queue', 'task.cancel', 'task.retry'],
+      steerSupported: false,
+    }));
+    return this.sendEnvelope('relay.capabilities.snapshot', { agents, eventSequence: 0 }, socket);
+  }
+
+  sendControlResponse(socket, requestId, payload) {
+    return this.sendEnvelope('relay.control.response', payload, socket, { replyTo: requestId });
+  }
+
+  sendControlEvent(socket, payload, requestId = '') {
+    const eventSequence = Number.isSafeInteger(payload?.eventSequence) ? payload.eventSequence : ++this.controlEventSequence;
+    this.controlEventSequence = Math.max(this.controlEventSequence, eventSequence);
+    const nextPayload = { ...payload, eventSequence };
+    const event = this.sendEnvelope('relay.control.event', nextPayload, socket, requestId ? { replyTo: requestId } : {});
+    this.controlEvents.set(eventSequence, nextPayload);
+    while (this.controlEvents.size > 2000) this.controlEvents.delete(this.controlEvents.keys().next().value);
+    return event;
+  }
+
+  async handleControlRequest(socket, message) {
+    let request;
+    try { request = validateServerControlRequest(message); } catch (error) {
+      this.sendControlResponse(socket, message?.id || 'control-error', { operation: 'status', operationId: `invalid:${Date.now().toString(36)}`, ok: false, errorCode: error.code || 'INVALID_SCHEMA', errorMessage: error.message });
+      return;
+    }
+    const payload = request.payload;
+    const operationId = payload.operationId;
+    const cached = this.controlRequestIds.get(operationId);
+    if (cached) {
+      if (cached.requestHash !== JSON.stringify(payload)) {
+        this.sendControlResponse(socket, request.id, { operation: payload.operation, operationId, ...(payload.taskId ? { taskId: payload.taskId } : {}), ok: false, errorCode: 'IDEMPOTENCY_CONFLICT', errorMessage: 'Operation ID was already used for a different request.' });
+      } else this.sendControlResponse(socket, request.id, { ...cached.result });
+      return;
+    }
+    const inFlight = this.controlInFlight.get(operationId);
+    if (inFlight) {
+      if (inFlight.requestHash !== JSON.stringify(payload)) {
+        this.sendControlResponse(socket, request.id, { operation: payload.operation, operationId, ...(payload.taskId ? { taskId: payload.taskId } : {}), ok: false, errorCode: 'IDEMPOTENCY_CONFLICT', errorMessage: 'Operation ID was already used for a different request.' });
+        return;
+      }
+      try { this.sendControlResponse(socket, request.id, await inFlight.promise); } catch (error) {
+        this.sendControlResponse(socket, request.id, { operation: payload.operation, operationId, taskId: payload.taskId, ok: false, errorCode: error.code || 'RELAY_CONTROL_FAILED', errorMessage: String(error.message || error).slice(0, 1200) });
+      }
+      return;
+    }
+    const execute = async () => {
+      const base = { operation: payload.operation, operationId, ...(payload.taskId ? { taskId: payload.taskId } : {}), ...(payload.threadId ? { threadId: payload.threadId } : {}), ...(payload.attemptId ? { attemptId: payload.attemptId } : {}), ...(payload.agentId ? { agentId: payload.agentId } : {}), ...(payload.providerId ? { providerId: payload.providerId } : {}) };
+      if (payload.operation === 'status') {
+        const profile = this.findHermesProfile(payload.agentId || '');
+        if (!profile) return { ...base, ok: false, errorCode: 'UNKNOWN_AGENT', errorMessage: 'Requested Hermes agent is unavailable.' };
+        return { ...base, ok: true, state: profileStatus(profile), summary: 'Hermes agent is available.', result: JSON.stringify({ capabilities: ['task.start', 'task.queue', 'task.cancel', 'task.retry', 'task.review.read'] }) };
+      }
+      if (payload.operation === 'replay') {
+        const afterEventSequence = Number(payload.afterEventSequence || 0) || 0;
+        const replay = [...this.controlEvents.entries()]
+          .filter(([eventSequence]) => eventSequence > afterEventSequence)
+          .sort(([left], [right]) => left - right)
+          .slice(0, 200);
+        for (const [, cachedEvent] of replay) this.sendControlEvent(socket, { ...cachedEvent, operation: 'replay' }, request.id);
+        return { ...base, ok: true, state: 'completed', eventSequence: replay.at(-1)?.[0] || afterEventSequence, summary: `Replayed ${replay.length} control events.` };
+      }
+      if (payload.operation === 'steer') return { ...base, ok: false, errorCode: 'STEER_UNSUPPORTED', errorMessage: 'This Hermes runtime does not support steering.' };
+      if (payload.operation === 'cancel') {
+        const active = this.activeControlTasks.get(payload.taskId || '');
+        if (active) active.cancelRequested = true;
+        if (payload.taskId) this.sendControlEvent(socket, { ...base, operation: 'cancel', eventType: 'task.cancel_requested', state: 'cancelling', summary: 'Cancellation requested.' }, request.id);
+        return { ...base, ok: true, state: active ? 'cancelling' : 'cancelled', summary: 'Cancellation accepted.' };
+      }
+      if (payload.operation === 'review') return { ...base, ok: true, state: 'completed', summary: 'Read-only review is available through Command Center.' };
+      if (!['start', 'queue', 'retry'].includes(payload.operation)) return { ...base, ok: false, errorCode: 'CONTROL_OPERATION_UNSUPPORTED', errorMessage: 'That control operation is not available on this runtime.' };
+      const profile = this.findHermesProfile(payload.agentId || '');
+      if (!profile) return { ...base, ok: false, errorCode: 'UNKNOWN_AGENT', errorMessage: 'Requested Hermes agent is unavailable.' };
+      if (!payload.prompt) return { ...base, ok: false, errorCode: 'INVALID_SCHEMA', errorMessage: 'Task start requires a bounded prompt.' };
+      const active = { cancelRequested: false };
+      if (payload.taskId) this.activeControlTasks.set(payload.taskId, active);
+      this.sendControlEvent(socket, { ...base, operation: payload.operation, eventType: 'task.started', state: 'running', summary: 'Hermes is processing the task.' }, request.id);
+      try {
+        const result = await this.executeHermesChat(profile, {
+          providerSessionId: `control:${payload.taskId || operationId}`,
+          message: payload.prompt,
+        });
+        if (active.cancelRequested) {
+          this.sendControlEvent(socket, { ...base, operation: payload.operation, eventType: 'task.cancelled', state: 'cancelled', summary: 'Hermes task cancelled.' }, request.id);
+          return { ...base, ok: true, state: 'cancelled', summary: 'Task cancelled.' };
+        }
+        this.sendControlEvent(socket, { ...base, operation: payload.operation, eventType: 'task.completed', state: 'completed', summary: String(result.text || '').slice(0, 1200), result: String(result.text || '').slice(0, 16000) }, request.id);
+        return { ...base, ok: true, state: 'completed', result: String(result.text || '').slice(0, 16000), summary: String(result.text || '').slice(0, 1200) };
+      } catch (error) {
+        this.sendControlEvent(socket, { ...base, operation: payload.operation, eventType: 'task.failed', state: 'failed', errorCode: error.code || 'HERMES_CHAT_FAILED', summary: String(error.message || 'Hermes task failed').slice(0, 1200) }, request.id);
+        return { ...base, ok: false, state: 'failed', errorCode: error.code || 'HERMES_CHAT_FAILED', errorMessage: String(error.message || 'Hermes task failed').slice(0, 1200) };
+      } finally {
+        if (payload.taskId) this.activeControlTasks.delete(payload.taskId);
+      }
+    };
+    const promise = execute();
+    this.controlInFlight.set(operationId, { requestHash: JSON.stringify(payload), promise });
+    try {
+      const result = await promise;
+      this.controlRequestIds.set(operationId, { requestHash: JSON.stringify(payload), result });
+      while (this.controlRequestIds.size > 512) this.controlRequestIds.delete(this.controlRequestIds.keys().next().value);
+      this.sendControlResponse(socket, request.id, result);
+    } catch (error) {
+      const result = { operation: payload.operation, operationId, ...(payload.taskId ? { taskId: payload.taskId } : {}), ok: false, errorCode: error.code || 'RELAY_CONTROL_FAILED', errorMessage: String(error.message || error).slice(0, 1200) };
+      this.controlRequestIds.set(operationId, { requestHash: JSON.stringify(payload), result });
+      this.sendControlResponse(socket, request.id, result);
+    } finally {
+      this.controlInFlight.delete(operationId);
+    }
   }
 
   async executeHermesChat(profile, payload) {
