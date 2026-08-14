@@ -11,7 +11,7 @@ import * as intro from './intro.js?v=20260514b';
 import * as appearance from './appearance.js?v=20260514b';
 import * as branding from './branding.js?v=20260514b';
 import * as layoutSettings from './layout-settings.js?v=20260514b';
-import * as fairyLive from './fairy-live.js?v=20260813-fairy-performance1';
+import * as fairyLive from './fairy-live.js?v=20260813-fairy-mic-recovery1';
 import * as agentComms from './agent-comms.js?v=20260524-agentcomms1';
 import * as controlPlane from './control-plane.js?v=20260813-control-plane1';
 

@@ -2,7 +2,7 @@
 import * as terminal from './terminal.js?v=20260320j';
 import * as voice from './voice.js?v=20260524-singleagent6';
 import * as companions from './companions.js?v=20260531-vrmfix6';
-import * as fairyLive from './fairy-live.js?v=20260813-fairy-performance1';
+import * as fairyLive from './fairy-live.js?v=20260813-fairy-mic-recovery1';
 
 const BASE = window.__BASE_PATH__ || '';
 

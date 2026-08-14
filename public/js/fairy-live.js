@@ -24,6 +24,13 @@ const state = {
   tasks: new Map(),
   micActive: false,
   micMuted: false,
+  micRecovering: false,
+  micRecoveryTimer: null,
+  micRecoveryInFlight: false,
+  micCaptureGeneration: 0,
+  micUploadFailureCount: 0,
+  micLastUploadFailureAt: 0,
+  micEnvironmentListenersBound: false,
   micStream: null,
   micContext: null,
   micSource: null,
@@ -268,6 +275,9 @@ function renderDebugPanel() {
     renderDebugSection('AUDIO / VAD', [
       ['mic active', state.micActive],
       ['mic muted', state.micMuted],
+      ['mic recovering', state.micRecovering],
+      ['upload failures', state.micUploadFailureCount],
+      ['last upload failure', state.micLastUploadFailureAt ? new Date(state.micLastUploadFailureAt).toISOString() : '—'],
       ['vad speaking', !!state.vad?.speaking],
       ['rms', state.vad ? state.vad.lastRms.toFixed(3) : '—'],
       ['peak', state.vad ? state.vad.lastPeak.toFixed(3) : '—'],
@@ -452,8 +462,8 @@ function updateHeaderCallControls() {
   const active = isSessionActive();
   if (els.headerMic) {
     setHidden(els.headerMic, !active);
-    els.headerMic.disabled = !state.sessionId;
-    els.headerMic.textContent = state.micActive ? (state.micMuted ? 'MIC MUTED' : 'MIC LIVE') : 'MIC OFF';
+    els.headerMic.disabled = !state.sessionId || state.micRecovering;
+    els.headerMic.textContent = state.micRecovering ? 'MIC RECOVERING…' : state.micActive ? (state.micMuted ? 'MIC MUTED' : 'MIC LIVE') : 'MIC OFF';
     els.headerMic.classList.toggle('active', state.micActive && !state.micMuted);
     els.headerMic.classList.toggle('muted', state.micActive && state.micMuted);
   }
@@ -551,13 +561,15 @@ export async function sendDirectChatMessage(text = '') {
 
 function updateMicUi() {
   if (els.mic) {
-    els.mic.disabled = !state.sessionId;
-    els.mic.textContent = state.micActive ? (state.micMuted ? 'MIC MUTED' : 'MIC LIVE') : 'START MIC';
+    els.mic.disabled = !state.sessionId || state.micRecovering;
+    els.mic.textContent = state.micRecovering ? 'MIC RECOVERING…' : state.micActive ? (state.micMuted ? 'MIC MUTED' : 'MIC LIVE') : 'START MIC';
     els.mic.classList.toggle('active', state.micActive && !state.micMuted);
     els.mic.classList.toggle('muted', state.micActive && state.micMuted);
   }
   if (els.audioStatus) {
-    els.audioStatus.textContent = state.micActive
+    els.audioStatus.textContent = state.micRecovering
+      ? 'Mic capture hiccupped. Keeping the call alive and reconnecting the microphone…'
+      : state.micActive
       ? (state.micMuted ? 'Mic captured but muted.' : `Mic streaming to ${personaName()}.`)
       : 'Mic off. Text test mode still works.';
   }
@@ -953,21 +965,29 @@ function postAudioChunk(samples) {
       const controller = new AbortController();
       state.audioUploadController = controller;
       try {
-        return await fetchJson(`${BASE}/api/call/${encodeURIComponent(sessionId)}/audio`, {
+        const result = await fetchJson(`${BASE}/api/call/${encodeURIComponent(sessionId)}/audio`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ pcm16Base64, mimeType: `audio/pcm;rate=${INPUT_SAMPLE_RATE}` }),
           signal: controller.signal,
         });
+        if (state.sessionId === sessionId) state.micUploadFailureCount = 0;
+        return result;
       } finally {
         if (state.audioUploadController === controller) state.audioUploadController = null;
       }
     })
     .catch((err) => {
       if (err?.name === 'AbortError') return;
-      if (state.sessionId === sessionId) {
-        setStatus('error', err.message || 'Mic audio upload failed');
-        stopMic().catch(() => {});
+      if (state.sessionId === sessionId && state.micActive && !state.callEnding) {
+        state.micUploadFailureCount += 1;
+        state.micLastUploadFailureAt = Date.now();
+        if (state.micUploadFailureCount === 1 || state.micUploadFailureCount % 10 === 0) {
+          emitLog(`Mic audio upload hiccup #${state.micUploadFailureCount}; keeping capture alive`, 'warn');
+          markEvent('mic upload hiccup');
+          if (state.micUploadFailureCount === 1) showOverlay('Mic connection hiccup. Capture is still live.', 'tool', 1800);
+        }
+        renderDiagnostics();
       }
     });
 }
@@ -1287,20 +1307,173 @@ async function playFairyFishResponse(text) {
   }
 }
 
-async function startMic() {
+function isMicCaptureHealthy() {
+  const track = state.micStream?.getAudioTracks?.()?.[0];
+  return !!track
+    && track.readyState !== 'ended'
+    && !!state.micContext
+    && state.micContext.state !== 'closed'
+    && !!state.micSource
+    && !!state.micProcessor;
+}
+
+function isCurrentMicCapture(stream, generation, sessionId) {
+  return state.sessionId === sessionId
+    && state.micStream === stream
+    && state.micCaptureGeneration === generation;
+}
+
+async function resumeMicContext(reason = 'resume') {
+  const ctx = state.micContext;
+  if (!state.sessionId || !state.micActive || state.micMuted || !ctx || ctx.state === 'closed') return false;
+  if (ctx.state === 'running') return true;
+  try {
+    await ctx.resume();
+    if (ctx.state === 'running') {
+      emitLog(`Mic audio context resumed (${reason})`, 'info');
+      markEvent('mic audio resumed');
+      return true;
+    }
+  } catch (err) {
+    emitLog(`Mic audio context resume deferred (${reason}): ${err?.message || 'browser did not resume it'}`, 'warn');
+  }
+  return false;
+}
+
+function bindMicCaptureLifecycle(stream, ctx, generation, sessionId) {
+  const current = () => isCurrentMicCapture(stream, generation, sessionId) && !state.callEnding;
+  const track = stream?.getAudioTracks?.()?.[0];
+  if (track) {
+    track.addEventListener?.('ended', () => {
+      if (!current() || state.micMuted) return;
+      emitLog('Microphone track ended unexpectedly; keeping the call alive and reconnecting', 'warn');
+      markEvent('mic track ended; recovering');
+      scheduleMicRecovery('microphone track ended');
+    });
+    track.addEventListener?.('mute', () => {
+      if (!current()) return;
+      emitLog('Microphone track temporarily muted by the browser or device', 'warn');
+      markEvent('mic track temporarily muted');
+    });
+    track.addEventListener?.('unmute', () => {
+      if (!current()) return;
+      emitLog('Microphone track resumed', 'info');
+      markEvent('mic track resumed');
+    });
+  }
+  ctx.addEventListener?.('statechange', () => {
+    if (!current()) return;
+    if (ctx.state === 'closed') {
+      scheduleMicRecovery('microphone audio context closed');
+      return;
+    }
+    if (ctx.state === 'suspended' || ctx.state === 'interrupted') {
+      resumeMicContext(`context:${ctx.state}`).then((resumed) => {
+        if (!resumed && document.visibilityState === 'visible') markEvent('mic audio resume pending');
+      }).catch(() => {});
+    }
+  });
+}
+
+async function teardownMicCapture({ flush = true, clearMute = true } = {}) {
+  if (flush) flushPcmQueue();
+  else state.pcmQueue = [];
+  state.micActive = false;
+  if (!flush) {
+    try { state.audioUploadController?.abort?.(); } catch (_) {}
+    state.audioUploadController = null;
+  }
+  // Invalidate track/context callbacks before stopping the underlying devices.
+  state.micCaptureGeneration += 1;
+  const processor = state.micProcessor;
+  const source = state.micSource;
+  const context = state.micContext;
+  const stream = state.micStream;
+  try { processor?.disconnect(); } catch (_) {}
+  try { source?.disconnect(); } catch (_) {}
+  try { await context?.close?.(); } catch (_) {}
+  try { stream?.getTracks?.().forEach((track) => track.stop()); } catch (_) {}
+  state.micStream = null;
+  state.micContext = null;
+  state.micSource = null;
+  state.micProcessor = null;
+  state.pcmQueue = [];
+  state.vad = null;
+  if (clearMute) state.micMuted = false;
+}
+
+async function recoverMicCapture(reason = 'capture lost') {
+  if (!state.sessionId || state.callEnding || state.micMuted || state.micRecoveryInFlight) return false;
+  const sessionId = state.sessionId;
+  state.micRecoveryInFlight = true;
+  state.micRecovering = true;
+  updateMicUi();
+  try {
+    await teardownMicCapture({ flush: false, clearMute: false });
+    if (state.sessionId !== sessionId || state.callEnding) return false;
+    const started = await startMic({ recovering: true });
+    if (!started) throw new Error('Microphone capture could not be reacquired');
+    state.micUploadFailureCount = 0;
+    emitLog(`Microphone recovered after ${reason}`, 'info');
+    markEvent('mic recovered');
+    return true;
+  } catch (err) {
+    if (state.sessionId === sessionId && !state.callEnding) {
+      emitLog(`Microphone recovery failed: ${err?.message || 'unknown error'}`, 'error');
+      markError(err?.message || 'Microphone recovery failed');
+      showOverlay('Mic reconnect failed. Click MIC to retry.', 'error', 4500);
+    }
+    return false;
+  } finally {
+    state.micRecoveryInFlight = false;
+    state.micRecovering = false;
+    updateMicUi();
+  }
+}
+
+function scheduleMicRecovery(reason = 'capture lost') {
+  if (!state.sessionId || state.callEnding || state.micMuted || state.micRecoveryTimer || state.micRecoveryInFlight) return;
+  state.micRecovering = true;
+  updateMicUi();
+  state.micRecoveryTimer = setTimeout(() => {
+    state.micRecoveryTimer = null;
+    recoverMicCapture(reason).catch(() => {});
+  }, 260);
+}
+
+function handleMicEnvironmentChange(reason = 'environment changed') {
+  if (!state.sessionId || !state.micActive || state.micMuted || state.callEnding) return;
+  if (!isMicCaptureHealthy()) {
+    scheduleMicRecovery(reason);
+    return;
+  }
+  resumeMicContext(reason).catch(() => {});
+}
+
+async function startMic({ recovering = false } = {}) {
   if (!state.sessionId) {
     setStatus('idle', 'Start Fairy Live before opening the mic. Obviously.');
-    return;
+    return false;
   }
-  if (state.micActive) {
+  if (state.micRecovering && !recovering) return false;
+  if (state.micActive && !recovering) {
     state.micMuted = !state.micMuted;
+    if (!state.micMuted && !isMicCaptureHealthy()) {
+      scheduleMicRecovery('mic unmuted after capture loss');
+    } else if (!state.micMuted) {
+      resumeMicContext('mic unmuted').catch(() => {});
+    }
     updateMicUi();
     setStatus(state.micMuted ? 'ready' : 'listening', state.micMuted ? 'Mic muted.' : 'Mic streaming to Fairy.');
-    return;
+    return true;
   }
 
+  let stream = null;
+  let ctx = null;
+  let source = null;
+  let processor = null;
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
+    stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         channelCount: 1,
         echoCancellation: true,
@@ -1308,12 +1481,12 @@ async function startMic() {
         autoGainControl: true,
       },
     });
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
     await ctx.resume();
     state.vad = createVadState();
     state.pcmQueue = [];
-    const source = ctx.createMediaStreamSource(stream);
-    const processor = ctx.createScriptProcessor(4096, 1, 1);
+    source = ctx.createMediaStreamSource(stream);
+    processor = ctx.createScriptProcessor(4096, 1, 1);
     processor.onaudioprocess = (event) => {
       if (!state.micActive || state.micMuted || !state.sessionId) return;
       const input = event.inputBuffer.getChannelData(0);
@@ -1322,41 +1495,44 @@ async function startMic() {
     source.connect(processor);
     processor.connect(ctx.destination);
 
+    const generation = state.micCaptureGeneration + 1;
+    state.micCaptureGeneration = generation;
     state.micStream = stream;
     state.micContext = ctx;
     state.micSource = source;
     state.micProcessor = processor;
     state.micActive = true;
     state.micMuted = false;
+    state.micUploadFailureCount = 0;
+    bindMicCaptureLifecycle(stream, ctx, generation, state.sessionId);
     updateMicUi();
     setStatus('listening', 'Mic is live. Fairy can hear you now, which is probably legally dangerous.');
-    appendTranscript('system', 'Mic streaming started.', 'audio');
-    emitLog('Mic streaming started', 'info');
-    markEvent('mic started');
+    appendTranscript('system', recovering ? 'Mic streaming recovered.' : 'Mic streaming started.', 'audio');
+    emitLog(recovering ? 'Mic streaming recovered' : 'Mic streaming started', 'info');
+    markEvent(recovering ? 'mic recovered' : 'mic started');
+    return true;
   } catch (err) {
+    try { processor?.disconnect(); } catch (_) {}
+    try { source?.disconnect(); } catch (_) {}
+    try { await ctx?.close?.(); } catch (_) {}
+    try { stream?.getTracks?.().forEach((track) => track.stop()); } catch (_) {}
+    state.micActive = false;
+    state.micStream = null;
+    state.micContext = null;
+    state.micSource = null;
+    state.micProcessor = null;
+    state.vad = null;
+    updateMicUi();
     setStatus('error', err.message || 'Microphone permission denied');
+    return false;
   }
 }
 
 async function stopMic({ flush = true } = {}) {
-  if (flush) flushPcmQueue();
-  else state.pcmQueue = [];
-  state.micActive = false;
-  if (!flush) {
-    try { state.audioUploadController?.abort?.(); } catch (_) {}
-    state.audioUploadController = null;
-  }
-  state.micMuted = false;
-  try { state.micProcessor?.disconnect(); } catch (_) {}
-  try { state.micSource?.disconnect(); } catch (_) {}
-  try { await state.micContext?.close(); } catch (_) {}
-  try { state.micStream?.getTracks?.().forEach((track) => track.stop()); } catch (_) {}
-  state.micStream = null;
-  state.micContext = null;
-  state.micSource = null;
-  state.micProcessor = null;
-  state.pcmQueue = [];
-  state.vad = null;
+  if (state.micRecoveryTimer) clearTimeout(state.micRecoveryTimer);
+  state.micRecoveryTimer = null;
+  state.micRecovering = false;
+  await teardownMicCapture({ flush, clearMute: true });
   updateMicUi();
   if (state.sessionId) {
     emitLog('Mic stopped', 'info');
@@ -2170,6 +2346,15 @@ export function init() {
       sendTextTurn();
     }
   });
+
+  if (!state.micEnvironmentListenersBound) {
+    state.micEnvironmentListenersBound = true;
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') handleMicEnvironmentChange('page visible');
+    });
+    window.addEventListener('focus', () => handleMicEnvironmentChange('window focused'));
+    navigator.mediaDevices?.addEventListener?.('devicechange', () => handleMicEnvironmentChange('audio device changed'));
+  }
 
   try { state.debugPanelOpen = localStorage.getItem('fairyDebugPanelOpen') === '1'; } catch (_) {}
   updateMicUi();
