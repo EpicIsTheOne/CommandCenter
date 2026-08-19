@@ -65,18 +65,36 @@ Assign companion visuals, import Codex pets, and give each agent more personalit
 
 The current default theme, agent names, and companion visuals are inspired by **Zenless Zone Zero** (the HoYoverse gacha game), because operations should look cool. It’s purely cosmetic though — the system works with any OpenClaw agent names and any Codex pet companions you want to run.
 
-## Quick Start
+## Quick Start (one command)
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/EpicIsTheOne/CommandCenter/main/install.sh)"
+```
+
+That clones the repo, installs dependencies, creates `.env` in **demo mode**, and starts the server. Then open **http://localhost:3000**.
+
+Prefer to read the script before running it (good instinct)? Clone first, reviewed it, then run the local copy:
 
 ```bash
 git clone https://github.com/EpicIsTheOne/CommandCenter.git
 cd CommandCenter
-npm install
+less install.sh      # look before you leap
+./install.sh
+```
+
+### Manual install (if you'd rather)
+
+```bash
+git clone https://github.com/EpicIsTheOne/CommandCenter.git
+cd CommandCenter
+npm ci
 cp .env.example .env
+sed -i 's/^DEMO_MODE=.*/DEMO_MODE=true/' .env   # clean preview on first launch
 npm start
 # Open http://localhost:3000
 ```
 
-With zero config, the app runs in **demo mode** with simulated agent activity.
+The one-click installer and the manual steps above both set **demo mode**, so your first launch is a clean simulated preview of agent activity — no live gateway needed and no scary "gateway failed" warning. (Plain `cp .env.example .env` without the `sed` skips demo mode and shows that warning instead; flip `DEMO_MODE=false` and set `GATEWAY_URL` in `.env` when you're ready to go live.)
 
 > Need the full install/config flow, troubleshooting, and live-mode details?
 > See **[SETUP.md](./SETUP.md)** for the complete setup guide.
