@@ -9,33 +9,10 @@ const REGISTRY_FILE = join(DATA_DIR, 'registry.json');
 const SETTINGS_FILE = join(DATA_DIR, 'settings.json');
 
 const BUILT_IN_COMPANIONS = [
-  {
-    id: 'pixel-bot',
-    name: 'Pixel Bot',
-    preview: '',
-    palette: { primary: '#8bd5ff', secondary: '#1c2734', accent: '#f9d65c' },
-    states: ['idle', 'thinking', 'responding', 'tool', 'error'],
-    animationStyle: 'pixel-loop',
-    sourceType: 'built-in',
-  },
-  {
-    id: 'mint-fox',
-    name: 'Mint Fox',
-    preview: '',
-    palette: { primary: '#8ef5c3', secondary: '#1f2330', accent: '#ffb86c' },
-    states: ['idle', 'thinking', 'responding', 'tool', 'error'],
-    animationStyle: 'floaty-tail',
-    sourceType: 'built-in',
-  },
-  {
-    id: 'violet-cat',
-    name: 'Violet Cat',
-    preview: '',
-    palette: { primary: '#d7b3ff', secondary: '#291c38', accent: '#ffd8a8' },
-    states: ['idle', 'thinking', 'responding', 'tool', 'error'],
-    animationStyle: 'cat-breath',
-    sourceType: 'built-in',
-  },
+  // Generic placeholder pets were removed; the default roster is the curated
+  // Codex pet set shipped in data/companions/imports/ and listed in
+  // data/companions/registry.json (Anby, Jane-Doe, Jin-Woo, Makima, Miyabi,
+  // Vivian, Xueying). Edit registry.json to customize the default companions.
 ];
 
 const DEFAULT_SETTINGS = {

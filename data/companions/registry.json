@@ -1,0 +1,844 @@
+{
+  "items": [
+    {
+      "id": "codex-anby",
+      "name": "Anby",
+      "preview": "",
+      "palette": {
+        "primary": "hsl(156 68% 66%)",
+        "secondary": "hsl(213 35% 18%)",
+        "accent": "hsl(275 88% 70%)"
+      },
+      "states": [
+        "idle",
+        "thinking",
+        "responding",
+        "tool",
+        "error"
+      ],
+      "animationStyle": "codex-import",
+      "sourceType": "codex-import",
+      "importedPet": {
+        "id": "anby",
+        "displayName": "Anby",
+        "description": "A compact chibi pet inspired by Anby's silver-haired tactical style from Zenless Zone Zero.",
+        "kind": "person",
+        "spritesheetPath": "spritesheet.webp",
+        "spritesheetUrl": "/api/companions/imports/anby/spritesheet.webp",
+        "manifestUrl": "/api/companions/imports/anby/pet.json",
+        "rows": 9,
+        "columns": 8,
+        "spriteWidth": 1536,
+        "spriteHeight": 1872,
+        "frameWidth": 192,
+        "frameHeight": 208,
+        "animationMap": {
+          "idle": [
+            0
+          ],
+          "thinking": [
+            6
+          ],
+          "responding": [
+            3
+          ],
+          "tool": [
+            7
+          ],
+          "error": [
+            5
+          ],
+          "waiting": [
+            6
+          ],
+          "review": [
+            8
+          ],
+          "waving": [
+            3
+          ],
+          "jumping": [
+            4
+          ],
+          "failed": [
+            5
+          ],
+          "runningRight": [
+            1
+          ],
+          "runningLeft": [
+            2
+          ],
+          "walkingRight": [
+            1
+          ],
+          "walkingLeft": [
+            2
+          ],
+          "walkUp": [
+            1
+          ],
+          "walkDown": [
+            1
+          ],
+          "frameCounts": {
+            "idle": 4,
+            "thinking": 4,
+            "responding": 6,
+            "tool": 6,
+            "error": 4,
+            "waiting": 4,
+            "review": 4,
+            "waving": 6,
+            "jumping": 6,
+            "failed": 4,
+            "runningRight": 8,
+            "runningLeft": 8,
+            "walkingRight": 8,
+            "walkingLeft": 8,
+            "walkUp": 8,
+            "walkDown": 8
+          }
+        },
+        "frameCounts": {
+          "idle": 4,
+          "thinking": 4,
+          "responding": 6,
+          "tool": 6,
+          "error": 4,
+          "waiting": 4,
+          "review": 4,
+          "waving": 6,
+          "jumping": 6,
+          "failed": 4,
+          "runningRight": 8,
+          "runningLeft": 8,
+          "walkingRight": 8,
+          "walkingLeft": 8,
+          "walkUp": 8,
+          "walkDown": 8
+        }
+      }
+    },
+    {
+      "id": "codex-jane-doe",
+      "name": "简杜",
+      "preview": "",
+      "palette": {
+        "primary": "hsl(229 68% 66%)",
+        "secondary": "hsl(286 35% 18%)",
+        "accent": "hsl(348 88% 70%)"
+      },
+      "states": [
+        "idle",
+        "thinking",
+        "responding",
+        "tool",
+        "error"
+      ],
+      "animationStyle": "codex-import",
+      "sourceType": "codex-import",
+      "importedPet": {
+        "id": "jane-doe",
+        "displayName": "简杜",
+        "description": "Jane Doe, a character in the game Zenless Zone Zero, whose name means 'unnamed person,' is a fitting title for this Hian girl who walks the line between the black and white worlds.",
+        "kind": "creature",
+        "spritesheetPath": "spritesheet.webp",
+        "spritesheetUrl": "/api/companions/imports/jane-doe/spritesheet.webp",
+        "manifestUrl": "/api/companions/imports/jane-doe/pet.json",
+        "rows": 9,
+        "columns": 8,
+        "spriteWidth": 1536,
+        "spriteHeight": 1872,
+        "frameWidth": 192,
+        "frameHeight": 208,
+        "animationMap": {
+          "idle": [
+            0
+          ],
+          "thinking": [
+            6
+          ],
+          "responding": [
+            3
+          ],
+          "tool": [
+            7
+          ],
+          "error": [
+            5
+          ],
+          "waiting": [
+            6
+          ],
+          "review": [
+            8
+          ],
+          "waving": [
+            3
+          ],
+          "jumping": [
+            4
+          ],
+          "failed": [
+            5
+          ],
+          "runningRight": [
+            1
+          ],
+          "runningLeft": [
+            2
+          ],
+          "walkingRight": [
+            1
+          ],
+          "walkingLeft": [
+            2
+          ],
+          "walkUp": [
+            1
+          ],
+          "walkDown": [
+            1
+          ],
+          "frameCounts": {
+            "idle": 4,
+            "thinking": 4,
+            "responding": 6,
+            "tool": 6,
+            "error": 4,
+            "waiting": 4,
+            "review": 4,
+            "waving": 6,
+            "jumping": 6,
+            "failed": 4,
+            "runningRight": 8,
+            "runningLeft": 8,
+            "walkingRight": 8,
+            "walkingLeft": 8,
+            "walkUp": 8,
+            "walkDown": 8
+          }
+        },
+        "frameCounts": {
+          "idle": 4,
+          "thinking": 4,
+          "responding": 6,
+          "tool": 6,
+          "error": 4,
+          "waiting": 4,
+          "review": 4,
+          "waving": 6,
+          "jumping": 6,
+          "failed": 4,
+          "runningRight": 8,
+          "runningLeft": 8,
+          "walkingRight": 8,
+          "walkingLeft": 8,
+          "walkUp": 8,
+          "walkDown": 8
+        }
+      }
+    },
+    {
+      "id": "codex-jin-woo",
+      "name": "Jin-Woo",
+      "preview": "",
+      "palette": {
+        "primary": "hsl(25 68% 66%)",
+        "secondary": "hsl(82 35% 18%)",
+        "accent": "hsl(144 88% 70%)"
+      },
+      "states": [
+        "idle",
+        "thinking",
+        "responding",
+        "tool",
+        "error"
+      ],
+      "animationStyle": "codex-import",
+      "sourceType": "codex-import",
+      "importedPet": {
+        "id": "jin-woo",
+        "displayName": "Jin-Woo",
+        "description": "A tiny shadow hunter digital pet inspired by Jin-Woo, with messy black hair, long dark coat, white shirt, black pants, sneakers, blue glowing eyes, and a small dark dagger. Includes a blue-cyan holographic usage visor frame for live session and weekly limit overlays.",
+        "kind": "person",
+        "spritesheetPath": "spritesheet.webp",
+        "spritesheetUrl": "/api/companions/imports/jin-woo/spritesheet.webp",
+        "manifestUrl": "/api/companions/imports/jin-woo/pet.json",
+        "rows": 9,
+        "columns": 8,
+        "spriteWidth": 1536,
+        "spriteHeight": 1872,
+        "frameWidth": 192,
+        "frameHeight": 208,
+        "animationMap": {
+          "idle": [
+            0
+          ],
+          "thinking": [
+            6
+          ],
+          "responding": [
+            3
+          ],
+          "tool": [
+            7
+          ],
+          "error": [
+            5
+          ],
+          "waiting": [
+            6
+          ],
+          "review": [
+            8
+          ],
+          "waving": [
+            3
+          ],
+          "jumping": [
+            4
+          ],
+          "failed": [
+            5
+          ],
+          "runningRight": [
+            1
+          ],
+          "runningLeft": [
+            2
+          ],
+          "walkingRight": [
+            1
+          ],
+          "walkingLeft": [
+            2
+          ],
+          "walkUp": [
+            1
+          ],
+          "walkDown": [
+            1
+          ],
+          "frameCounts": {
+            "idle": 4,
+            "thinking": 4,
+            "responding": 6,
+            "tool": 6,
+            "error": 4,
+            "waiting": 4,
+            "review": 4,
+            "waving": 6,
+            "jumping": 6,
+            "failed": 4,
+            "runningRight": 8,
+            "runningLeft": 8,
+            "walkingRight": 8,
+            "walkingLeft": 8,
+            "walkUp": 8,
+            "walkDown": 8
+          }
+        },
+        "frameCounts": {
+          "idle": 4,
+          "thinking": 4,
+          "responding": 6,
+          "tool": 6,
+          "error": 4,
+          "waiting": 4,
+          "review": 4,
+          "waving": 6,
+          "jumping": 6,
+          "failed": 4,
+          "runningRight": 8,
+          "runningLeft": 8,
+          "walkingRight": 8,
+          "walkingLeft": 8,
+          "walkUp": 8,
+          "walkDown": 8
+        }
+      }
+    },
+    {
+      "id": "codex-makima",
+      "name": "Makima",
+      "preview": "",
+      "palette": {
+        "primary": "hsl(322 68% 66%)",
+        "secondary": "hsl(19 35% 18%)",
+        "accent": "hsl(81 88% 70%)"
+      },
+      "states": [
+        "idle",
+        "thinking",
+        "responding",
+        "tool",
+        "error"
+      ],
+      "animationStyle": "codex-import",
+      "sourceType": "codex-import",
+      "importedPet": {
+        "id": "makima",
+        "displayName": "Makima",
+        "description": "A tiny Codex digital pet inspired by Makima: calm, unnervingly composed, red-haired, golden ring-eyed, in a simplified black-and-white suit.",
+        "kind": "person",
+        "spritesheetPath": "spritesheet.webp",
+        "spritesheetUrl": "/api/companions/imports/makima/spritesheet.webp",
+        "manifestUrl": "/api/companions/imports/makima/pet.json",
+        "rows": 9,
+        "columns": 8,
+        "spriteWidth": 1536,
+        "spriteHeight": 1872,
+        "frameWidth": 192,
+        "frameHeight": 208,
+        "animationMap": {
+          "idle": [
+            0
+          ],
+          "thinking": [
+            6
+          ],
+          "responding": [
+            3
+          ],
+          "tool": [
+            7
+          ],
+          "error": [
+            5
+          ],
+          "waiting": [
+            6
+          ],
+          "review": [
+            8
+          ],
+          "waving": [
+            3
+          ],
+          "jumping": [
+            4
+          ],
+          "failed": [
+            5
+          ],
+          "runningRight": [
+            1
+          ],
+          "runningLeft": [
+            2
+          ],
+          "walkingRight": [
+            1
+          ],
+          "walkingLeft": [
+            2
+          ],
+          "walkUp": [
+            1
+          ],
+          "walkDown": [
+            1
+          ],
+          "frameCounts": {
+            "idle": 4,
+            "thinking": 4,
+            "responding": 6,
+            "tool": 6,
+            "error": 4,
+            "waiting": 4,
+            "review": 4,
+            "waving": 6,
+            "jumping": 6,
+            "failed": 4,
+            "runningRight": 8,
+            "runningLeft": 8,
+            "walkingRight": 8,
+            "walkingLeft": 8,
+            "walkUp": 8,
+            "walkDown": 8
+          }
+        },
+        "frameCounts": {
+          "idle": 4,
+          "thinking": 4,
+          "responding": 6,
+          "tool": 6,
+          "error": 4,
+          "waiting": 4,
+          "review": 4,
+          "waving": 6,
+          "jumping": 6,
+          "failed": 4,
+          "runningRight": 8,
+          "runningLeft": 8,
+          "walkingRight": 8,
+          "walkingLeft": 8,
+          "walkUp": 8,
+          "walkDown": 8
+        }
+      }
+    },
+    {
+      "id": "codex-miyabi",
+      "name": "miyabi",
+      "preview": "",
+      "palette": {
+        "primary": "hsl(341 68% 66%)",
+        "secondary": "hsl(38 35% 18%)",
+        "accent": "hsl(100 88% 70%)"
+      },
+      "states": [
+        "idle",
+        "thinking",
+        "responding",
+        "tool",
+        "error"
+      ],
+      "animationStyle": "codex-import",
+      "sourceType": "codex-import",
+      "importedPet": {
+        "id": "miyabi",
+        "displayName": "miyabi",
+        "description": "A chibi Hoshimi Miyabi desktop pet from Zenless Zone Zero: a composed Section 6 swordswoman with long black hair, fox ears, and vivid red eyes.",
+        "kind": "person",
+        "spritesheetPath": "spritesheet.webp",
+        "spritesheetUrl": "/api/companions/imports/miyabi/spritesheet.webp",
+        "manifestUrl": "/api/companions/imports/miyabi/pet.json",
+        "rows": 9,
+        "columns": 8,
+        "spriteWidth": 1536,
+        "spriteHeight": 1872,
+        "frameWidth": 192,
+        "frameHeight": 208,
+        "animationMap": {
+          "idle": [
+            0
+          ],
+          "thinking": [
+            6
+          ],
+          "responding": [
+            3
+          ],
+          "tool": [
+            7
+          ],
+          "error": [
+            5
+          ],
+          "waiting": [
+            6
+          ],
+          "review": [
+            8
+          ],
+          "waving": [
+            3
+          ],
+          "jumping": [
+            4
+          ],
+          "failed": [
+            5
+          ],
+          "runningRight": [
+            1
+          ],
+          "runningLeft": [
+            2
+          ],
+          "walkingRight": [
+            1
+          ],
+          "walkingLeft": [
+            2
+          ],
+          "walkUp": [
+            1
+          ],
+          "walkDown": [
+            1
+          ],
+          "frameCounts": {
+            "idle": 4,
+            "thinking": 4,
+            "responding": 6,
+            "tool": 6,
+            "error": 4,
+            "waiting": 4,
+            "review": 4,
+            "waving": 6,
+            "jumping": 6,
+            "failed": 4,
+            "runningRight": 8,
+            "runningLeft": 8,
+            "walkingRight": 8,
+            "walkingLeft": 8,
+            "walkUp": 8,
+            "walkDown": 8
+          }
+        },
+        "frameCounts": {
+          "idle": 4,
+          "thinking": 4,
+          "responding": 6,
+          "tool": 6,
+          "error": 4,
+          "waiting": 4,
+          "review": 4,
+          "waving": 6,
+          "jumping": 6,
+          "failed": 4,
+          "runningRight": 8,
+          "runningLeft": 8,
+          "walkingRight": 8,
+          "walkingLeft": 8,
+          "walkUp": 8,
+          "walkDown": 8
+        }
+      }
+    },
+    {
+      "id": "codex-vivian",
+      "name": "Vivian",
+      "preview": "",
+      "palette": {
+        "primary": "hsl(53 68% 66%)",
+        "secondary": "hsl(110 35% 18%)",
+        "accent": "hsl(172 88% 70%)"
+      },
+      "states": [
+        "idle",
+        "thinking",
+        "responding",
+        "tool",
+        "error"
+      ],
+      "animationStyle": "codex-import",
+      "sourceType": "codex-import",
+      "importedPet": {
+        "id": "vivian",
+        "displayName": "Vivian",
+        "description": "Vivian from Zenless Zone Zero as a chibi desktop pet, with pale lavender hair, black accessories, vivid red eyes, and an elegant Mockingbird agent vibe.",
+        "kind": "person",
+        "spritesheetPath": "spritesheet.webp",
+        "spritesheetUrl": "/api/companions/imports/vivian/spritesheet.webp",
+        "manifestUrl": "/api/companions/imports/vivian/pet.json",
+        "rows": 9,
+        "columns": 8,
+        "spriteWidth": 1536,
+        "spriteHeight": 1872,
+        "frameWidth": 192,
+        "frameHeight": 208,
+        "animationMap": {
+          "idle": [
+            0
+          ],
+          "thinking": [
+            6
+          ],
+          "responding": [
+            3
+          ],
+          "tool": [
+            7
+          ],
+          "error": [
+            5
+          ],
+          "waiting": [
+            6
+          ],
+          "review": [
+            8
+          ],
+          "waving": [
+            3
+          ],
+          "jumping": [
+            4
+          ],
+          "failed": [
+            5
+          ],
+          "runningRight": [
+            1
+          ],
+          "runningLeft": [
+            2
+          ],
+          "walkingRight": [
+            1
+          ],
+          "walkingLeft": [
+            2
+          ],
+          "walkUp": [
+            1
+          ],
+          "walkDown": [
+            1
+          ],
+          "frameCounts": {
+            "idle": 4,
+            "thinking": 4,
+            "responding": 6,
+            "tool": 6,
+            "error": 4,
+            "waiting": 4,
+            "review": 4,
+            "waving": 6,
+            "jumping": 6,
+            "failed": 4,
+            "runningRight": 8,
+            "runningLeft": 8,
+            "walkingRight": 8,
+            "walkingLeft": 8,
+            "walkUp": 8,
+            "walkDown": 8
+          }
+        },
+        "frameCounts": {
+          "idle": 4,
+          "thinking": 4,
+          "responding": 6,
+          "tool": 6,
+          "error": 4,
+          "waiting": 4,
+          "review": 4,
+          "waving": 6,
+          "jumping": 6,
+          "failed": 4,
+          "runningRight": 8,
+          "runningLeft": 8,
+          "walkingRight": 8,
+          "walkingLeft": 8,
+          "walkUp": 8,
+          "walkDown": 8
+        }
+      }
+    },
+    {
+      "id": "codex-xueying",
+      "name": "雪影",
+      "preview": "",
+      "palette": {
+        "primary": "hsl(257 68% 66%)",
+        "secondary": "hsl(314 35% 18%)",
+        "accent": "hsl(16 88% 70%)"
+      },
+      "states": [
+        "idle",
+        "thinking",
+        "responding",
+        "tool",
+        "error"
+      ],
+      "animationStyle": "codex-import",
+      "sourceType": "codex-import",
+      "importedPet": {
+        "id": "xueying",
+        "displayName": "雪影",
+        "description": "一只由黑长发、蓝眼、校服领结少女参考图简化而来的 Codex 小宠物。.",
+        "kind": "animal",
+        "spritesheetPath": "spritesheet.webp",
+        "spritesheetUrl": "/api/companions/imports/xueying/spritesheet.webp",
+        "manifestUrl": "/api/companions/imports/xueying/pet.json",
+        "rows": 9,
+        "columns": 8,
+        "spriteWidth": 1536,
+        "spriteHeight": 1872,
+        "frameWidth": 192,
+        "frameHeight": 208,
+        "animationMap": {
+          "idle": [
+            0
+          ],
+          "thinking": [
+            6
+          ],
+          "responding": [
+            3
+          ],
+          "tool": [
+            7
+          ],
+          "error": [
+            5
+          ],
+          "waiting": [
+            6
+          ],
+          "review": [
+            8
+          ],
+          "waving": [
+            3
+          ],
+          "jumping": [
+            4
+          ],
+          "failed": [
+            5
+          ],
+          "runningRight": [
+            1
+          ],
+          "runningLeft": [
+            2
+          ],
+          "walkingRight": [
+            1
+          ],
+          "walkingLeft": [
+            2
+          ],
+          "walkUp": [
+            1
+          ],
+          "walkDown": [
+            1
+          ],
+          "frameCounts": {
+            "idle": 4,
+            "thinking": 4,
+            "responding": 6,
+            "tool": 6,
+            "error": 4,
+            "waiting": 4,
+            "review": 4,
+            "waving": 6,
+            "jumping": 6,
+            "failed": 4,
+            "runningRight": 8,
+            "runningLeft": 8,
+            "walkingRight": 8,
+            "walkingLeft": 8,
+            "walkUp": 8,
+            "walkDown": 8
+          }
+        },
+        "frameCounts": {
+          "idle": 4,
+          "thinking": 4,
+          "responding": 6,
+          "tool": 6,
+          "error": 4,
+          "waiting": 4,
+          "review": 4,
+          "waving": 6,
+          "jumping": 6,
+          "failed": 4,
+          "runningRight": 8,
+          "runningLeft": 8,
+          "walkingRight": 8,
+          "walkingLeft": 8,
+          "walkUp": 8,
+          "walkDown": 8
+        }
+      }
+    }
+  ]
+}
