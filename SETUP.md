@@ -14,6 +14,40 @@ On Windows, Python discovery tries `PYTHON_BIN`, `.venv\\Scripts\\python.exe`, `
 
 ---
 
+## 0) One-command install (fastest path)
+
+If you just want Command Center running, this does everything — clone, install
+deps, create `.env` in **demo mode**, and start the server:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/EpicIsTheOne/CommandCenter/main/install.sh)"
+```
+
+Then open **http://localhost:3000**.
+
+Prefer to inspect before running? Clone first and run the local copy (safest
+path — works even before the installer lands on `main`):
+
+```bash
+git clone https://github.com/EpicIsTheOne/CommandCenter.git
+cd CommandCenter
+less install.sh      # read it first
+./install.sh
+```
+
+The installer forces `DEMO_MODE=true` on first launch, so you get a **clean
+simulated preview** (no "gateway failed" warning). To go live later: stop the
+server, set `DEMO_MODE=false` and `GATEWAY_URL` in `.env`, then `npm start`.
+
+Installer environment overrides:
+- `CC_DIR` — target directory (default: `CommandCenter`)
+- `CC_BRANCH` — repo branch to clone (default: `main`)
+- `CC_NO_START=1` — install only, don't launch the server
+- `CC_NO_DEMO=1` — leave `.env.example`'s `DEMO_MODE` untouched
+- `CC_SKIP_CLONE=1` — assume the directory already exists (local testing)
+
+The rest of this guide covers the manual flow and live-mode configuration.
+
 ## 1) Prerequisites
 
 Verify:
