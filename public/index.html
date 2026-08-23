@@ -14,6 +14,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=VT323&family=Inter:wght@400;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/styles.css?v=20260601-pawanfix1">
+  <link rel="stylesheet" href="css/ops.css?v=20260821-spaces1">
 </head>
 <body>
   <div id="command-center">
@@ -58,6 +59,7 @@
           <button id="fairy-live-camera-header-btn" class="header-button fairy-live-header-btn hidden" type="button" disabled>CAM OFF</button>
           <button id="fairy-live-camera-facing-header-btn" class="header-button fairy-live-header-btn hidden" type="button" disabled>BACK CAM</button>
           <button id="control-plane-toggle" class="header-button" type="button" aria-expanded="false">CONTROL</button>
+          <button id="ops-panel-toggle" class="header-button" type="button" aria-expanded="false">OPS</button>
           <button id="settings-btn" class="header-button" type="button">SETTINGS</button>
         </div>
       </div>
@@ -71,6 +73,10 @@
         AGENT WORKSPACE
         <span id="app-brand-subtitle" class="brand-subtitle-inline">Mission Control</span>
         <img id="app-brand-logo" class="brand-logo hidden" alt="Logo">
+        <span class="ops-mode-switch" role="group" aria-label="Display mode">
+          <button type="button" class="ops-mode-btn active" data-ops-mode="2d" aria-pressed="true">2D</button>
+          <button type="button" class="ops-mode-btn" data-ops-mode="3d" aria-pressed="false" title="Immersive 3D Space (real live state)">3D</button>
+        </span>
       </div>
       <canvas id="office-canvas"></canvas>
       <div id="workspace-room-nav" class="workspace-room-nav hidden">
@@ -79,6 +85,54 @@
         <button id="workspace-room-next" class="workspace-room-arrow" type="button" aria-label="Next room">›</button>
       </div>
     </div>
+
+    <div id="zone-space3d" class="zone hidden" aria-label="3D Space view">
+      <div class="zone-header zone-header-3d">
+        <span class="zone-dot cc3d-dot"></span>
+        3D SPACE
+        <span id="ops-current-space-name" class="brand-subtitle-inline"></span>
+        <span class="ops-mode-switch" role="group" aria-label="Display mode">
+          <button type="button" class="ops-mode-btn" data-ops-mode="2d" aria-pressed="false">2D</button>
+          <button type="button" class="ops-mode-btn active" data-ops-mode="3d" aria-pressed="true">3D</button>
+        </span>
+        <span id="cc3d-perf" class="cc3d-perf" title="Renderer status"></span>
+      </div>
+      <div id="cc3d-viewport" class="cc3d-viewport"></div>
+      <div id="cc3d-fallback" class="ops-empty hidden">WebGL is unavailable in this browser — 2D mode has everything.</div>
+      <div class="cc3d-hints">drag to orbit · scroll to zoom · click a workstation, task panel or rack to inspect</div>
+    </div>
+
+    <section id="ops-spaces-panel" class="ops-spaces-panel hidden" aria-label="Command Center spaces and operations">
+      <div class="ops-panel-header">
+        <div>
+          <div class="ops-kicker">OPERATIONS</div>
+          <div id="ops-count-line" class="ops-countline"></div>
+        </div>
+        <span id="ops-status" class="ops-status" data-tone="info"></span>
+      </div>
+      <div class="ops-spaces-block">
+        <label class="ops-label" for="ops-new-space-name">SPACES</label>
+        <div id="ops-spaces-list" class="ops-spaces-list"></div>
+        <div class="ops-new-space-row">
+          <input id="ops-new-space-name" type="text" maxlength="80" placeholder="New Space name…">
+          <button id="ops-new-space-btn" class="secondary-button" type="button">CREATE</button>
+        </div>
+      </div>
+      <div class="ops-tabs" role="tablist">
+        <button id="ops-tab-btn-agents" class="ops-tab active" role="tab" type="button">AGENTS</button>
+        <button id="ops-tab-btn-tasks" class="ops-tab" role="tab" type="button">TASKS</button>
+        <button id="ops-tab-btn-machines" class="ops-tab" role="tab" type="button">MACHINES</button>
+        <button id="ops-tab-btn-harnesses" class="ops-tab" role="tab" type="button">HARNESSES</button>
+      </div>
+      <div id="ops-tab-agents" class="ops-tabpanel"><div id="ops-agents-list" class="ops-list"></div></div>
+      <div id="ops-tab-tasks" class="ops-tabpanel hidden"><div id="ops-tasks-list" class="ops-list"></div></div>
+      <div id="ops-tab-machines" class="ops-tabpanel hidden"><div id="ops-machines-list" class="ops-machines-grid"></div></div>
+      <div id="ops-tab-harnesses" class="ops-tabpanel hidden"><div id="ops-harnesses-list" class="ops-machines-grid"></div></div>
+      <div class="ops-inspector-block">
+        <div class="ops-kicker">INSPECTOR</div>
+        <div id="ops-inspector-body" class="ops-inspector-body"></div>
+      </div>
+    </section>
   </div>
 
   <section id="fairy-live-panel" class="fairy-live-panel fairy-live-panel-hidden hidden" aria-label="Fairy Live">
@@ -1359,6 +1413,14 @@
 
   <script src="vendor/picovoice/web-voice-processor.js"></script>
   <script src="vendor/picovoice/porcupine-web.js"></script>
-  <script type="module" src="js/app.js?v=20260813-fairy-performance1"></script>
+  <div id="command-palette-root" class="command-palette-root hidden" role="dialog" aria-modal="true" aria-label="Command palette">
+    <div id="palette-backdrop" class="palette-backdrop"></div>
+    <div class="palette-card">
+      <input id="palette-input" type="text" autocomplete="off" spellcheck="false" placeholder="Type a command, agent, task, space or machine…">
+      <div id="palette-results" class="palette-results"></div>
+      <div class="palette-foot"><span>↑↓ navigate</span><span>Enter run</span><span>Esc close</span></div>
+    </div>
+  </div>
+  <script type="module" src="js/app.js?v=20260821-spaces1"></script>
 </body>
 </html>

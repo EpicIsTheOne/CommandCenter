@@ -14,6 +14,9 @@ import * as layoutSettings from './layout-settings.js?v=20260514b';
 import * as fairyLive from './fairy-live.js?v=20260813-fairy-mic-recovery1';
 import * as agentComms from './agent-comms.js?v=20260524-agentcomms1';
 import * as controlPlane from './control-plane.js?v=20260813-control-plane1';
+import * as ops from './ops.js';
+import * as palette from './palette.js';
+import { registerDefaultActions } from './default-actions.js';
 
 const APP_BUILD = '20260813-fairy-performance1';
 console.log('[CommandCenter] app build:', APP_BUILD);
@@ -1221,6 +1224,7 @@ async function handleEvent(msg) {
   fairyLive.handleEvent(msg);
   controlPlane.handleEvent(msg);
   agentComms.handleEvent?.(msg);
+  ops.handleWsEvent(msg);
   const { type, data } = msg;
   if (type === 'control:event' && Number(data?.eventSequence || 0) > controlEventSequence) {
     controlEventSequence = Number(data.eventSequence || 0);
@@ -2992,6 +2996,9 @@ async function main() {
   singleAgent.init();
   fairyLive.init();
   controlPlane.init({ base: BASE });
+  ops.init();
+  palette.init();
+  import('./default-actions.js').then((module) => module.registerDefaultActions({ ops })).catch(() => {});
   agentComms.initAgentComms({ base: BASE, fetchJson, initialRoster: roster });
   window.addEventListener('commandcenter:fairy-status', (event) => {
     const detail = event?.detail || {};
