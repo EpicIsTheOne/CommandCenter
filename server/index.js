@@ -13,7 +13,7 @@ import multer from 'multer';
 import config from './config.js';
 import OpenClawBridge from './openclaw-bridge.js';
 import { transcribe, speak, streamSpeak, streamFishAudioText, listElevenLabsVoices, searchFishAudioVoices, previewFishAudioVoice, resolveAgentVoice } from './voice.js';
-import { loadAgentRoster, searchAgents, detectAgentSources } from './agents.js';
+import { loadAgentRoster, searchAgents, detectAgentSources, invalidateRosterCache } from './agents.js';
 import { loadVoiceSettings, saveVoiceSettings, maskApiKey, maskSessionCookie } from './settings.js';
 import { deleteImportedCompanionPackage, ensureCompanionRegistry, importCodexPetPackageFromDir, loadCompanionRegistry, loadCompanionSettings, resolveAgentVisual, saveCompanionSettings, upsertStoredCompanionItem } from './companions.js';
 import { ensureMusicStorage, getMusicDir, loadMusicSettings, saveMusicSettings } from './music-settings.js';
@@ -31,6 +31,9 @@ import { FAIRY_CALL_MODE_OPTIONS, GEMINI_LIVE_VOICE_OPTIONS, loadGeminiRuntimeCo
 import { canSteerLiveTask, createLiveTask, getLiveTask, listLiveTasks, looksComplexRequest, requestLiveTaskCancel, runLiveTask, steerLiveTask } from './live-tasks.js';
 import { canTransitionTask, controlPlane, initializeControlPlane, projectLegacyTask } from './control-plane.js';
 import { registerControlRoutes } from './control-api.js';
+import { registerOpsRoutes, getCurrentSpaceId } from './ops-api.js';
+import { getSpacesStore } from './spaces.js';
+import { getLocalMachineSnapshot, recordMachineHistorySample } from './machines.js';
 import { buildCapabilityRegistry } from './control-capabilities.js';
 import { createCallSession, endCallSession, getCallSession, listCallSessions, updateCallSession } from './call-session-store.js';
 import { cleanupFairyRecordingIndex, getFairyRecording, getFairyRecordingPath, listFairyRecordings, saveFairyRecording } from './fairy-recordings.js';
@@ -6553,6 +6556,33 @@ registerControlRoutes(app, {
   relayAgentSource,
 });
 
+registerOpsRoutes(app, {
+  basePath,
+  broadcast,
+  getAgentActivity: () => agentActivity,
+});
+
+// Machine telemetry sampling: bounded history for the machines surface.
+const MACHINE_SAMPLE_INTERVAL_MS = Math.max(5000, Number(process.env.COMMANDCENTER_MACHINE_SAMPLE_MS) || 10000);
+let machineSampleTimer = setInterval(() => {
+  getLocalMachineSnapshot()
+    .then((snapshot) => recordMachineHistorySample(snapshot))
+    .catch(() => {});
+}, MACHINE_SAMPLE_INTERVAL_MS);
+machineSampleTimer.unref?.();
+
+try {
+  await getSpacesStore().ensureDefaultSpace();
+} catch (error) {
+  console.error('[spaces] Could not ensure default Space:', error?.message || error);
+}
+
+// Warm the roster + harness caches so the first UI overview loads fast.
+try {
+  loadAgentRoster();
+} catch {}
+import('./harnesses.js').then((module) => module.listHarnesses().catch(() => {})).catch(() => {});
+
 export { broadcast, wss };
 
 const bridge = new OpenClawBridge();
@@ -6611,6 +6641,7 @@ function notifyFairyOfRelayRoster(info = {}) {
 }
 
 relayAgentSource.on('roster-updated', (info) => {
+  invalidateRosterCache();
   broadcast({ type: 'relay:roster_updated', data: info });
   notifyFairyOfRelayRoster(info);
 });

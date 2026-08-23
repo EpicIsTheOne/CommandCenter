@@ -467,6 +467,9 @@ export class ControlPlane extends EventEmitter {
       title: cleanText(input.title, 200) || 'Background task',
       prompt: cleanText(input.prompt, 12000),
       agent: cleanText(input.agent, 160) || 'orchestrator',
+      spaceId: cleanText(input.spaceId || input.space_id, 160),
+      projectId: cleanText(input.projectId || input.project_id, 160),
+      machineId: cleanText(input.machineId || input.machine_id, 160),
       runtime: cleanText(input.runtime, 80),
       target: input.target && typeof input.target === 'object' ? clone(input.target) : {},
       state,
@@ -991,9 +994,9 @@ export class ControlPlane extends EventEmitter {
       .map(clone);
   }
 
-  async createTask({ id = '', threadId: requestedThreadId = '', title = '', prompt = '', summary = '', agent = 'orchestrator', runtime = '', parentTaskId = '', goalId = '', planId = '', target = {}, capabilities = [], requiredCapabilities = [], autoQueue = true, operationId: op = '', legacySource = null } = {}) {
+  async createTask({ id = '', threadId: requestedThreadId = '', title = '', prompt = '', summary = '', agent = 'orchestrator', spaceId = '', projectId = '', machineId = '', runtime = '', parentTaskId = '', goalId = '', planId = '', target = {}, capabilities = [], requiredCapabilities = [], autoQueue = true, operationId: op = '', legacySource = null } = {}) {
     const opId = operationId(op);
-    const request = { id, threadId: requestedThreadId, title, prompt, summary, agent, runtime, parentTaskId, goalId, planId, target, capabilities, requiredCapabilities, autoQueue, legacySource };
+    const request = { id, threadId: requestedThreadId, title, prompt, summary, agent, spaceId, projectId, machineId, runtime, parentTaskId, goalId, planId, target, capabilities, requiredCapabilities, autoQueue, legacySource };
     return this._withMutation(async () => {
       const prior = this._getOperation(this.snapshot, opId, request);
       if (prior) return prior;
@@ -1029,6 +1032,9 @@ export class ControlPlane extends EventEmitter {
         prompt,
         summary: summary || 'Created',
         agent,
+        spaceId,
+        projectId,
+        machineId,
         runtime,
         parentTaskId,
         goalId,
@@ -1120,7 +1126,7 @@ export class ControlPlane extends EventEmitter {
       const priorState = task.state;
       const requestedState = patch.state || (patch.status ? taskStateFromLegacy(patch.status) : '');
       if (requestedState && requestedState !== priorState) this._transitionTask(task, requestedState);
-      const allowed = ['title', 'prompt', 'summary', 'result', 'error', 'runtime', 'agent', 'target', 'blocker', 'relay', 'review', 'latestSteer', 'requiredCapabilities', 'approvalIds'];
+      const allowed = ['title', 'prompt', 'summary', 'result', 'error', 'runtime', 'agent', 'spaceId', 'projectId', 'machineId', 'target', 'blocker', 'relay', 'review', 'latestSteer', 'requiredCapabilities', 'approvalIds'];
       for (const key of allowed) {
         if (patch[key] === undefined) continue;
         if (key === 'requiredCapabilities' || key === 'approvalIds') task[key] = key === 'requiredCapabilities' ? normalizeCapabilities(patch[key]) : boundedArray(patch[key], 32).map((item) => cleanText(item, 160)).filter(Boolean);
