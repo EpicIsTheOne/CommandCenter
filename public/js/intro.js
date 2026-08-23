@@ -202,6 +202,10 @@ async function playIntro() {
     const start = async () => {
       document.removeEventListener('click', start);
       document.removeEventListener('keydown', start);
+      // The failsafe may have already ended the intro while we waited for a
+      // gesture; replaying now would stick the overlay open forever because
+      // fadeOutAndHide() early-returns once hasFinishedIntro is set.
+      if (hasFinishedIntro) return;
       try {
         await videoEl.play();
         await music.prepareForIntroCrossfade();

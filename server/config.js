@@ -45,7 +45,9 @@ export default {
   gatewayUrl: process.env.GATEWAY_URL || 'ws://127.0.0.1:18789',
   gatewayToken: resolvedGatewayToken,
   gatewayTokenSource,
-  demoMode: process.env.DEMO_MODE !== 'false',
+  // Demo mode is opt-in: an honest command center must not simulate agent
+  // activity unless the operator explicitly asked for it.
+  demoMode: String(process.env.DEMO_MODE || '').trim().toLowerCase() === 'true',
   openaiApiKey: process.env.OPENAI_API_KEY || '',
   weatherLocation: process.env.WEATHER_LOCATION || 'Kingston,Ontario,Canada',
   apiKey: process.env.COMMANDCENTER_API_KEY || '',
