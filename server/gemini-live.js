@@ -437,9 +437,74 @@ export class GeminiLiveSession {
     this.lastActivityMs = nowMs();
     this.voiceName = String(voiceName || FAIRY_LIVE_VOICE_NAME).trim() || FAIRY_LIVE_VOICE_NAME;
     this.systemPrompt = String(systemPrompt || FAIRY_LIVE_SYSTEM_PROMPT).trim() || FAIRY_LIVE_SYSTEM_PROMPT;
+    // Session resumption + auto-reconnect: survive transient socket drops
+    // without losing the conversation or the operator's mic pipeline.
+    this.sessionHandle = '';
+    this.autoReconnect = true;
+    this.reconnectAttempts = 0;
+    this._closing = false;
+    this._reconnectTimer = null;
+    this._generation = 0;
   }
 
-  connect() {
+  _buildSetup() {
+    const generationConfig = {
+      responseModalities: this.responseModalities,
+    };
+    if (this.responseModalities.includes('AUDIO')) {
+      generationConfig.speechConfig = {
+        voiceConfig: {
+          prebuiltVoiceConfig: {
+            voiceName: this.voiceName,
+          },
+        },
+      };
+    }
+    const setup = {
+      setup: {
+        model: `models/${this.model}`,
+        generationConfig,
+        outputAudioTranscription: {},
+        inputAudioTranscription: {},
+        systemInstruction: {
+          parts: [{ text: this.systemPrompt }],
+        },
+        tools: FAIRY_LIVE_TOOLS,
+      },
+    };
+    if (this.sessionHandle) {
+      setup.setup.sessionResumption = { handle: this.sessionHandle };
+    } else {
+      // Request resumption handles so later reconnects can pick up mid-call.
+      setup.setup.sessionResumption = {};
+    }
+    return setup;
+  }
+
+  _scheduleReconnect(reason = '') {
+    if (this._closing || !this.autoReconnect) return false;
+    if (this.reconnectAttempts >= 5) {
+      this.onEvent?.({ type: 'reconnect.gave-up', data: { reason } });
+      return false;
+    }
+    const attempt = this.reconnectAttempts + 1;
+    this.reconnectAttempts = attempt;
+    const delayMs = Math.min(8000, 600 * 2 ** (attempt - 1));
+    this.onEvent?.({ type: 'reconnecting', data: { attempt, delayMs, reason } });
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      this._connect().catch((err) => {
+        this.onError?.(err instanceof Error ? err : new Error(String(err)));
+        this._scheduleReconnect(`reconnect failed: ${err?.message || err}`);
+      });
+    }, delayMs);
+    return true;
+  }
+
+  async _connect() {
+    this._generation += 1;
+    const generation = this._generation;
+
     return new Promise((resolve, reject) => {
       if (!this.apiKey) {
         reject(new Error('Missing Gemini API key'));
@@ -451,36 +516,14 @@ export class GeminiLiveSession {
       let settled = false;
 
       ws.on('open', () => {
+        if (generation !== this._generation) return;
         this.connected = true;
         this.lastActivityMs = nowMs();
-        const generationConfig = {
-          responseModalities: this.responseModalities,
-        };
-        if (this.responseModalities.includes('AUDIO')) {
-          generationConfig.speechConfig = {
-            voiceConfig: {
-              prebuiltVoiceConfig: {
-                voiceName: this.voiceName,
-              },
-            },
-          };
-        }
-        const setup = {
-          setup: {
-            model: `models/${this.model}`,
-            generationConfig,
-            outputAudioTranscription: {},
-            inputAudioTranscription: {},
-            systemInstruction: {
-              parts: [{ text: this.systemPrompt }],
-            },
-            tools: FAIRY_LIVE_TOOLS,
-          },
-        };
-        ws.send(JSON.stringify(setup));
+        ws.send(JSON.stringify(this._buildSetup()));
       });
 
       ws.on('message', (data) => {
+        if (generation !== this._generation) return;
         this.lastActivityMs = nowMs();
         let json;
         try {
@@ -497,11 +540,17 @@ export class GeminiLiveSession {
 
         if (json.setupComplete) {
           this.onEvent?.({ type: 'setupComplete', data: json.setupComplete });
+          this.reconnectAttempts = 0;
           if (!settled) {
             settled = true;
             resolve();
           }
           return;
+        }
+
+        const resumption = json.sessionResumptionUpdate;
+        if (resumption?.newHandle) {
+          this.sessionHandle = String(resumption.newHandle);
         }
 
         const outputTranscript = json.outputTranscription?.text || json.serverContent?.outputTranscription?.text || '';
@@ -552,13 +601,29 @@ export class GeminiLiveSession {
         this.connected = false;
         const reason = reasonBuffer?.toString?.('utf8') || '';
         const error = new Error(`Gemini live socket closed (${code})${reason ? `: ${reason}` : ''}`);
+        if (generation !== this._generation) return;
         if (!settled) {
           settled = true;
           reject(error);
         }
-        this.onEvent?.({ type: 'closed', data: { code, reason } });
+        // Operator-intentional closes use close(1000); anything else is a
+        // drop worth resuming.
+        if (code === 1000) {
+          this.onEvent?.({ type: 'closed', data: { code, reason } });
+          return;
+        }
+        const scheduled = this._scheduleReconnect(reason || `code ${code}`);
+        if (!scheduled) {
+          this.onEvent?.({ type: 'closed', data: { code, reason } });
+        }
       });
     });
+  }
+
+  connect() {
+    this._closing = false;
+    this.reconnectAttempts = 0;
+    return this._connect();
   }
 
   sendTextTurn(text) {
@@ -633,6 +698,11 @@ export class GeminiLiveSession {
   }
 
   close() {
+    this._closing = true;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
     try {
       this.ws?.close(1000);
     } catch {}
