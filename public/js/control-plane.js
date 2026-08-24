@@ -293,12 +293,25 @@ export function init({ base = '' } = {}) {
   state.base = base;
   if (state.initialized) return;
   state.initialized = true;
+  const closePanel = () => {
+    const panel = el('control-plane-panel');
+    if (!panel || panel.classList.contains('hidden')) return;
+    panel.classList.add('hidden');
+    el('control-plane-toggle')?.setAttribute('aria-expanded', 'false');
+  };
   el('control-plane-toggle')?.addEventListener('click', () => {
     const panel = el('control-plane-panel');
     if (!panel) return;
     const hidden = panel.classList.toggle('hidden');
     el('control-plane-toggle').setAttribute('aria-expanded', String(!hidden));
     if (!hidden) loadState();
+  });
+  el('control-plane-close')?.addEventListener('click', closePanel);
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    // Let the command palette consume Escape when it is open.
+    if (document.querySelector('.command-palette-root:not(.hidden)')) return;
+    closePanel();
   });
   el('control-plane-panel')?.addEventListener('click', handleClick);
   el('control-plane-command')?.addEventListener('keydown', (event) => {

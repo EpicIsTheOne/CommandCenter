@@ -209,12 +209,15 @@
 
   <section id="control-plane-panel" class="control-plane-panel hidden" aria-label="Command Center control plane">
     <div class="control-plane-header">
-      <div>
+      <div class="control-plane-heading">
         <div class="control-plane-kicker">DURABLE CONTROL PLANE</div>
         <h2>MISSION BOARD</h2>
         <div id="control-plane-summary" class="control-plane-summary">Synchronizing tasks…</div>
       </div>
-      <div class="control-plane-header-meta"><span id="control-plane-sequence">EVENT 0</span><span id="control-plane-status" data-tone="info">READY</span></div>
+      <div class="control-plane-header-side">
+        <div class="control-plane-header-meta"><span id="control-plane-sequence">EVENT 0</span><span id="control-plane-status" data-tone="info">READY</span></div>
+        <button id="control-plane-close" class="control-plane-close" type="button" aria-label="Close mission board" title="Close (Esc)">✕ CLOSE</button>
+      </div>
     </div>
     <div class="control-plane-compose">
       <input id="control-plane-new-task" type="text" maxlength="12000" placeholder="Queue work for an agent…">
