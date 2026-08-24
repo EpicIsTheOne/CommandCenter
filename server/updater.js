@@ -264,7 +264,11 @@ export async function applyUpdate({ requestedBy = 'manual' } = {}) {
     stdio: 'ignore',
     env: { ...process.env },
   });
-  child.unref();
+  // Deliberately NOT unref()ed: unref() drops libuv's exit handle, so when the
+  // restart script eventually exits nobody wait()s it and it lingers as a
+  // zombie forever. Keeping the handle attached lets Node reap it; the script
+  // kills this process as part of the restart, so holding the ref is harmless.
+  child.on('close', () => {});
 
   return {
     ok: true,
