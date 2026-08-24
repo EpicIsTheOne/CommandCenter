@@ -6,6 +6,7 @@ import { GeminiLiveSession } from '../server/gemini-live.js';
 
 const settingsSource = readFileSync(resolve(process.cwd(), 'server/settings.js'), 'utf8');
 const indexSource = readFileSync(resolve(process.cwd(), 'server/index.js'), 'utf8');
+const voiceSource = readFileSync(resolve(process.cwd(), 'server/voice.js'), 'utf8');
 const fairyLiveSource = readFileSync(resolve(process.cwd(), 'public/js/fairy-live.js'), 'utf8');
 const appSource = readFileSync(resolve(process.cwd(), 'public/js/app.js'), 'utf8');
 const wakeSource = readFileSync(resolve(process.cwd(), 'public/js/wake.js'), 'utf8');
@@ -71,6 +72,11 @@ test('Wake mode uses on-device Porcupine spotting with server fallback', () => {
   assert.match(wakeSource, /voiceProcessor\.start\(\{ porcupine: worker \}\)/);
   assert.match(wakeSource, /api\/settings\/wake\/runtime/);
   assert.match(wakeSource, /getUserMedia\(/);
+});
+
+test('Fish TTS refuses HTML responses instead of playing them as audio', () => {
+  const matches = voiceSource.match(/returned HTML instead of audio/g) || [];
+  assert.ok(matches.length >= 2, 'guard present in full-buffer and streaming paths');
 });
 
 test('Gemini live sessions request resumption handles and resume from them', () => {

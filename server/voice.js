@@ -282,6 +282,13 @@ async function speakWithFishAudio(text, settings, overrideVoiceId = '', agentId 
     throw new Error(`Fish Audio TTS failed (${res.status}): ${errText || 'request failed'}`);
   }
 
+  const responseContentType = (res.headers.get('content-type') || '').toLowerCase();
+  // A 200 that carries HTML is an auth/routing failure being masked by the
+  // upstream SPA catch-all — fail loudly instead of "playing" a web page.
+  if (responseContentType.includes('text/html')) {
+    throw new Error(`Fish Audio TTS endpoint returned HTML instead of audio (${base}) — check fishAudioApiBase and credentials`);
+  }
+
   const arrayBuffer = await res.arrayBuffer();
   return {
     buffer: Buffer.from(arrayBuffer),
@@ -419,6 +426,11 @@ export async function streamSpeak(text, agentId = 'main', outRes) {
   if (!upstream.ok) {
     const errText = await upstream.text().catch(() => '');
     throw new Error(`Fish Audio TTS stream failed (${upstream.status}): ${errText || 'request failed'}`);
+  }
+
+  const upstreamStreamContentType = (upstream.headers.get('content-type') || '').toLowerCase();
+  if (upstreamStreamContentType.includes('text/html')) {
+    throw new Error(`Fish Audio TTS endpoint returned HTML instead of audio (${base}) — check fishAudioApiBase and credentials`);
   }
 
   outRes.status(200);
