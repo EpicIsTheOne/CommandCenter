@@ -7,7 +7,8 @@ const DATA_DIR = join(ROOT, 'data');
 const SETTINGS_FILE = join(DATA_DIR, 'voice-settings.json');
 
 const DEFAULT_SETTINGS = {
-  provider: 'elevenlabs',
+  provider: 'fish',
+  loopbackEnabled: false,
   elevenlabsApiKey: '',
   defaultVoiceId: '',
   fishAudioApiBase: 'https://your-domain.example/aichat',
@@ -32,7 +33,7 @@ const DEFAULT_SETTINGS = {
 
 function normalizeProvider(provider = '') {
   const value = String(provider || '').trim().toLowerCase();
-  return value === 'fish' || value === 'fish-audio' || value === 'fish_audio' ? 'fish' : 'elevenlabs';
+  return value === 'fish' || value === 'fish-audio' || value === 'fish_audio' ? 'fish' : value === 'elevenlabs' ? 'elevenlabs' : 'fish';
 }
 
 function normalizeVoiceMap(value = {}) {
@@ -85,6 +86,7 @@ function normalize(input = {}) {
 
   return {
     provider,
+    loopbackEnabled: input.loopbackEnabled === true,
     elevenlabsApiKey: String(input.elevenlabsApiKey || '').trim(),
     defaultVoiceId: String(input.defaultVoiceId || '').trim(),
     fishAudioApiBase: String(input.fishAudioApiBase || DEFAULT_SETTINGS.fishAudioApiBase).trim().replace(/\/+$/, ''),

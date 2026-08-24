@@ -2227,7 +2227,7 @@ app.get(`${basePath}/api/status`, async (req, res) => {
       gatewayTokenSource: bridgeStatus.gatewayTokenSource,
       sttMode: voiceSettings.sttMode || 'api',
       sttProvider: voiceSettings.sttApiProvider || 'fish',
-      ttsProvider: voiceSettings.provider || 'elevenlabs',
+      ttsProvider: voiceSettings.provider || 'fish',
       issues,
     },
   });
@@ -2767,7 +2767,8 @@ app.get(`${basePath}/api/settings/voice`, async (req, res) => {
   res.json({
     ok: true,
     settings: {
-      provider: settings.provider || 'elevenlabs',
+      provider: settings.provider || 'fish',
+      loopbackEnabled: settings.loopbackEnabled === true,
       hasApiKey: !!settings.elevenlabsApiKey,
       apiKeyMasked: maskApiKey(settings.elevenlabsApiKey),
       defaultVoiceId: settings.defaultVoiceId,
@@ -3541,7 +3542,7 @@ app.get(`${basePath}/api/v1/voice`, async (req, res) => {
     res.json({
       ok: true,
       settings: {
-        provider: settings.provider || 'elevenlabs',
+        provider: settings.provider || 'fish',
         defaultVoiceId: settings.defaultVoiceId,
         fishVoiceId: settings.fishVoiceId,
         agentVoices: settings.agentVoices || {},
@@ -3558,7 +3559,7 @@ app.get(`${basePath}/api/v1/voice`, async (req, res) => {
 app.get(`${basePath}/api/v1/voice/options`, async (req, res) => {
   try {
     const settings = await loadVoiceSettings();
-    const provider = String(req.query?.provider || settings.provider || 'elevenlabs').trim().toLowerCase() === 'fish' ? 'fish' : 'elevenlabs';
+    const provider = String(req.query?.provider || settings.provider || 'fish').trim().toLowerCase() === 'fish' ? 'fish' : 'elevenlabs';
     if (provider === 'fish') {
       const q = String(req.query?.q || '').trim();
       if (!q) {
@@ -3581,7 +3582,7 @@ app.get(`${basePath}/api/v1/voice/options`, async (req, res) => {
 app.post(`${basePath}/api/v1/voice`, async (req, res) => {
   try {
     const existing = await loadVoiceSettings();
-    const provider = String(req.body?.provider || existing.provider || 'elevenlabs').trim().toLowerCase() === 'fish' ? 'fish' : 'elevenlabs';
+    const provider = String(req.body?.provider || existing.provider || 'fish').trim().toLowerCase() === 'fish' ? 'fish' : 'elevenlabs';
     const elevenlabsAgentVoices = { ...(existing.elevenlabsAgentVoices || {}), ...(req.body?.elevenlabsAgentVoices || {}) };
     const fishAgentVoices = { ...(existing.fishAgentVoices || {}), ...(req.body?.fishAgentVoices || {}) };
     const agent = String(req.body?.agent || '').trim();
@@ -3621,7 +3622,8 @@ app.post(`${basePath}/api/settings/voice`, async (req, res) => {
   try {
     const existing = await loadVoiceSettings();
     const body = req.body || {};
-    const provider = String(body.provider || existing.provider || 'elevenlabs').trim() === 'fish' ? 'fish' : 'elevenlabs';
+    const provider = String(body.provider || existing.provider || 'fish').trim() === 'elevenlabs' ? 'elevenlabs' : 'fish';
+    const loopbackEnabled = body.loopbackEnabled !== undefined ? body.loopbackEnabled === true : existing.loopbackEnabled === true;
     const bodyElevenlabsAgentVoices = body.elevenlabsAgentVoices && typeof body.elevenlabsAgentVoices === 'object' && !Array.isArray(body.elevenlabsAgentVoices)
       ? body.elevenlabsAgentVoices
       : null;
@@ -3637,6 +3639,7 @@ app.post(`${basePath}/api/settings/voice`, async (req, res) => {
 
     const next = {
       provider,
+      loopbackEnabled,
       elevenlabsApiKey: body.elevenlabsApiKey ? String(body.elevenlabsApiKey).trim() : existing.elevenlabsApiKey,
       defaultVoiceId: body.defaultVoiceId !== undefined ? String(body.defaultVoiceId || '').trim() : (existing.defaultVoiceId || ''),
       fishAudioApiBase: String(body.fishAudioApiBase || existing.fishAudioApiBase || 'https://your-domain.example/aichat').trim(),
@@ -3662,7 +3665,7 @@ app.post(`${basePath}/api/settings/voice`, async (req, res) => {
     res.json({
       ok: true,
       settings: {
-        provider: saved.provider || 'elevenlabs',
+        provider: saved.provider || 'fish',
         hasApiKey: !!saved.elevenlabsApiKey,
         apiKeyMasked: maskApiKey(saved.elevenlabsApiKey),
         defaultVoiceId: saved.defaultVoiceId,
@@ -3779,7 +3782,7 @@ app.post(`${basePath}/api/setup/test`, async (req, res) => {
     });
   }
 
-  if ((settings.provider || 'elevenlabs') === 'fish') {
+  if ((settings.provider || 'fish') === 'fish') {
     checks.push({
       key: 'tts',
       ok: !!String(settings.fishAudioApiBase || '').trim() && !!String(settings.fishVoiceId || '').trim(),
@@ -5156,35 +5159,38 @@ app.post(`${basePath}/api/call/:id/end`, async (req, res) => {
   res.json({ ok: true, session });
 });
 
+function handleCallAudioChunk(sessionId, pcm16Base64, mimeType) {
+  const live = liveGeminiSessions.get(sessionId);
+  if (!live) {
+    const session = getCallSession(sessionId);
+    if (session?.state === 'ended') return { ok: true, ignored: true, ended: true };
+    return { ok: false, status: 404, error: 'Live Gemini session not found' };
+  }
+  if (!pcm16Base64) return { ok: false, status: 400, error: 'Missing pcm16Base64' };
+  live.sendAudioChunk({ pcm16Base64, mimeType });
+  const current = getCallSession(sessionId);
+  const updated = updateCallSession(sessionId, {
+    state: 'listening',
+    uplinkAudioChunks: Number(current?.uplinkAudioChunks || 0) + 1,
+    currentTurnAudioChunks: Number(current?.currentTurnAudioChunks || 0) + 1,
+    lastAudioAt: new Date().toISOString(),
+  });
+  const count = Number(updated?.uplinkAudioChunks || 0)
+  const turnCount = Number(updated?.currentTurnAudioChunks || 0)
+  if (count <= 3 || count % 25 === 0) {
+    broadcast({ type: 'call:debug', data: { sessionId, message: `Audio chunk uplink #${count} total / #${turnCount} this turn ${pcm16Base64.length}b ${mimeType}` } });
+  }
+  if (turnCount === 50 || turnCount === 100 || turnCount === 200) {
+    armLiveWatchdog(sessionId, updated?.lastTranscript || updated?.partialTranscript || 'Hello?', { broadcast });
+  }
+  return { ok: true, state: updated?.state || 'listening' };
+}
+
 app.post(`${basePath}/api/call/:id/audio`, async (req, res) => {
   try {
-    const sessionId = String(req.params.id || '');
-    const live = liveGeminiSessions.get(sessionId);
-    if (!live) {
-      const session = getCallSession(sessionId);
-      if (session?.state === 'ended') return res.json({ ok: true, ignored: true, ended: true });
-      return res.status(404).json({ ok: false, error: 'Live Gemini session not found' });
-    }
-    const pcm16Base64 = String(req.body?.pcm16Base64 || '').trim();
-    const mimeType = String(req.body?.mimeType || 'audio/pcm;rate=16000').trim();
-    if (!pcm16Base64) return res.status(400).json({ ok: false, error: 'Missing pcm16Base64' });
-    live.sendAudioChunk({ pcm16Base64, mimeType });
-    const current = getCallSession(sessionId);
-    const updated = updateCallSession(sessionId, {
-      state: 'listening',
-      uplinkAudioChunks: Number(current?.uplinkAudioChunks || 0) + 1,
-      currentTurnAudioChunks: Number(current?.currentTurnAudioChunks || 0) + 1,
-      lastAudioAt: new Date().toISOString(),
-    });
-    const count = Number(updated?.uplinkAudioChunks || 0)
-    const turnCount = Number(updated?.currentTurnAudioChunks || 0)
-    if (count <= 3 || count % 25 === 0) {
-      broadcast({ type: 'call:debug', data: { sessionId, message: `Audio chunk uplink #${count} total / #${turnCount} this turn ${pcm16Base64.length}b ${mimeType}` } });
-    }
-    if (turnCount === 50 || turnCount === 100 || turnCount === 200) {
-      armLiveWatchdog(sessionId, updated?.lastTranscript || updated?.partialTranscript || 'Hello?', { broadcast });
-    }
-    res.json({ ok: true, state: updated?.state || 'listening' });
+    const result = handleCallAudioChunk(String(req.params.id || ''), String(req.body?.pcm16Base64 || '').trim(), String(req.body?.mimeType || 'audio/pcm;rate=16000').trim());
+    if (!result.ok) return res.status(result.status || 500).json(result);
+    res.json(result);
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
   }
@@ -6490,6 +6496,26 @@ wss.on('connection', async (ws, req) => {
     if (ws.readyState === 1) ws.send(JSON.stringify({ type: 'control:replay.error', data: { error: error.message || 'Could not replay control events' } }));
   }
 
+  // Low-latency mic uplink: the browser streams call audio over this socket
+  // instead of one HTTP POST per VAD chunk. Authenticated UI sessions only.
+  ws.on('message', (raw) => {
+    let msg = null;
+    try { msg = JSON.parse(String(raw)); } catch { return; }
+    if (msg?.type !== 'call:audio') return;
+    try {
+      const cookies = parseCookies(req);
+      if (!isValidSession(cookies.cc_auth)) return;
+    } catch { return; }
+    const sessionId = String(msg.data?.sessionId || '');
+    const pcm16Base64 = String(msg.data?.pcm16Base64 || '');
+    if (!sessionId || !pcm16Base64 || pcm16Base64.length > 4 * 1024 * 1024) return;
+    try {
+      handleCallAudioChunk(sessionId, pcm16Base64, String(msg.data?.mimeType || 'audio/pcm;rate=16000'));
+    } catch (err) {
+      broadcast({ type: 'call:debug', data: { sessionId, message: `WS uplink error: ${err.message}` } });
+    }
+  });
+
   ws.on('close', () => {
     console.log(`[ws] Client disconnected (total: ${wss.clients.size})`);
   });
@@ -6524,6 +6550,34 @@ function shouldSuppressBroadcast(msg) {
   return false;
 }
 
+const loopbackSpeakState = { lastSpokeAt: new Map(), lastText: new Map() };
+
+async function maybeSpeakLoopback(msg) {
+  try {
+    if (msg?.type !== 'agent:responding') return;
+    const text = String(msg?.data?.message || '').trim();
+    const agentId = String(msg?.data?.agent || 'main').trim() || 'main';
+    if (!text || text.length < 2 || text.length > 1200) return;
+    const settings = await loadVoiceSettings();
+    if (settings.loopbackEnabled !== true) return;
+    // Live calls already voice their own agent; loopback is for everything else.
+    if (listCallSessions().some((session) => session.agent === agentId && session.state !== 'ended')) return;
+    const normalized = normalizeResponseForDedupe(text);
+    if (!normalized) return;
+    const now = Date.now();
+    const last = loopbackSpeakState.lastSpokeAt.get(agentId) || 0;
+    if (now - last < 4000) return;
+    if (loopbackSpeakState.lastText.get(agentId) === normalized && (now - last) < 60000) return;
+    loopbackSpeakState.lastSpokeAt.set(agentId, now);
+    loopbackSpeakState.lastText.set(agentId, normalized);
+    const spoken = await speak(text.slice(0, 1200), agentId);
+    if (!spoken?.buffer?.length) return;
+    broadcast({ type: 'voice:loopback', data: { agentId, audioBase64: spoken.buffer.toString('base64'), contentType: spoken.contentType || 'audio/mpeg', provider: spoken.provider || '' } });
+  } catch (err) {
+    console.log(`[voice] loopback TTS skipped: ${err?.message || err}`);
+  }
+}
+
 function broadcast(msg) {
   if (shouldSuppressBroadcast(msg)) return;
   const type = String(msg?.type || '');
@@ -6537,6 +6591,7 @@ function broadcast(msg) {
   }
   maybeAnnounceLiveTaskProgress(msg);
   maybeAnnounceLiveTaskResult(msg);
+  void maybeSpeakLoopback(msg);
   const payload = JSON.stringify(msg);
   for (const client of wss.clients) {
     if (client.readyState === 1) {

@@ -1211,6 +1211,18 @@ function connect() {
   };
 
   ws.onerror = () => {};
+
+  // Low-latency send hook for modules that stream over the shared socket
+  // (Fairy mic uplink). Returns false when the socket cannot take the payload.
+  window.__ccWsSend = (payload) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > 512 * 1024) return false;
+    try {
+      ws.send(JSON.stringify(payload));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
 }
 
 
@@ -2483,6 +2495,8 @@ function populateSettingsForm(voiceSettings = {}, wakeSettings = {}) {
   const vignetteBottomSlider = document.getElementById('vignette-bottom');
 
   providerSelect.value = voiceSettings.provider || 'elevenlabs';
+  const loopbackToggle = document.getElementById('voice-loopback-enabled');
+  if (loopbackToggle) loopbackToggle.checked = voiceSettings.loopbackEnabled === true;
   providerSelect.onchange = () => {
     updateVoiceProviderVisibility(providerSelect.value);
     voiceList.innerHTML = '';
@@ -2872,10 +2886,11 @@ async function saveSettings() {
 
   setSettingsStatus('Saving settings...');
   try {
+    const loopbackEnabled = document.getElementById('voice-loopback-enabled')?.checked === true;
     await fetchJson(`${BASE}/api/settings/voice`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider, elevenlabsApiKey: apiKey, defaultVoiceId, fishAudioApiBase, fishVoiceId, fishSessionCookie, fishFormat, fishPlaybackMode, fishAutoStreamMinChars, fishIncludeAsteriskNarration, sttMode, sttApiBase, sttApiProvider, sttLanguage, sttFishApiKey, sttOpenAiApiKey, sttElevenlabsApiKey, agentVoices, elevenlabsAgentVoices, fishAgentVoices }),
+      body: JSON.stringify({ provider, elevenlabsApiKey: apiKey, defaultVoiceId, fishAudioApiBase, fishVoiceId, fishSessionCookie, fishFormat, fishPlaybackMode, fishAutoStreamMinChars, fishIncludeAsteriskNarration, sttMode, sttApiBase, sttApiProvider, sttLanguage, sttFishApiKey, sttOpenAiApiKey, sttElevenlabsApiKey, agentVoices, elevenlabsAgentVoices, fishAgentVoices, loopbackEnabled }),
     });
 
     await fetchJson(`${BASE}/api/settings/gemini`, {

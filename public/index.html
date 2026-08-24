@@ -152,6 +152,7 @@
       <div id="fairy-live-handoff" class="fairy-live-handoff hidden"></div>
       <div class="fairy-live-audio-row">
         <button id="fairy-live-mic" class="secondary-button fairy-live-mic" type="button" disabled>START MIC</button>
+        <button id="fairy-live-ptt" class="secondary-button fairy-live-ptt" type="button" disabled title="Hold to talk — pushes mic audio even while muted">HOLD TO TALK</button>
         <span id="fairy-live-audio-status" class="fairy-live-audio-status">Mic off. Text test mode still works.</span>
       </div>
       <div class="fairy-live-audio-row">
@@ -753,6 +754,14 @@
                     <option value="fish">Fish Audio via AIChat tagged API</option>
                   </select>
                   <div class="setting-hint">Fish Audio uses the AIChat <code>/api/tts/audio</code> endpoint so emotion tags are preserved.</div>
+                </div>
+
+                <div class="setting-group nested-setting-group">
+                  <label for="voice-loopback-enabled" style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                    <input id="voice-loopback-enabled" type="checkbox" style="width:auto;">
+                    <span>Speak agent replies out loud (TTS loopback)</span>
+                  </label>
+                  <div class="setting-hint">Voices agent responses outside live calls. Agents already talking in a Fairy call are not doubled.</div>
                 </div>
 
                 <div class="setting-group nested-setting-group provider-elevenlabs">

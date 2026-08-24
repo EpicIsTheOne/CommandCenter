@@ -50,6 +50,12 @@ const state = {
   fishSpeakTimer: null,
   lastFishSpeakSignature: '',
   lastFishSpeakAt: 0,
+  fishSentenceQueue: [],
+  fishSentenceSpeaking: false,
+  fishSpokenLen: 0,
+  loopbackAudio: null,
+  loopbackUrl: '',
+  pttActive: false,
   screenActive: false,
   screenStream: null,
   screenVideo: null,
@@ -566,6 +572,10 @@ function updateMicUi() {
     els.mic.classList.toggle('active', state.micActive && !state.micMuted);
     els.mic.classList.toggle('muted', state.micActive && state.micMuted);
   }
+  if (els.ptt) {
+    els.ptt.disabled = !state.sessionId;
+    els.ptt.classList.toggle('active', state.pttActive);
+  }
   if (els.audioStatus) {
     els.audioStatus.textContent = state.micRecovering
       ? 'Mic capture hiccupped. Keeping the call alive and reconnecting the microphone…'
@@ -704,34 +714,79 @@ function commitPendingAssistantText(reason = 'done') {
   return text;
 }
 
-function fishSpeakDelayForText(text = '', done = false) {
-  if (done) return 70;
-  const value = String(text || '').trim();
-  if (!value) return 650;
-  if (/[.!?…]["')\]]?$/.test(value)) return 420;
-  if (value.length >= 180) return 520;
-  return 700;
+const FISH_MIN_SENTENCE_CHARS = 24;
+const FISH_STREAM_GRACE_MS = 1400;
+
+// Sentence-level Fish streaming: speak complete sentences the moment they
+// arrive instead of waiting for the whole turn. `state.fishSpokenLen` is a
+// watermark into `fishSpokenSource` (the accumulated display text).
+function queueCompletedFishSentences(done) {
+  const source = String(state.fishSpokenSource || '').trim();
+  if (!source) return;
+  if (state.fishSpokenLen > source.length) state.fishSpokenLen = 0;
+  const tail = source.slice(state.fishSpokenLen);
+  if (!tail.trim()) return;
+  const termRe = /[.!?…]+["')\]]*(?=\s|$)/g;
+  let cutAt = -1;
+  let match;
+  while ((match = termRe.exec(tail)) !== null) cutAt = termRe.lastIndex;
+  if (cutAt < 0 && !done) return;
+  if (cutAt > 0 && !done && cutAt < FISH_MIN_SENTENCE_CHARS) return;
+  const speakable = (cutAt > 0 ? tail.slice(0, cutAt) : tail).trim();
+  state.fishSpokenLen += cutAt > 0 ? cutAt : tail.length;
+  if (speakable) {
+    state.fishSentenceQueue.push(speakable);
+    void drainFishSentences();
+  }
+}
+
+async function drainFishSentences() {
+  if (state.fishSentenceSpeaking) return;
+  const next = state.fishSentenceQueue.shift();
+  if (!next) return;
+  state.fishSentenceSpeaking = true;
+  try {
+    await playFairyFishResponse(next);
+  } catch (err) {
+    markError(err.message || `${personaName()} Fish voice playback failed`);
+    setStatus('error', err.message || `${personaName()} Fish voice playback failed`);
+  } finally {
+    state.fishSentenceSpeaking = false;
+    if (state.fishSentenceQueue.length) void drainFishSentences();
+  }
+}
+
+function resetFishStream() {
+  state.fishSpokenLen = 0;
+  state.fishSpokenSource = '';
+  state.fishSentenceQueue = [];
 }
 
 function scheduleFishSpeak(text, reason = 'done', delayMs = 650) {
   const message = String(text || '').trim();
-  emitLog(`scheduleFishSpeak called (${reason}) len=${message.length} mode=${state.speechOutputMode} delay=${delayMs}`, 'info');
+  emitLog(`scheduleFishSpeak called (${reason}) len=${message.length} mode=${state.speechOutputMode}`, 'info');
   if (!message || state.speechOutputMode !== 'fish') return;
+  state.fishSpokenSource = message;
+  const done = reason.includes('done') || reason === 'response-audio';
+  if (done) {
+    if (state.fishSpeakTimer) clearTimeout(state.fishSpeakTimer);
+    state.fishSpeakTimer = null;
+    commitPendingAssistantText('fish-done');
+    queueCompletedFishSentences(true);
+    return;
+  }
+  // In-progress turn: speak any newly completed sentences right away; the
+  // grace timer only flushes stalled fragments so silence never wins.
+  queueCompletedFishSentences(false);
   if (state.fishSpeakTimer) clearTimeout(state.fishSpeakTimer);
   state.fishSpeakTimer = setTimeout(() => {
     state.fishSpeakTimer = null;
-    const latest = String(state.pendingAssistantText || message).trim();
-    const committed = commitPendingAssistantText(`fish-${reason}`) || latest;
-    emitLog(`scheduleFishSpeak firing (${reason}) committed=${committed.length}`, 'info');
-    if (state.fishPlaybackAudio && !state.fishPlaybackAudio.ended && !state.fishPlaybackAudio.paused) {
-      emitLog('Skipping late Fish update because playback is already active', 'info');
-      return;
+    const latest = String(state.pendingAssistantText || '').trim();
+    if (latest) {
+      state.fishSpokenSource = latest;
+      queueCompletedFishSentences(true);
     }
-    playFairyFishResponse(committed).catch((err) => {
-      markError(err.message || `${personaName()} Fish voice playback failed`);
-      setStatus('error', err.message || `${personaName()} Fish voice playback failed`);
-    });
-  }, Math.max(0, Number(delayMs) || 0));
+  }, Math.max(400, Number(delayMs) || FISH_STREAM_GRACE_MS));
 }
 
 function renderHandoff(text = '', tone = '') {
@@ -834,8 +889,55 @@ function rememberVadPreroll(vad, samples, durationMs) {
   void durationMs;
 }
 
+const PLAYBACK_DUCK_VOLUME = 0.35;
+
+// Barge-in aid: dip Fairy's voice while the local VAD hears the operator
+// speaking, so echo-cancelled mics get a clean shot at interrupting.
+function setPlaybackDuck(ducked) {
+  const audio = state.fishPlaybackAudio;
+  if (!audio) return;
+  try {
+    audio.volume = ducked ? PLAYBACK_DUCK_VOLUME : 1.0;
+  } catch (_) {}
+}
+
+// TTS loopback: agent replies voiced outside of live calls (server decides
+// when; this just plays the returned audio). Newest reply wins.
+function playLoopbackAudio(data) {
+  const audioBase64 = String(data?.audioBase64 || '');
+  if (!audioBase64) return;
+  try {
+    if (state.loopbackAudio) {
+      state.loopbackAudio.onended = null;
+      state.loopbackAudio.onerror = null;
+      state.loopbackAudio.pause();
+      state.loopbackAudio = null;
+    }
+    if (state.loopbackUrl) {
+      try { URL.revokeObjectURL(state.loopbackUrl); } catch (_) {}
+      state.loopbackUrl = '';
+    }
+    const bytes = Uint8Array.from(atob(audioBase64), (char) => char.charCodeAt(0));
+    const blob = new Blob([bytes], { type: String(data.contentType || 'audio/mpeg') });
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    audio.volume = 0.9;
+    state.loopbackAudio = audio;
+    state.loopbackUrl = url;
+    const cleanup = () => {
+      if (state.loopbackAudio === audio) state.loopbackAudio = null;
+      try { URL.revokeObjectURL(url); } catch (_) {}
+      if (state.loopbackUrl === url) state.loopbackUrl = '';
+    };
+    audio.onended = cleanup;
+    audio.onerror = cleanup;
+    void audio.play().catch(() => {});
+  } catch (_) {}
+}
+
 function enqueueRawPcmSamples(samples) {
-  if (!samples?.length || state.micMuted || !state.sessionId) return;
+  if (!samples?.length || !state.sessionId) return;
+  if (state.micMuted && !state.pttActive) return;
   for (let i = 0; i < samples.length; i += 1) state.pcmQueue.push(samples[i]);
   while (state.pcmQueue.length >= AUDIO_CHUNK_SAMPLES) {
     const chunk = new Int16Array(state.pcmQueue.splice(0, AUDIO_CHUNK_SAMPLES));
@@ -844,7 +946,8 @@ function enqueueRawPcmSamples(samples) {
 }
 
 function observeVadSamples(samples) {
-  if (!samples?.length || state.micMuted || !state.sessionId) return;
+  if (!samples?.length || !state.sessionId) return;
+  if (state.micMuted && !state.pttActive) return;
   const vad = state.vad || (state.vad = createVadState());
   const durationMs = samplesDurationMs(samples);
   const { rms, peak } = measureSamples(samples);
@@ -877,6 +980,7 @@ function observeVadSamples(samples) {
     vad.speechMs = 0;
     vad.silenceMs = 0;
     vad.speechCandidateMs = 0;
+    setPlaybackDuck(true);
     vad.preroll = [];
   }
 
@@ -892,6 +996,7 @@ function observeVadSamples(samples) {
       vad.speechMs = 0;
       vad.silenceMs = 0;
       vad.preroll = [];
+      setPlaybackDuck(false);
     }
   }
   renderDiagnostics();
@@ -940,7 +1045,8 @@ function interruptFairy(reason = 'user_speaking') {
 }
 
 function queuePcmSamples(samples) {
-  if (!samples?.length || state.micMuted || !state.sessionId) return;
+  if (!samples?.length || !state.sessionId) return;
+  if (state.micMuted && !state.pttActive) return;
   observeVadSamples(samples);
   if (shouldInterruptForSamples(samples)) interruptFairy('user_speaking');
   // Gemini Live needs continuous mic input to do its own endpointing reliably.
@@ -958,6 +1064,16 @@ function postAudioChunk(samples) {
   if (!state.sessionId || !samples?.length) return;
   const sessionId = state.sessionId;
   const pcm16Base64 = int16ToBase64(samples);
+  // Fast path: stream over the shared WebSocket — one relay hop into the
+  // Gemini session, no HTTP round-trip per chunk. HTTP stays as fallback
+  // whenever the socket is closed or backpressured.
+  if (window.__ccWsSend?.({ type: 'call:audio', data: { sessionId, pcm16Base64, mimeType: `audio/pcm;rate=${INPUT_SAMPLE_RATE}` } })) {
+    if (state.micUploadFailureCount && state.sessionId === sessionId) {
+      state.micUploadFailureCount = 0;
+      renderDiagnostics();
+    }
+    return;
+  }
   state.audioPostChain = state.audioPostChain
     .catch(() => {})
     .then(async () => {
@@ -1167,6 +1283,7 @@ function stopPlayback() {
   state.playbackGeneration += 1;
   if (state.playbackActive) emitFairyCallAudioEvent('commandcenter:voice-playback-stop', { source: 'fairy-live', sessionId: state.sessionId, fairy: true, interrupted: true });
   state.playbackActive = false;
+  state.fishSentenceQueue = [];
   if (playbackFinishedTimer) clearTimeout(playbackFinishedTimer);
   playbackFinishedTimer = null;
   if (state.fishSpeakTimer) {
@@ -1199,9 +1316,24 @@ function stopPlayback() {
   if (state.playbackContext) state.playbackNextTime = state.playbackContext.currentTime;
 }
 
+// Push-to-talk: hold to force mic audio through even while muted; first
+// press opens capture if the mic was never started. Works in every browser.
+async function setPttActive(active) {
+  const next = !!active;
+  if (next === state.pttActive) return;
+  state.pttActive = next;
+  els.ptt?.classList.toggle('active', state.pttActive);
+  markEvent(state.pttActive ? 'ptt on' : 'ptt off');
+  if (!state.pttActive) return;
+  if (state.sessionId && !state.micActive) {
+    await startMic().catch(() => {});
+  } else {
+    resumeMicContext('ptt').catch(() => {});
+  }
+}
+
 function stopFairyAudio() {
-  stopPlayback();
-  notifyPlaybackFinishedSoon();
+  stopPlayback();  notifyPlaybackFinishedSoon();
   setStatus(state.sessionId ? 'ready' : state.status, 'Fairy audio stopped. Blessed silence, for once.');
   emitLog('Fairy audio stopped', 'info');
   showOverlay('Fairy silenced.', 'info', 2200);
@@ -1488,7 +1620,7 @@ async function startMic({ recovering = false } = {}) {
     source = ctx.createMediaStreamSource(stream);
     processor = ctx.createScriptProcessor(4096, 1, 1);
     processor.onaudioprocess = (event) => {
-      if (!state.micActive || state.micMuted || !state.sessionId) return;
+      if (!state.micActive || (state.micMuted && !state.pttActive) || !state.sessionId) return;
       const input = event.inputBuffer.getChannelData(0);
       queuePcmSamples(resampleToInt16(input, ctx.sampleRate, INPUT_SAMPLE_RATE));
     };
@@ -2268,6 +2400,7 @@ export function init() {
   els.imageCardDismiss = document.getElementById('fairy-live-image-card-dismiss');
   els.text = document.getElementById('fairy-live-text');
   els.send = document.getElementById('fairy-live-send');
+  els.ptt = document.getElementById('fairy-live-ptt');
 
   els.panel?.addEventListener('click', (event) => event.stopPropagation());
   els.launch?.addEventListener('click', (event) => { event.stopPropagation(); if (isSessionActive()) endCall(); else startCall(); });
@@ -2325,6 +2458,10 @@ export function init() {
     renderDebugPanel();
   });
   els.mic?.addEventListener('click', (event) => { event.stopPropagation(); startMic(); });
+  els.ptt?.addEventListener('pointerdown', (event) => { event.preventDefault(); event.stopPropagation(); void setPttActive(true); });
+  for (const pttEnd of ['pointerup', 'pointerleave', 'pointercancel']) {
+    els.ptt?.addEventListener(pttEnd, () => void setPttActive(false));
+  }
   els.screen?.addEventListener('click', (event) => { event.stopPropagation(); startScreenShare(); });
   els.camera?.addEventListener('click', (event) => { event.stopPropagation(); startCameraShare(); });
   els.cameraFacing?.addEventListener('click', (event) => { event.stopPropagation(); toggleCameraFacingMode(); });
@@ -2372,6 +2509,11 @@ export function handleEvent(msg = {}) {
   const type = msg.type || '';
   const data = msg.data || {};
 
+  if (type === 'voice:loopback') {
+    playLoopbackAudio(data);
+    return;
+  }
+
   if (type === 'call:session.started') {
     state.sessionId = data.id || data.sessionId || state.sessionId;
     if (data.session) state.serverSessionMeta = data.session;
@@ -2397,6 +2539,8 @@ export function handleEvent(msg = {}) {
       stopPlayback();
       commitPendingAssistantText('session-ended');
       state.interrupting = false;
+      state.pttActive = false;
+      resetFishStream();
       state.sessionId = '';
       state.serverSessionMeta = null;
       state.visualMemory = null;
@@ -2472,6 +2616,7 @@ export function handleEvent(msg = {}) {
 
   if (type === 'call:transcript.final' && data.sessionId === state.sessionId) {
     state.pendingAssistantText = '';
+    resetFishStream();
     setStatus(data.state || 'thinking', `${personaName()} is thinking…`);
     return;
   }
@@ -2492,7 +2637,7 @@ export function handleEvent(msg = {}) {
     setStatus(data.state || (data.done ? 'speaking' : 'thinking'), suppressed ? `${personaName()} timed this for a calmer window.` : (displayText || `${personaName()} responded.`));
     if (data.taskId) state.lastTaskId = data.taskId;
     if (state.speechOutputMode === 'fish' && displayText) {
-      scheduleFishSpeak(displayText, data.done ? 'response-text-done' : 'response-text-stream', fishSpeakDelayForText(displayText, !!data.done));
+      scheduleFishSpeak(displayText, data.done ? 'response-text-done' : 'response-text-stream');
     } else if (data.done) {
       commitPendingAssistantText('done');
     }
