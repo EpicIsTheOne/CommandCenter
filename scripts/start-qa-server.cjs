@@ -95,7 +95,12 @@ async function main() {
     },
   });
   fs.writeFileSync(PID_FILE, String(child.pid), 'utf8');
-  child.unref();
+  // Deliberately NOT unref()ed: unref() drops libuv's exit handle, so if this
+  // child ever died while we were still alive nobody would wait() it and it
+  // would linger as a zombie. We keep the handle attached instead and leave
+  // the event loop via explicit process.exit() once the server is healthy
+  // (the detached server itself outlives us either way).
+  child.on('close', () => {});
   console.log(`[start-qa] spawned pid ${child.pid} -> ${BASE_URL} (log: ${LOG_FILE})`);
 
   const deadline = Date.now() + 45000;
@@ -126,6 +131,7 @@ async function main() {
     console.log('[start-qa] UI password configured for fresh QA data dir.');
   }
   console.log(`[start-qa] ready: ${BASE_URL} (pid ${child.pid}, data: ${DATA_DIR})`);
+  process.exit(0);
 }
 
 main().catch((err) => {

@@ -387,8 +387,25 @@ export function runLiveTask(task, { broadcast, roster }) {
 
   const killTimer = setTimeout(() => {
     if (finished) return;
-    try { child.kill('SIGTERM'); } catch {}
+    terminateChild();
   }, 20 * 60 * 1000);
+
+  // Polite stop first; agents occasionally ignore SIGTERM and would linger
+  // forever as orphans, so escalate to SIGKILL after a short grace period.
+  const SIGKILL_GRACE_MS = 10 * 1000;
+
+  function childStillRunning() {
+    return child.exitCode === null && child.signalCode === null;
+  }
+
+  function terminateChild() {
+    try { child.kill('SIGTERM'); } catch {}
+    setTimeout(() => {
+      if (!finished && childStillRunning()) {
+        try { child.kill('SIGKILL'); } catch {}
+      }
+    }, SIGKILL_GRACE_MS);
+  }
 
   function clearTimers() {
     clearInterval(heartbeatTimer);
@@ -406,7 +423,7 @@ export function runLiveTask(task, { broadcast, roster }) {
     cancel: async () => {
       if (finished) return true;
       cancelRequested = true;
-      try { child.kill('SIGTERM'); } catch {}
+      terminateChild();
       if (!cancelTimer) {
         cancelTimer = setTimeout(async () => {
           if (finished) return;
