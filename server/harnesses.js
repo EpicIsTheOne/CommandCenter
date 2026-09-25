@@ -13,15 +13,19 @@ function runFirst(candidates, args, { timeoutMs = 15000 } = {}) {
     const tryNext = () => {
       const bin = attempts.shift();
       if (!bin || settled) return resolve({ ok: false, error: 'no candidate succeeded' });
-      execFile(bin, args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
-        if (settled) return;
-        if (err && !stdout) {
-          tryNext();
-          return;
-        }
-        settled = true;
-        resolve({ ok: !err, stdout: String(stdout || ''), stderr: String(stderr || ''), bin });
-      });
+      try {
+        execFile(bin, args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+          if (settled) return;
+          if (err && !stdout) {
+            tryNext();
+            return;
+          }
+          settled = true;
+          resolve({ ok: !err, stdout: String(stdout || ''), stderr: String(stderr || ''), bin });
+        });
+      } catch {
+        tryNext();
+      }
     };
     tryNext();
   });
