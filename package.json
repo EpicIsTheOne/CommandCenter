@@ -8,8 +8,8 @@
     "start": "node server/index.js",
     "dev": "node --watch server/index.js",
     "client:relay": "node client/command-center-relay.mjs",
-    "test": "node --test test/*.test.js",
-    "test:unit": "node --test test/*.test.js",
+    "test": "node --test",
+    "test:unit": "node --test",
     "test:security": "node --test test/security.test.js test/websocket-auth.test.js",
     "test:integration": "node --test test/attachment-bundle.test.js test/startup.test.js",
     "check:syntax": "node scripts/check-syntax.cjs",
@@ -22,25 +22,18 @@
     "@picovoice/porcupine-web": "^4.0.0",
     "@picovoice/porcupine-web-en-worker": "^2.1.7",
     "@picovoice/web-voice-processor": "^4.0.9",
-    "body-parser": "^1.20.6",
+    "body-parser": "^1.20.8",
     "dotenv": "^16.4.7",
-    "express": "^4.22.1",
+    "express": "^4.22.3",
     "form-data": "^4.0.6",
-    "multer": "^2.2.0",
+    "multer": "^2.4.0",
     "openai": "^4.104.0",
     "path-to-regexp": "^0.1.13",
     "pdf-parse": "^2.4.5",
-    "qs": "^6.15.3",
+    "qs": "^6.16.0",
     "ws": "^8.21.0"
   },
   "devDependencies": {
     "playwright": "^1.60.0"
-  },
-  "overrides": {
-    "express": {
-      "qs": "6.15.3",
-      "body-parser": "1.20.6",
-      "path-to-regexp": "0.1.13"
-    }
   }
 }

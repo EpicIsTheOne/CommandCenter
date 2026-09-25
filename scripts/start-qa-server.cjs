@@ -17,7 +17,7 @@ const DATA_DIR = process.env.QA_DATA_DIR || path.join(os.tmpdir(), 'cc-qa-data')
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.QA_PORT || 3100);
 const BASE_URL = `http://${HOST}:${PORT}`;
-const PASSWORD = 'qa-pass-2026';
+const PASSWORD = 'qa-pass-2026-long';
 
 function request(method, urlPath, body) {
   return new Promise((resolve, reject) => {

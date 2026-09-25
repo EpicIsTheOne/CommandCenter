@@ -4,33 +4,26 @@ const { join } = require('node:path');
 const { tmpdir } = require('node:os');
 const { spawn } = require('node:child_process');
 const http = require('node:http');
+const net = require('node:net');
 
 const repoDir = join(__dirname, '..');
-const port = 39211 + Math.floor(Math.random() * 100);
-const localPort = port + 1;
+function reservePort() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const selected = probe.address().port;
+      probe.close((error) => error ? reject(error) : resolve(selected));
+    });
+  });
+}
+
+let port;
+let localPort;
+let child;
 const dataDir = mkdtempSync(join(tmpdir(), 'cc-control-live-'));
-const child = spawn(process.execPath, ['server/index.js'], {
-  cwd: repoDir,
-  env: {
-    ...process.env,
-    PORT: String(port),
-    HOST: '127.0.0.1',
-    LOCAL_API_ENABLED: 'true',
-    LOCAL_API_PORT: String(localPort),
-    LOCAL_API_HOST: '127.0.0.1',
-    DEMO_MODE: 'true',
-    PYTHON_BIN: 'definitely-missing-python',
-    COMMANDCENTER_DATA_DIR: dataDir,
-    COMMANDCENTER_CONTROL_DATA_DIR: dataDir,
-    COMMANDCENTER_API_KEY: 'control-plane-live-smoke-key',
-  },
-  stdio: ['ignore', 'pipe', 'pipe'],
-  windowsHide: true,
-});
 
 let output = '';
-child.stdout.on('data', (chunk) => { output += chunk; });
-child.stderr.on('data', (chunk) => { output += chunk; });
 
 function request(portNumber, path, { method = 'GET', body = null } = {}) {
   return new Promise((resolve, reject) => {
@@ -90,6 +83,28 @@ async function expectConflict(path, body, expectedCode) {
 }
 
 async function run() {
+  port = await reservePort();
+  localPort = await reservePort();
+  child = spawn(process.execPath, ['server/index.js'], {
+    cwd: repoDir,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      LOCAL_API_ENABLED: 'true',
+      LOCAL_API_PORT: String(localPort),
+      LOCAL_API_HOST: '127.0.0.1',
+      DEMO_MODE: 'true',
+      PYTHON_BIN: 'definitely-missing-python',
+      COMMANDCENTER_DATA_DIR: dataDir,
+      COMMANDCENTER_CONTROL_DATA_DIR: dataDir,
+      COMMANDCENTER_API_KEY: 'control-plane-live-smoke-key',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  child.stdout.on('data', (chunk) => { output += chunk; });
+  child.stderr.on('data', (chunk) => { output += chunk; });
   await waitForServer();
   const status = await json(localPort, '/api/v1/control/status');
   assert.equal(status.ok, true);
@@ -177,9 +192,9 @@ run().catch((error) => {
   console.error(output);
   process.exitCode = 1;
 }).finally(() => {
-  if (child.exitCode === null) child.kill();
+  if (child && child.exitCode === null) child.kill();
   setTimeout(() => {
-    if (child.exitCode === null) child.kill('SIGKILL');
+    if (child && child.exitCode === null) child.kill('SIGKILL');
     rmSync(dataDir, { recursive: true, force: true });
   }, 250).unref();
 });

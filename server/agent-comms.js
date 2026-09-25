@@ -1,11 +1,10 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { readJsonStore, writeJsonStore } from './json-store.js';
+import { dataPath } from './runtime-paths.js';
 import { randomUUID } from 'node:crypto';
 
-const ROOT = process.cwd();
-const DATA_DIR = join(ROOT, 'data');
-const STORE_FILE = join(DATA_DIR, 'agent-comms.json');
+const DATA_DIR = dataPath();
+const STORE_FILE = dataPath('agent-comms.json');
 const STORE_VERSION = 1;
 const MAX_MESSAGES = 800;
 const MAX_TEXT_CHARS = 1500;
@@ -91,19 +90,13 @@ function normalizeStore(input = {}) {
 }
 
 export async function loadAgentComms() {
-  try {
-    if (!existsSync(STORE_FILE)) return { version: STORE_VERSION, messages: [] };
-    const raw = await readFile(STORE_FILE, 'utf8');
-    return normalizeStore(JSON.parse(raw));
-  } catch {
-    return { version: STORE_VERSION, messages: [] };
-  }
+  return normalizeStore(await readJsonStore(STORE_FILE, { defaultValue: { version: STORE_VERSION, messages: [] } }));
 }
 
 export async function saveAgentComms(store = {}) {
   const normalized = normalizeStore(store);
   await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(STORE_FILE, JSON.stringify(normalized, null, 2) + '\n', { mode: 0o600 });
+  await writeJsonStore(STORE_FILE, normalized);
   return normalized;
 }
 

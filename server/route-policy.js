@@ -12,13 +12,14 @@ export function classifyApiRoute(pathname, basePath = '') {
   return 'ui-session';
 }
 
-export function createUiApiPolicy({ basePath = '', loadAuth, readSessionToken, validateSession } = {}) {
+export function createUiApiPolicy({ basePath = '', loadAuth, readSessionToken, validateSession, allowUnconfiguredSession = false } = {}) {
   return async (req, res, next) => {
     const policy = classifyApiRoute(req.path, basePath);
     if (policy !== 'ui-session') return next();
+    if (allowUnconfiguredSession && await validateSession(readSessionToken(req))) return next();
     const auth = await loadAuth();
     if (!auth.enabled) return res.status(403).json({ ok: false, error: 'Operator password setup is required.', code: 'SETUP_REQUIRED' });
-    if (!validateSession(readSessionToken(req))) return res.status(401).json({ ok: false, error: 'Unauthorized', code: 'UNAUTHORIZED' });
+    if (!await validateSession(readSessionToken(req))) return res.status(401).json({ ok: false, error: 'Unauthorized', code: 'UNAUTHORIZED' });
     next();
   };
 }

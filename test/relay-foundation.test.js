@@ -189,11 +189,11 @@ test('production device upgrade seam rejects query URLs, authenticates frames, a
     authenticateDeviceFn: async (secret, deviceId) => { authCalls.push({ secret, deviceId }); return { id: deviceId || 'device-1', ownerId: RELAY_OWNER_ID }; },
   });
   const deviceUpgrade = createRelayDeviceUpgrade({ relayManager, authTimeoutMs: 250 });
-  server.on('upgrade', (req, socket, head) => {
+  server.on('upgrade', async (req, socket, head) => {
     if (deviceUpgrade.tryUpgrade(req, socket, head)) return;
     const pathname = new URL(req.url, 'http://localhost').pathname;
     if (pathname === '/ws') {
-      const auth = authorizeWebSocketRequest(req, { validateSession: (token) => token === 'valid-cookie' });
+      const auth = await authorizeWebSocketRequest(req, { validateSession: (token) => token === 'valid-cookie' });
       if (!auth.ok) { socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); socket.destroy(); return; }
       browserWss.handleUpgrade(req, socket, head, (ws) => browserWss.emit('connection', ws));
       return;

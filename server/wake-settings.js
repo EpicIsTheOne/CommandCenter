@@ -1,10 +1,9 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { readJsonStore, writeJsonStore } from './json-store.js';
+import { dataPath } from './runtime-paths.js';
 
-const ROOT = process.cwd();
-const DATA_DIR = join(ROOT, 'data');
-const SETTINGS_FILE = join(DATA_DIR, 'wake-settings.json');
+const DATA_DIR = dataPath();
+const SETTINGS_FILE = dataPath('wake-settings.json');
 
 const DEFAULT_SETTINGS = {
   porcupineAccessKey: '',
@@ -30,18 +29,14 @@ function normalize(input = {}) {
 
 export async function loadWakeSettings() {
   try {
-    if (!existsSync(SETTINGS_FILE)) return { ...DEFAULT_SETTINGS };
-    const raw = await readFile(SETTINGS_FILE, 'utf8');
-    return { ...DEFAULT_SETTINGS, ...normalize(JSON.parse(raw)) };
-  } catch {
-    return { ...DEFAULT_SETTINGS };
-  }
+    return { ...DEFAULT_SETTINGS, ...normalize(await readJsonStore(SETTINGS_FILE, { defaultValue: DEFAULT_SETTINGS })) };
+  } catch { return { ...DEFAULT_SETTINGS }; }
 }
 
 export async function saveWakeSettings(input) {
   const settings = normalize(input);
   await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+  await writeJsonStore(SETTINGS_FILE, settings);
   return settings;
 }
 

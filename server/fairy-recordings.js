@@ -1,12 +1,12 @@
-import { mkdir, readFile, writeFile, readdir, stat } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { mkdir, writeFile, readdir, stat } from 'node:fs/promises';
+import { readJsonStore, writeJsonStore } from './json-store.js';
 import { join, extname, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { dataPath } from './runtime-paths.js';
 
-const ROOT = process.cwd();
-const DATA_DIR = join(ROOT, 'data');
-const RECORDINGS_DIR = join(DATA_DIR, 'fairy-recordings');
-const META_FILE = join(RECORDINGS_DIR, 'recordings.json');
+const DATA_DIR = dataPath();
+const RECORDINGS_DIR = dataPath('fairy-recordings');
+const META_FILE = dataPath('fairy-recordings', 'recordings.json');
 
 function nowIso() {
   return new Date().toISOString();
@@ -21,26 +21,17 @@ function sanitizeName(name = '') {
 
 async function ensureStore() {
   await mkdir(RECORDINGS_DIR, { recursive: true });
-  if (!existsSync(META_FILE)) {
-    await writeFile(META_FILE, JSON.stringify({ recordings: [] }, null, 2) + '\n');
-  }
+  return readJsonStore(META_FILE, { defaultValue: { recordings: [] } }).then((meta) => ({ recordings: Array.isArray(meta.recordings) ? meta.recordings : [] }));
 }
 
 async function loadMeta() {
   await ensureStore();
-  try {
-    const raw = await readFile(META_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    const recordings = Array.isArray(parsed.recordings) ? parsed.recordings : [];
-    return { recordings };
-  } catch {
-    return { recordings: [] };
-  }
+  return ensureStore();
 }
 
 async function saveMeta(meta = { recordings: [] }) {
   await ensureStore();
-  await writeFile(META_FILE, JSON.stringify({ recordings: Array.isArray(meta.recordings) ? meta.recordings : [] }, null, 2) + '\n');
+  await writeJsonStore(META_FILE, { recordings: Array.isArray(meta.recordings) ? meta.recordings : [] });
 }
 
 export async function listFairyRecordings() {

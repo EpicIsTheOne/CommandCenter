@@ -2,11 +2,11 @@
 // Fairy Live panel opens without errors. Expects QA server on 3100.
 const { chromium } = require('playwright');
 
-const BASE_URL = 'http://127.0.0.1:3100';
+const BASE_URL = process.env.QA_BASE_URL || `http://127.0.0.1:${process.env.QA_PORT || 3100}`;
 
 async function main() {
   const browser = await chromium.launch({
-    executablePath: 'C:/Users/Epic/AppData/Local/ms-playwright/chromium-1208/chrome-win64/chrome.exe',
+    executablePath: process.env.CHROMIUM_PATH || undefined,
     headless: true,
   });
   const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
@@ -18,7 +18,7 @@ async function main() {
   const pw = page.locator('#auth-password');
   try {
     await pw.waitFor({ state: 'visible', timeout: 8000 });
-    await pw.fill('qa-pass-2026');
+    await pw.fill('qa-pass-2026-long');
     await page.click('#auth-submit-btn');
   } catch {}
   await page.waitForTimeout(3500);

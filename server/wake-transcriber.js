@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import crypto from 'node:crypto';
 import readline from 'node:readline';
 import { resolvePython } from './platform-capabilities.js';
+import { PROJECT_ROOT } from './runtime-paths.js';
 
-const ROOT = process.cwd();
+const ROOT = PROJECT_ROOT;
 const PYTHONPATH = join(ROOT, '.pydeps');
 const WHISPER_CACHE_DIR = join(ROOT, '.cache', 'whisper');
 
@@ -85,6 +86,15 @@ export async function warmWakeTranscriber() {
 
 export function getWakeTranscriberStatus() {
   return { available: !!worker && !worker.killed, reason: unavailableReason };
+}
+
+export function stopWakeTranscriber() {
+  if (worker && !worker.killed) worker.kill();
+  worker = null;
+  rl?.close();
+  rl = null;
+  while (pending.length) pending.shift().reject(new Error('Wake transcriber stopped'));
+  unavailableReason = 'Wake transcriber stopped';
 }
 
 async function toWavFile(audioBuffer, filename = 'wake.webm') {

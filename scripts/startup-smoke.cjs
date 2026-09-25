@@ -16,6 +16,8 @@ const child = spawn(process.execPath, ['server/index.js'], {
 let output = '';
 child.stdout.on('data', (chunk) => { output += chunk; });
 child.stderr.on('data', (chunk) => { output += chunk; });
+let childExit = null;
+child.on('exit', (code, signal) => { childExit = { code, signal }; });
 
 function request(targetPort, path, { method = 'GET', headers = {}, body = null } = {}) {
   return new Promise((resolve, reject) => {
@@ -32,14 +34,18 @@ function request(targetPort, path, { method = 'GET', headers = {}, body = null }
 }
 
 async function run() {
-  const deadline = Date.now() + 15000;
+  const deadline = Date.now() + 5000;
   while (true) {
     try { if ((await request(port, '/api/auth/status')).status === 200) break; } catch {}
-    if (Date.now() > deadline || child.exitCode !== null) throw new Error('Server did not become healthy.');
+    if (Date.now() > deadline || childExit) throw new Error(`Server did not become healthy${childExit ? ` (exit ${childExit.code ?? 'null'}, signal ${childExit.signal || 'none'})` : ''}.`);
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
-  if ((await request(port, '/')).status !== 200) throw new Error('Main UI did not load.');
+  const home = await request(port, '/');
+  if (home.status !== 200) throw new Error('Main UI did not load.');
+  if (home.headers['x-content-type-options'] !== 'nosniff' || home.headers['x-frame-options'] !== 'SAMEORIGIN' || !home.headers['content-security-policy']) throw new Error('Security headers were not applied.');
   if ((await request(port, '/api/setup/capabilities')).status !== 403) throw new Error('Sensitive browser API was not setup-gated.');
+  const authStatus = await request(port, '/api/auth/status');
+  if (authStatus.status !== 200 || authStatus.body.includes('"passwordSet":true') || authStatus.body.includes('"setupAllowed":false')) throw new Error(`Initial auth state is unsafe: ${authStatus.status} ${authStatus.body}`);
   const setup = await request(port, '/api/auth/setup', { method: 'POST', body: { password: 'correct horse battery staple' } });
   if (setup.status !== 200) throw new Error(`Password setup failed: ${setup.status} ${setup.body}`);
   const cookie = String(setup.headers['set-cookie']?.[0] || '').split(';')[0];

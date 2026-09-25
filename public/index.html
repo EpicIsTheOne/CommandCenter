@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>OpenClaw Command Center</title>
-  <script>window.__BASE_PATH__ = (location.pathname.replace(/\/$/, '').match(/^(.*\/commandcenter)(?:\/.*)?$/)?.[1] || '');</script>
+  <script src="js/base-path.js"></script>
   <link rel="manifest" href="manifest.webmanifest">
   <meta name="theme-color" content="#0b1018">
   <meta name="mobile-web-app-capable" content="yes">
@@ -600,8 +600,8 @@
               </div>
 
               <div class="update-toggle-row">
-                <label class="setting-inline-check"><input id="auto-update-enabled" type="checkbox" checked> Keep CommandCenter updated automatically</label>
-                <div class="setting-hint">Default: on. Great for bugfixes, less great if you enjoy manually babysitting deploys.</div>
+                <label class="setting-inline-check"><input id="auto-update-enabled" type="checkbox"> Keep CommandCenter updated automatically</label>
+                <div class="setting-hint">Default: off. Enable it only when you want CommandCenter to check and apply updates in the background.</div>
               </div>
 
               <div id="update-meta" class="update-summary-grid"></div>
@@ -1433,6 +1433,6 @@
       <div class="palette-foot"><span>↑↓ navigate</span><span>Enter run</span><span>Esc close</span></div>
     </div>
   </div>
-  <script type="module" src="js/app.js?v=20260821-spaces1"></script>
+  <script type="module" src="js/app.js?v=20260925-audit1"></script>
 </body>
 </html>

@@ -33,6 +33,15 @@ test('UI policy rejects missing setup and invalid sessions', async () => {
   res = response();
   await createUiApiPolicy({ loadAuth: async () => ({ enabled: true }), readSessionToken: () => 'bad', validateSession: () => false })({ path: '/api/call/start' }, res, () => assert.fail('must reject'));
   assert.equal(res.statusCode, 401);
+  res = response();
+  await createUiApiPolicy({ loadAuth: async () => ({ enabled: true }), readSessionToken: () => 'good', validateSession: async (token) => token === 'good' })({ path: '/api/call/start' }, res, () => {});
+  assert.equal(res.statusCode, 200);
+  res = response();
+  await createUiApiPolicy({ loadAuth: async () => ({ enabled: false }), readSessionToken: () => 'embedded', allowUnconfiguredSession: true, validateSession: async () => true })({ path: '/api/call/start' }, res, () => {});
+  assert.equal(res.statusCode, 200);
+  res = response();
+  await createUiApiPolicy({ loadAuth: async () => ({ enabled: false }), readSessionToken: () => 'embedded', validateSession: async () => true })({ path: '/api/call/start' }, res, () => assert.fail('must reject outside relay-only mode'));
+  assert.equal(res.statusCode, 403);
 });
 
 test('loopback detection ignores spoofable headers', () => {

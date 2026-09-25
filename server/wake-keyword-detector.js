@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import crypto from 'node:crypto';
 import readline from 'node:readline';
 import { resolvePython } from './platform-capabilities.js';
+import { PROJECT_ROOT } from './runtime-paths.js';
 
-const ROOT = process.cwd();
+const ROOT = PROJECT_ROOT;
 let worker = null;
 let rl = null;
 const pending = [];
@@ -87,6 +88,15 @@ export async function warmWakeKeywordDetector() {
 
 export function getWakeKeywordDetectorStatus() {
   return { available: !!worker && !worker.killed, reason: unavailableReason };
+}
+
+export function stopWakeKeywordDetector() {
+  if (worker && !worker.killed) worker.kill();
+  worker = null;
+  rl?.close();
+  rl = null;
+  while (pending.length) pending.shift().reject(new Error('Wake keyword detector stopped'));
+  unavailableReason = 'Wake keyword detector stopped';
 }
 
 export async function detectWakeKeyword(audioBuffer, filename = 'wake.webm') {

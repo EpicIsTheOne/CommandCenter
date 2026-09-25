@@ -14,7 +14,12 @@ function buildDemoEvents() {
   return events.length ? events : [{ type: 'agent:idle', data: { agent: 'main', status: 'Standing by' } }];
 }
 
-const DEMO_EVENTS = buildDemoEvents();
+let demoEvents = null;
+
+function getDemoEvents() {
+  if (!demoEvents) demoEvents = buildDemoEvents();
+  return demoEvents;
+}
 
 let rpcId = 0;
 
@@ -30,13 +35,18 @@ export default class OpenClawBridge extends EventEmitter {
     this.connected = false;
     this.connectAttempts = 0;
     this.maxConnectAttempts = 3;
-    this.mode = config.demoMode ? 'demo' : 'connecting';
+    this.mode = config.relayOnlyMode ? 'relay-only' : (config.demoMode ? 'demo' : 'connecting');
     this.lastError = '';
     this.lastAuthError = '';
     this.lastFallbackReason = '';
   }
 
   start() {
+    if (config.relayOnlyMode) {
+      console.log('[bridge] Starting in RELAY-ONLY mode');
+      this.startRelayOnly();
+      return;
+    }
     if (config.demoMode) {
       console.log('[bridge] Starting in DEMO mode');
       this.startDemo();
@@ -51,7 +61,16 @@ export default class OpenClawBridge extends EventEmitter {
     if (this.ws) this.ws.close();
   }
 
-  // --- Demo Mode ---
+  // --- Bridge Modes ---
+
+  startRelayOnly() {
+    this.connected = false;
+    this.mode = 'relay-only';
+    this.lastError = '';
+    this.lastAuthError = '';
+    this.lastFallbackReason = '';
+    this.emit('connected', { mode: 'relay-only', relayOnly: true });
+  }
 
   startDemo() {
     this.connected = true;
@@ -66,7 +85,8 @@ export default class OpenClawBridge extends EventEmitter {
     const delay = 1500 + Math.random() * 3000;
     this.demoTimer = setTimeout(() => {
       if (this.mode !== 'demo') return;
-      const event = DEMO_EVENTS[this.demoIndex % DEMO_EVENTS.length];
+      const events = getDemoEvents();
+      const event = events[this.demoIndex % events.length];
       this.demoIndex++;
       this.emit('event', event);
       this.scheduleDemoEvent();
@@ -74,7 +94,7 @@ export default class OpenClawBridge extends EventEmitter {
   }
 
   scheduleRecoveryReconnect() {
-    if (config.demoMode) return;
+    if (config.demoMode || config.relayOnlyMode) return;
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = setTimeout(() => {
       if (this.mode !== 'demo' || !this.lastFallbackReason) return;
@@ -312,8 +332,9 @@ export default class OpenClawBridge extends EventEmitter {
 
   getStatus() {
     const configuredDemo = !!config.demoMode;
-    const requestedMode = configuredDemo ? 'demo' : 'live';
-    const actualMode = this.mode || (configuredDemo ? 'demo' : 'disconnected');
+    const relayOnlyMode = !!config.relayOnlyMode;
+    const requestedMode = relayOnlyMode ? 'relay-only' : (configuredDemo ? 'demo' : 'live');
+    const actualMode = this.mode || (relayOnlyMode ? 'relay-only' : (configuredDemo ? 'demo' : 'disconnected'));
     return {
       connected: this.connected,
       mode: actualMode,
@@ -325,6 +346,7 @@ export default class OpenClawBridge extends EventEmitter {
       lastAuthError: this.lastAuthError,
       lastFallbackReason: this.lastFallbackReason,
       configuredDemo,
+      relayOnlyMode,
     };
   }
 }

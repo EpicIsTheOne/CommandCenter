@@ -7,7 +7,7 @@ This is the practical install flow for getting CommandCenter running without mys
 ## 1) Prerequisites
 
 Verify:
-- **Node.js 18+** — `node --version`
+- **Node.js 22+** — `node --version`
 - **npm** — `npm --version`
 - **OpenClaw CLI** — `openclaw --version` (needed for live OpenClaw mode)
 - **Hermes CLI** — `hermes --help` (only needed if you want Hermes integration/bridge enabled)
@@ -144,7 +144,7 @@ You can run:
 CommandCenter now includes a built-in updater in **Settings → Updates**.
 
 What it gives you:
-- **Auto update toggle** enabled by default
+- **Auto update toggle** disabled by default
 - manual **Update Now** button
 - confirmation modal before the update actually applies
 - pending commit list
@@ -156,6 +156,7 @@ Important behavior:
 - updates are blocked if the local repo has uncommitted changes
 - applying an update pulls from the repo, installs dependencies if needed, and restarts CommandCenter
 - updater preferences/state are stored locally in `data/update-settings.json` and `data/update-state.json`
+- update application is Linux-only; other platforms can still inspect status and receive a clear unsupported message
 
 If you are preparing an instance for someone else, you usually do **not** need to preconfigure anything in `.env` for updates.
 Just make sure the repo was cloned normally and the host can reach GitHub.

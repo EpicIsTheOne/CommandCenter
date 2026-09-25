@@ -4,8 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import crypto from 'node:crypto';
 import { loadVoiceSettings } from './settings.js';
+import { resolvePython } from './platform-capabilities.js';
+import { PROJECT_ROOT } from './runtime-paths.js';
 
-const ROOT = process.cwd();
+const ROOT = PROJECT_ROOT;
 const PYTHONPATH = join(ROOT, '.pydeps');
 const WHISPER_CACHE_DIR = join(ROOT, '.cache', 'whisper');
 const ELEVENLABS_BASE_URL = 'https://api.elevenlabs.io';
@@ -33,7 +35,9 @@ async function transcribeLocal(audioBuffer, filename = 'audio.webm') {
   try {
     await writeFile(inFile, audioBuffer);
     await run('ffmpeg', ['-y', '-i', inFile, '-ac', '1', '-ar', '16000', wavFile], { maxBuffer: 20 * 1024 * 1024 });
-    const { stdout } = await run('python3', [join(ROOT, 'server', 'transcribe_local.py'), wavFile], {
+    const python = await resolvePython();
+    if (!python) throw new Error('Local transcription requires Python 3. Install Python or set PYTHON_BIN.');
+    const { stdout } = await run(python.command, [...python.args, join(ROOT, 'server', 'transcribe_local.py'), wavFile], {
       env: {
         ...process.env,
         PYTHONPATH,

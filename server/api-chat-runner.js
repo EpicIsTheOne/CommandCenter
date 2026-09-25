@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { getHermesAgent, loadAgentRoster } from './agents.js';
 import { buildAgentCommContext, listScopedAgentComms, markAgentCommsRead } from './agent-comms.js';
 import relayAgentSource from './relay-agent-source.js';
+import { USER_HOME } from './runtime-paths.js';
 
 const MAX_CONTEXT_MESSAGES = 40;
 
@@ -170,7 +171,7 @@ export function runApiChatTurn({ session, latestMessage, attachmentContext = '',
 
     execFile(useHermes ? hermesBin : openclawBin, args, {
       timeout: 120000,
-      env: { ...process.env, PATH: process.env.HOME + '/.local/bin:' + process.env.PATH },
+      env: { ...process.env, PATH: `${USER_HOME}/.local/bin:${process.env.PATH || ''}` },
       maxBuffer: 1024 * 1024 * 8,
     }, (err, stdout, stderr) => {
       if (err) return reject(new Error(String(stderr || err.message || 'Agent run failed').trim()));

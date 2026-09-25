@@ -1,8 +1,9 @@
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { PROJECT_ROOT } from './runtime-paths.js';
 
-const ROOT = process.cwd();
+const ROOT = PROJECT_ROOT;
 let cachedPython;
 
 export function pythonCandidates({ platform = process.platform, env = process.env, root = ROOT } = {}) {
@@ -37,7 +38,7 @@ export async function resolvePython(options = {}) {
 
 export function updaterCapability({ platform = process.platform } = {}) {
   return platform === 'linux'
-    ? { supported: true, platform, reason: '' }
+    ? { supported: true, platform, reason: 'Update application is supported only on Linux; automatic updates remain opt-in.' }
     : { supported: false, platform, reason: 'Update application is supported only on Linux; checking for updates remains available.' };
 }
 

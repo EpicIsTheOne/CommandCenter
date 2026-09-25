@@ -1,9 +1,7 @@
-import { readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readJsonStore, writeJsonStore } from './json-store.js';
+import { dataPath } from './runtime-paths.js';
 
-const ROOT = process.cwd();
-const SETTINGS_FILE = join(ROOT, 'data', 'layout-settings.json');
+const SETTINGS_FILE = dataPath('layout-settings.json');
 export const ALLOWED_WIDGET_IDS = ['zone-mascot', 'zone-terminal', 'zone-office'];
 
 const DEFAULTS = {
@@ -65,15 +63,12 @@ function normalize(input = {}) {
 
 export async function loadLayoutSettings() {
   try {
-    if (!existsSync(SETTINGS_FILE)) return { ...DEFAULTS };
-    return { ...DEFAULTS, ...normalize(JSON.parse(await readFile(SETTINGS_FILE, 'utf8'))) };
-  } catch {
-    return { ...DEFAULTS };
-  }
+    return { ...DEFAULTS, ...normalize(await readJsonStore(SETTINGS_FILE, { defaultValue: DEFAULTS })) };
+  } catch { return { ...DEFAULTS }; }
 }
 
 export async function saveLayoutSettings(input) {
   const settings = normalize(input);
-  await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+  await writeJsonStore(SETTINGS_FILE, settings);
   return settings;
 }

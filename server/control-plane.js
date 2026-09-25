@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { readJsonStore, writeJsonStore } from './json-store.js';
+import { DATA_DIR } from './runtime-paths.js';
 
 export const CONTROL_TASK_STATES = Object.freeze([
   'created',
@@ -283,7 +284,7 @@ export function projectLegacyTask(task = {}) {
 }
 
 export class ControlPlane extends EventEmitter {
-  constructor({ dataDir = process.env.COMMANDCENTER_CONTROL_DATA_DIR || process.env.COMMANDCENTER_DATA_DIR || join(process.cwd(), 'data'), legacyFile = '' } = {}) {
+  constructor({ dataDir = process.env.COMMANDCENTER_CONTROL_DATA_DIR || DATA_DIR, legacyFile = '' } = {}) {
     super();
     this.dataDir = dataDir;
     this.snapshotFile = join(dataDir, 'control-plane.v1.json');

@@ -2,10 +2,12 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { updaterCapability } from './platform-capabilities.js';
+import { PROJECT_ROOT } from './runtime-paths.js';
 import { loadUpdateSettings, loadUpdateState, saveUpdateState } from './update-settings.js';
 
 const execFileAsync = promisify(execFile);
-const REPO_DIR = process.cwd();
+const REPO_DIR = PROJECT_ROOT;
 const TMP_LOG = join(REPO_DIR, 'tmp-commandcenter.log');
 
 function toIso(ts = 0) {
@@ -200,13 +202,36 @@ if ! ${installStep} >> ${JSON.stringify(TMP_LOG)} 2>&1; then
   ${installStep} >> ${JSON.stringify(TMP_LOG)} 2>&1 || true
   exit 1
 fi
-sleep 1
-kill ${Number(currentPid) || process.pid} >/dev/null 2>&1 || true
-nohup npm start >> ${JSON.stringify(TMP_LOG)} 2>&1 &
+  echo "[update] stopping previous process" >> ${JSON.stringify(TMP_LOG)}
+  kill ${Number(currentPid) || process.pid} >/dev/null 2>&1 || true
+  nohup npm start >> ${JSON.stringify(TMP_LOG)} 2>&1 &
+  health_url="http://127.0.0.1:${process.env.PORT || '3000'}${process.env.BASE_PATH || ''}/api/auth/status"
+  for attempt in $(seq 1 60); do
+    if curl -fsS --max-time 2 "$health_url" >> ${JSON.stringify(TMP_LOG)} 2>&1; then
+      echo "[update] restart health check passed" >> ${JSON.stringify(TMP_LOG)}
+      exit 0
+    fi
+    sleep 1
+  done
+  echo "[update] restart health check failed; rolling back" >> ${JSON.stringify(TMP_LOG)}
+  git reset --hard ${JSON.stringify(previousSha || '')} >> ${JSON.stringify(TMP_LOG)} 2>&1
+  ${installStep} >> ${JSON.stringify(TMP_LOG)} 2>&1 || true
+  nohup npm start >> ${JSON.stringify(TMP_LOG)} 2>&1 &
 `;
 }
 
 export async function applyUpdate({ requestedBy = 'manual' } = {}) {
+  const capability = updaterCapability();
+  if (!capability.supported) {
+    return {
+      ok: false,
+      applied: false,
+      skipped: true,
+      reason: 'unsupported-platform',
+      platform: capability.platform,
+      message: capability.reason,
+    };
+  }
   const status = await getUpdateSummary({ refresh: true });
   const priorState = await loadUpdateState();
   const pendingCommits = Array.isArray(status.summary?.commits) ? status.summary.commits : [];
@@ -307,11 +332,21 @@ export async function finalizePostRestartUpdateState() {
 }
 
 export async function runAutoUpdateCheck() {
+  const capability = updaterCapability();
+  if (!capability.supported) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: 'unsupported-platform',
+      platform: capability.platform,
+      message: capability.reason,
+    };
+  }
   if (autoUpdateRunning) return { ok: false, skipped: true, reason: 'already-running' };
   autoUpdateRunning = true;
   try {
     const settings = await loadUpdateSettings();
-    if (settings.autoUpdateEnabled === false) return { ok: true, skipped: true, reason: 'disabled' };
+  if (settings.autoUpdateEnabled !== true) return { ok: true, skipped: true, reason: 'disabled' };
     const summary = await getUpdateSummary({ refresh: true });
     if (!summary.summary.pending) return { ok: true, skipped: true, reason: 'up-to-date', summary };
     if (summary.summary.dirty) {
@@ -336,6 +371,8 @@ export async function runAutoUpdateCheck() {
 
 export async function startAutoUpdateScheduler() {
   if (autoUpdateTimer) clearInterval(autoUpdateTimer);
+  const capability = updaterCapability();
+  if (!capability.supported) return { intervalMs: 0, settings: await loadUpdateSettings(), capability };
   const settings = await loadUpdateSettings();
   const intervalMs = Math.max(60 * 60 * 1000, Number(settings.checkIntervalHours || 6) * 60 * 60 * 1000);
   setTimeout(() => { runAutoUpdateCheck().catch((err) => console.error('[update] initial auto-update check failed:', err.message)); }, 90 * 1000);
@@ -352,6 +389,7 @@ export async function getUpdatePayload({ refresh = true } = {}) {
   return {
     ok: true,
     settings,
+    capability: updaterCapability(),
     state: await loadUpdateState(),
     repo: summary.repo,
     update: summary.summary,

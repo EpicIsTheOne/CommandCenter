@@ -1,11 +1,15 @@
 import { readFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import relayAgentSource from './relay-agent-source.js';
 import { resolveHermesBin } from './hermes-bin.js';
 import { parseProfilesTable, parseProfileShow } from './harnesses.js';
+import { USER_HOME } from './runtime-paths.js';
 
 const DEFAULT_COLORS = ['#FFD700', '#00DDFF', '#AA66FF', '#FF7A59', '#7CFF6B', '#FF66C4', '#66FFD9', '#FFA726'];
 const VOICES = ['onyx', 'echo', 'fable', 'nova', 'shimmer', 'alloy'];
+const execFileAsync = promisify(execFile);
 
 function titleize(s = '') {
   return s
@@ -50,7 +54,7 @@ function normalizeAgent(agent, index, source = 'openclaw') {
 }
 
 export function detectOpenClawAgents() {
-  const configPath = process.env.HOME + '/.openclaw/openclaw.json';
+  const configPath = join(USER_HOME, '.openclaw', 'openclaw.json');
   try {
     const raw = readFileSync(configPath, 'utf8');
     const json = JSON.parse(raw);
@@ -78,22 +82,17 @@ export function detectOpenClawAgents() {
   }
 }
 
-function showHermesProfile(profile) {
+async function showHermesProfile(profile, bin = '') {
+  if (!bin) return { path: '', model: '', gateway: '' };
   try {
-    const bin = process.env.HERMES_BIN || resolveHermesBin();
-    if (!bin) return { path: '', model: '', gateway: '' };
-    const stdout = execFileSync(bin, ['profile', 'show', profile], {
+    const { stdout } = await execFileAsync(bin, ['profile', 'show', profile], {
       encoding: 'utf8',
       timeout: 15000,
       windowsHide: true,
       maxBuffer: 1024 * 1024 * 2,
     });
     const details = parseProfileShow(stdout);
-    return {
-      path: details.path || '',
-      model: details.model || '',
-      gateway: details.gateway || '',
-    };
+    return { path: details.path || '', model: details.model || '', gateway: details.gateway || '' };
   } catch {
     return { path: '', model: '', gateway: '' };
   }
@@ -151,18 +150,18 @@ function buildHermesAgent(record, index) {
   };
 }
 
-export function detectHermesAgents() {
+export async function detectHermesAgents() {
   try {
     const bin = process.env.HERMES_BIN || resolveHermesBin();
     if (!bin) throw new Error('Hermes CLI not found');
-    const stdout = execFileSync(bin, ['profile', 'list'], {
+    const { stdout } = await execFileAsync(bin, ['profile', 'list'], {
       encoding: 'utf8',
       timeout: 15000,
       windowsHide: true,
       maxBuffer: 1024 * 1024 * 4,
     });
     const profiles = parseProfilesTable(stdout);
-    const agents = profiles.map((record, index) => buildHermesAgent({ ...record, details: showHermesProfile(record.profile) }, index));
+    const agents = await Promise.all(profiles.map(async (record, index) => buildHermesAgent({ ...record, details: await showHermesProfile(record.profile, bin) }, index)));
     return {
       source: 'hermes',
       label: 'Hermes',
@@ -198,9 +197,18 @@ export function detectRelayAgents() {
   };
 }
 
-export function detectAgentSources() {
+export async function detectAgentSources({ includeHermes = envFlag('HERMES_BRIDGE_ENABLED', false) } = {}) {
   const openclaw = detectOpenClawAgents();
-  const hermes = detectHermesAgents();
+  const hermes = includeHermes
+    ? await detectHermesAgents()
+    : {
+      source: 'hermes',
+      label: 'Hermes',
+      enabled: false,
+      available: false,
+      agents: [],
+      error: 'Hermes bridge is disabled.',
+    };
   const relay = detectRelayAgents();
   return {
     openclaw,
@@ -218,21 +226,48 @@ export function detectAgentSources() {
   };
 }
 
-let rosterCache = { at: 0, value: null };
+let rosterCache = { at: 0, value: null, promise: null };
 const ROSTER_CACHE_MS = 20000;
+const FALLBACK_AGENT = { id: 'main', label: 'Main', name: 'Main', color: DEFAULT_COLORS[0], voice: 'onyx', isBoss: true, aliases: ['main', 'Main'], source: 'fallback', bridge: 'fallback' };
+let refreshScheduled = false;
 
 export function invalidateRosterCache() {
-  rosterCache = { at: 0, value: null };
+  rosterCache = { at: 0, value: null, promise: null };
 }
 
 export function loadAgentRoster() {
-  // Detection shells out to CLIs (Hermes/OpenClaw) which costs seconds;
-  // cache briefly so request handlers stay responsive.
   const now = Date.now();
   if (rosterCache.value && now - rosterCache.at < ROSTER_CACHE_MS) {
     return structuredClone(rosterCache.value);
   }
-  const sources = detectAgentSources();
+  scheduleAgentRosterRefresh();
+  return structuredClone(rosterCache.value || fallbackRoster());
+}
+
+function scheduleAgentRosterRefresh() {
+  if (rosterCache.promise || refreshScheduled) return;
+  refreshScheduled = true;
+  setImmediate(() => {
+    refreshScheduled = false;
+    void refreshAgentRoster().catch(() => {});
+  });
+}
+
+function fallbackRoster() {
+  return {
+    agents: [{ ...FALLBACK_AGENT }],
+    primaryAgentId: 'main',
+    sources: {
+      openclaw: { source: 'openclaw', label: 'OpenClaw', enabled: false, available: false, agents: [], error: 'Agent discovery is still running.' },
+      hermes: { source: 'hermes', label: 'Hermes', enabled: false, available: false, agents: [], error: 'Agent discovery is still running.' },
+      relay: { source: 'relay', label: 'Relay', enabled: false, available: false, connected: false, agents: [], error: 'Agent discovery is still running.' },
+      summary: { hasOpenClaw: false, hasHermes: false, hasRelay: false, openclawAvailable: false, hermesAvailable: false, relayAvailable: false, relayConnected: false },
+    },
+    error: 'Agent discovery is still running.',
+  };
+}
+
+function buildRoster(sources) {
   const openclawAgents = sources.openclaw.enabled ? sources.openclaw.agents : [];
   const hermesAgents = sources.hermes.enabled ? sources.hermes.agents : [];
   const relayAgents = sources.relay.enabled ? sources.relay.agents : [];
@@ -246,9 +281,7 @@ export function loadAgentRoster() {
   let result;
   if (!agents.length) {
     result = {
-      agents: [
-        { id: 'main', label: 'Main', name: 'Main', color: DEFAULT_COLORS[0], voice: 'onyx', isBoss: true, aliases: ['main', 'Main'], source: 'fallback', bridge: 'fallback' },
-      ],
+      agents: [{ ...FALLBACK_AGENT }],
       primaryAgentId: 'main',
       sources,
       error: 'No OpenClaw or Hermes agents are currently enabled.',
@@ -257,8 +290,21 @@ export function loadAgentRoster() {
     const primaryAgentId = agents.find((a) => a.id === 'orchestrator')?.id || agents.find((a) => a.isBoss)?.id || agents[0]?.id || 'main';
     result = { agents, primaryAgentId, sources };
   }
-  rosterCache = { at: now, value: result };
-  return structuredClone(result);
+  return result;
+}
+
+export async function refreshAgentRoster() {
+  if (rosterCache.promise) return rosterCache.promise;
+  rosterCache.promise = detectAgentSources().then((sources) => {
+    const value = buildRoster(sources);
+    rosterCache = { at: Date.now(), value, promise: null };
+    return structuredClone(value);
+  }).catch(() => {
+    const value = fallbackRoster();
+    rosterCache = { at: Date.now(), value, promise: null };
+    return structuredClone(value);
+  });
+  return rosterCache.promise;
 }
 
 export function searchAgents(query = '', roster = loadAgentRoster(), limit = 10) {

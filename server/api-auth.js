@@ -1,4 +1,5 @@
 import config from './config.js';
+import { timingSafeEqual } from 'node:crypto';
 
 function normalizeAddress(value = '') {
   return String(value || '').trim();
@@ -37,7 +38,9 @@ export function requireApiAuth(req, res, next) {
 
   const auth = String(req.headers.authorization || '').trim();
   const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-  if (!token || token !== configured) {
+  const expected = Buffer.from(configured);
+  const supplied = Buffer.from(token);
+  if (!token || expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) {
     return res.status(401).json({ ok: false, error: 'Unauthorized', code: 'UNAUTHORIZED' });
   }
   res.setHeader('X-CommandCenter-Auth-Mode', 'bearer');

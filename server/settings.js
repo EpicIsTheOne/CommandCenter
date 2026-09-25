@@ -1,10 +1,11 @@
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { readJsonStore, writeJsonStore } from './json-store.js';
+import { dataPath } from './runtime-paths.js';
 
-const ROOT = process.cwd();
-const DATA_DIR = join(ROOT, 'data');
-const SETTINGS_FILE = join(DATA_DIR, 'voice-settings.json');
+const DATA_DIR = dataPath();
+const SETTINGS_FILE = dataPath('voice-settings.json');
 
 const DEFAULT_SETTINGS = {
   provider: 'fish',
@@ -112,12 +113,8 @@ function normalize(input = {}) {
 
 export async function loadVoiceSettings() {
   try {
-    if (!existsSync(SETTINGS_FILE)) return { ...DEFAULT_SETTINGS };
-    const raw = await readFile(SETTINGS_FILE, 'utf8');
-    return { ...DEFAULT_SETTINGS, ...normalize(JSON.parse(raw)) };
-  } catch {
-    return { ...DEFAULT_SETTINGS };
-  }
+    return { ...DEFAULT_SETTINGS, ...normalize(await readJsonStore(SETTINGS_FILE, { defaultValue: DEFAULT_SETTINGS })) };
+  } catch { return { ...DEFAULT_SETTINGS }; }
 }
 
 export async function saveVoiceSettings(input) {
@@ -127,7 +124,7 @@ export async function saveVoiceSettings(input) {
     const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
     await copyFile(SETTINGS_FILE, join(DATA_DIR, `voice-settings.backup-${stamp}.json`)).catch(() => {});
   }
-  await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+  await writeJsonStore(SETTINGS_FILE, settings);
   return settings;
 }
 

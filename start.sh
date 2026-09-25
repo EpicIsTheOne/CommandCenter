@@ -33,7 +33,7 @@ SERVER_PID=$!
 # Wait for server to be ready
 echo "[start] Waiting for server..."
 for i in $(seq 1 20); do
-  if curl -s http://localhost:3000/api/status > /dev/null 2>&1; then
+  if curl -fsS http://localhost:3000/api/auth/status > /dev/null 2>&1; then
     echo "[start] Server is ready!"
     break
   fi

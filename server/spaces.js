@@ -4,6 +4,7 @@
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { readJsonStore, writeJsonStore } from './json-store.js';
+import { DATA_DIR } from './runtime-paths.js';
 
 export const SPACES_SCHEMA_VERSION = 1;
 
@@ -123,7 +124,7 @@ function safeIso(value, fallback = '') {
 }
 
 export class SpacesStore {
-  constructor({ dataDir = process.env.COMMANDCENTER_CONTROL_DATA_DIR || process.env.COMMANDCENTER_DATA_DIR || join(process.cwd(), 'data'), fileName = 'spaces.v1.json' } = {}) {
+  constructor({ dataDir = process.env.COMMANDCENTER_CONTROL_DATA_DIR || DATA_DIR, fileName = 'spaces.v1.json' } = {}) {
     this.dataDir = dataDir;
     this.filePath = join(this.dataDir, fileName);
     this._cache = null;

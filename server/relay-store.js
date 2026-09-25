@@ -1,12 +1,12 @@
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
+import { DATA_DIR } from './runtime-paths.js';
 import { readJsonStore, updateJsonStore } from './json-store.js';
 import { RELAY_OWNER_ID, redactRelayAudit } from './relay-protocol.js';
 
-const ROOT = String(process.env.COMMANDCENTER_DATA_DIR || '').trim() || join(process.cwd(), 'data');
-const PAIRINGS_FILE = join(ROOT, 'relay-pairings.json');
-const DEVICES_FILE = join(ROOT, 'relay-devices.json');
-const AUDIT_FILE = join(ROOT, 'relay-audit.json');
+const PAIRINGS_FILE = join(DATA_DIR, 'relay-pairings.json');
+const DEVICES_FILE = join(DATA_DIR, 'relay-devices.json');
+const AUDIT_FILE = join(DATA_DIR, 'relay-audit.json');
 export const PAIRING_TTL_MS = 10 * 60 * 1000;
 export const CREDENTIAL_TTL_MS = 365 * 24 * 60 * 60 * 1000;
 const AUDIT_LIMIT = 500;

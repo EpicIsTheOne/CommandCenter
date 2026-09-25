@@ -5,7 +5,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import { WebSocketServer } from 'ws';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, extname, basename } from 'node:path';
+import { dirname, join, extname, basename, resolve, relative, isAbsolute, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFile, exec } from 'node:child_process';
 import os from 'node:os';
@@ -13,7 +13,7 @@ import multer from 'multer';
 import config from './config.js';
 import OpenClawBridge from './openclaw-bridge.js';
 import { transcribe, speak, streamSpeak, streamFishAudioText, listElevenLabsVoices, searchFishAudioVoices, previewFishAudioVoice, resolveAgentVoice } from './voice.js';
-import { loadAgentRoster, searchAgents, detectAgentSources, invalidateRosterCache } from './agents.js';
+import { loadAgentRoster, searchAgents, detectAgentSources, invalidateRosterCache, refreshAgentRoster } from './agents.js';
 import { loadVoiceSettings, saveVoiceSettings, maskApiKey, maskSessionCookie } from './settings.js';
 import { deleteImportedCompanionPackage, ensureCompanionRegistry, importCodexPetPackageFromDir, loadCompanionRegistry, loadCompanionSettings, resolveAgentVisual, saveCompanionSettings, upsertStoredCompanionItem } from './companions.js';
 import { ensureMusicStorage, getMusicDir, loadMusicSettings, saveMusicSettings } from './music-settings.js';
@@ -23,8 +23,8 @@ import { ensureBrandingStorage, getBrandingDir, loadBrandingSettings, saveBrandi
 import { ALLOWED_WIDGET_IDS, loadLayoutSettings, saveLayoutSettings } from './layout-settings.js';
 import { loadWorkspaceRooms, saveWorkspaceRooms } from './workspace-rooms.js';
 import { loadWakeSettings, saveWakeSettings, maskAccessKey } from './wake-settings.js';
-import { transcribeWakeAudio, warmWakeTranscriber } from './wake-transcriber.js';
-import { detectWakeKeyword, warmWakeKeywordDetector } from './wake-keyword-detector.js';
+import { transcribeWakeAudio, warmWakeTranscriber, stopWakeTranscriber } from './wake-transcriber.js';
+import { detectWakeKeyword, warmWakeKeywordDetector, stopWakeKeywordDetector } from './wake-keyword-detector.js';
 import { startSessionMonitor } from './session-monitor.js';
 import { startHermesSessionMonitor } from './hermes-session-monitor.js';
 import { FAIRY_CALL_MODE_OPTIONS, GEMINI_LIVE_VOICE_OPTIONS, loadGeminiRuntimeConfig, loadGeminiSettings, saveGeminiSettings, normalizeCallMode } from './gemini-config.js';
@@ -43,19 +43,23 @@ import { requireApiAuth } from './api-auth.js';
 import { runApiChatTurn } from './api-chat-runner.js';
 import { runRoleplayChatTurn } from './roleplay-chat-runner.js';
 import { appendApiSessionMessage, createApiSession, deleteApiSession, getApiSession, getApiSessionMeta, listApiSessions, saveApiSession, searchApiSessions } from './api-session-store.js';
-import { loadUiAuthConfig, setUiPassword, checkPassword, createSessionToken, createSession, isValidSession, revokeSession } from './ui-auth.js';
+import { loadUiAuthConfig, setUiPassword, checkPassword, createSession, isValidSession, revokeSession } from './ui-auth.js';
 import { loadUpdateSettings, saveUpdateSettings } from './update-settings.js';
 import { loadDirectChatSettings, publicDirectChatSettings, saveDirectChatSettings } from './direct-chat-settings.js';
 import relayAgentSource from './relay-agent-source.js';
 import { applyUpdate, finalizePostRestartUpdateState, getUpdatePayload, startAutoUpdateScheduler } from './updater.js';
 import { ALLOWED_SCOPE_TYPES, ALLOWED_TYPES, buildAgentCommPromptBlock, createAgentComm, getAgentComm, listAgentComms, listAgentCommThread, markAgentCommsRead } from './agent-comms.js';
 import { appendRoleplayGroupMessages, createRoleplayGroup, deleteRoleplayGroup, getRoleplayGroup, listRoleplayGroups, saveRoleplayGroup } from './roleplay-group-store.js';
-import { authorizeWebSocketRequest } from './request-security.js';
+import { authorizeWebSocketRequest, createRateLimiter, remoteSetupAllowed, securityHeaders, validBearer, validReikaEmbedToken } from './request-security.js';
+import { createUiApiPolicy } from './route-policy.js';
 import { getPlatformCapabilities } from './platform-capabilities.js';
 import { RelayManager } from './relay-manager.js';
 import { RELAY_OWNER_ID } from './relay-protocol.js';
 import { createRelayDeviceUpgrade } from './relay-ws.js';
 import { createPairing, listDevices, revokeDevice } from './relay-store.js';
+import { dataPath, USER_HOME } from './runtime-paths.js';
+import { readJsonStore, updateJsonStore, writeJsonStore } from './json-store.js';
+import { enforceUploadBudget } from './upload-policy.js';
 
 function apiAttachmentPayload(files = []) {
   return files.map((file) => ({
@@ -64,18 +68,25 @@ function apiAttachmentPayload(files = []) {
     name: String(file.name || file.originalName || 'file'),
     originalName: String(file.originalName || file.name || 'file'),
     mimeType: String(file.mimeType || 'application/octet-stream'),
-    sourceUrl: String(file.sourceUrl || ''),
-    downloadUrl: String(file.downloadUrl || ''),
-    path: String(file.path || ''),
+    downloadUrl: file.kind === 'link' ? '' : `${basePath}/api/chat/files/${String(file.id || '')}/download`,
     notes: String(file.notes || ''),
   }));
 }
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const app = express();
-const getRoster = () => loadAgentRoster();
-const roster = getRoster();
 const basePath = config.basePath || '';
+const app = express();
+app.disable('x-powered-by');
+app.use(securityHeaders);
+app.use(createUiApiPolicy({
+  basePath,
+  loadAuth: loadUiAuthConfig,
+  readSessionToken: (req) => parseCookies(req).cc_auth,
+  validateSession: isValidSession,
+  allowUnconfiguredSession: config.relayOnlyMode,
+}));
+const getRoster = () => loadAgentRoster();
+let roster = getRoster();
 const relayManager = new RelayManager();
 relayAgentSource.attachLocalManager(relayManager);
 
@@ -292,12 +303,13 @@ if (useHttps) {
   server = createHttpServer(app);
   if (config.localApiEnabled) localApiServer = createHttpServer(app);
 }
-const VISUAL_UPLOAD_FILE_LIMIT_BYTES = 128 * 1024 * 1024;
+const VISUAL_UPLOAD_FILE_LIMIT_BYTES = config.maxUploadBytes;
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: VISUAL_UPLOAD_FILE_LIMIT_BYTES, files: 600, fields: 40 },
+  limits: { fileSize: VISUAL_UPLOAD_FILE_LIMIT_BYTES, files: 500, fields: 40, fieldNameSize: 200, fieldSize: 1024 * 1024 },
 });
-const chatLibraryDir = join(__dirname, '..', 'data', 'chat-library');
+const authRateLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 8 });
+const chatLibraryDir = dataPath('chat-library');
 const chatFilesDir = join(chatLibraryDir, 'files');
 const chatManifestPath = join(chatLibraryDir, 'manifest.json');
 const chatHistoryPath = join(chatLibraryDir, 'history.json');
@@ -390,46 +402,28 @@ async function listWorkspaceBackgrounds() {
 
 async function ensureChatLibrary() {
   await fsp.mkdir(chatFilesDir, { recursive: true });
-  if (!existsSync(chatManifestPath)) {
-    await fsp.writeFile(chatManifestPath, JSON.stringify({ items: [] }, null, 2));
-  }
-  if (!existsSync(chatHistoryPath)) {
-    await fsp.writeFile(chatHistoryPath, JSON.stringify({ agents: {} }, null, 2));
-  }
 }
 
 async function readChatManifest() {
   await ensureChatLibrary();
-  try {
-    const raw = await fsp.readFile(chatManifestPath, 'utf8');
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed.items) ? parsed : { items: [] };
-  } catch {
-    return { items: [] };
-  }
+  const parsed = await readJsonStore(chatManifestPath, { defaultValue: { items: [] } });
+  return Array.isArray(parsed.items) ? parsed : { items: [] };
 }
 
 async function writeChatManifest(manifest) {
   await ensureChatLibrary();
-  await fsp.writeFile(chatManifestPath, JSON.stringify({ items: manifest.items || [] }, null, 2));
+  await writeJsonStore(chatManifestPath, { items: manifest.items || [] });
 }
 
 async function readChatHistoryStore() {
   await ensureChatLibrary();
-  try {
-    const raw = await fsp.readFile(chatHistoryPath, 'utf8');
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' && parsed.agents && typeof parsed.agents === 'object'
-      ? parsed
-      : { agents: {} };
-  } catch {
-    return { agents: {} };
-  }
+  const parsed = await readJsonStore(chatHistoryPath, { defaultValue: { agents: {} } });
+  return parsed && typeof parsed === 'object' && parsed.agents && typeof parsed.agents === 'object' ? parsed : { agents: {} };
 }
 
 async function writeChatHistoryStore(store) {
   await ensureChatLibrary();
-  await fsp.writeFile(chatHistoryPath, JSON.stringify({ agents: store.agents || {} }, null, 2));
+  await writeJsonStore(chatHistoryPath, { agents: store.agents || {} });
 }
 
 function sanitizeChatMessage(message = {}) {
@@ -446,7 +440,7 @@ function sanitizeChatMessage(message = {}) {
           originalName: String(file.originalName || file.name || 'file'),
           mimeType: String(file.mimeType || 'application/octet-stream'),
           kind: file.kind === 'link' ? 'link' : 'file',
-          sourceUrl: String(file.sourceUrl || ''),
+          sourceUrl: publicExternalUrl(file.sourceUrl),
           downloadUrl: String(file.downloadUrl || ''),
         }))
       : [],
@@ -460,14 +454,14 @@ async function getChatHistory(agentId) {
 }
 
 async function appendChatHistory(agentId, message) {
-  const store = await readChatHistoryStore();
-  if (!Array.isArray(store.agents[agentId])) store.agents[agentId] = [];
-  store.agents[agentId].push(sanitizeChatMessage(message));
-  if (store.agents[agentId].length > MAX_CHAT_HISTORY_MESSAGES) {
-    store.agents[agentId] = store.agents[agentId].slice(-MAX_CHAT_HISTORY_MESSAGES);
-  }
-  await writeChatHistoryStore(store);
-  return store.agents[agentId];
+  const entry = sanitizeChatMessage(message);
+  const next = await updateJsonStore(chatHistoryPath, { defaultValue: { agents: {} } }, async (store) => {
+    const nextStore = { agents: store.agents && typeof store.agents === 'object' ? store.agents : {} };
+    const history = Array.isArray(nextStore.agents[agentId]) ? nextStore.agents[agentId] : [];
+    nextStore.agents[agentId] = [...history, entry].slice(-MAX_CHAT_HISTORY_MESSAGES);
+    return nextStore;
+  });
+  return next.agents[agentId];
 }
 
 function buildConversationContext(history = []) {
@@ -486,20 +480,52 @@ function buildConversationContext(history = []) {
 }
 
 function toChatFileRecord(item) {
+  const sourceUrl = publicExternalUrl(item.sourceUrl);
+  const id = String(item.id || '');
   return {
-    id: item.id,
+    id,
     kind: item.kind || 'file',
-    name: item.name,
-    originalName: item.originalName || item.name,
+    name: String(item.name || item.originalName || 'file'),
+    originalName: String(item.originalName || item.name || 'file'),
     mimeType: item.mimeType || 'application/octet-stream',
     size: item.size || 0,
     createdAt: item.createdAt,
-    sourceUrl: item.sourceUrl || '',
+    sourceUrl,
     notes: item.notes || '',
     ext: item.ext || '',
-    downloadUrl: item.kind === 'link' ? item.sourceUrl : `${basePath}/api/chat/files/${item.id}/download`,
-    path: item.path || '',
+    downloadUrl: `${basePath}/api/chat/files/${encodeURIComponent(id)}/download`,
   };
+}
+
+function normalizeExternalUrl(value = '') {
+  const raw = String(value || '').trim();
+  if (!raw || raw.length > 2048 || /[\u0000-\u001f\u007f]/.test(raw)) return '';
+  try {
+    const parsed = new URL(raw);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+function publicExternalUrl(value = '') {
+  const normalized = normalizeExternalUrl(value);
+  if (!normalized) return '';
+  const parsed = new URL(normalized);
+  parsed.search = '';
+  parsed.hash = '';
+  return parsed.toString();
+}
+
+function managedChatFilePath(item = {}) {
+  const candidate = String(item.path || '').trim();
+  if (!candidate) return '';
+  const root = resolve(chatFilesDir);
+  const resolved = resolve(candidate);
+  const relativePath = relative(root, resolved);
+  if (!relativePath || isAbsolute(relativePath) || relativePath === '..' || relativePath.startsWith(`..${sep}`) || relativePath.includes('\0')) return '';
+  return existsSync(resolved) ? resolved : '';
 }
 
 async function resolveChatFiles(ids = []) {
@@ -632,7 +658,7 @@ async function buildAttachmentBundle(files = []) {
   };
 }
 
-app.use(express.json());
+app.use(express.json({ limit: config.maxJsonBodyBytes }));
 
 function parseCookies(req) {
   const header = String(req.headers.cookie || '');
@@ -663,7 +689,7 @@ async function requireUiAuthPage(req, res, next) {
   const auth = await loadUiAuthConfig();
   if (!auth.enabled) return next();
   const token = parseCookies(req).cc_auth;
-  if (isValidSession(token)) return next();
+  if (await isValidSession(token)) return next();
   const wantsHtml = String(req.headers.accept || '').includes('text/html');
   if (wantsHtml) return res.redirect(`${basePath || '/'}?auth=required`);
   return res.status(401).json({ ok: false, error: 'Unauthorized' });
@@ -699,67 +725,88 @@ async function setEnvKeyInDotenv(key, value) {
 }
 
 app.get(`${basePath}/api/auth/status`, async (req, res) => {
-  const auth = await loadUiAuthConfig();
-  const token = parseCookies(req).cc_auth;
-  const authenticated = auth.enabled ? isValidSession(token) : true;
-  res.json({ ok: true, passwordSet: auth.enabled, authenticated });
+  try {
+    const auth = await loadUiAuthConfig();
+    const token = parseCookies(req).cc_auth;
+    const setupAllowed = remoteSetupAllowed(req, config.allowRemoteSetup);
+    const authenticated = await isValidSession(token);
+    res.json({ ok: true, passwordSet: auth.enabled, authenticated, setupAllowed });
+  } catch {
+    res.status(500).json({ ok: false, error: 'Authentication state could not be loaded.', code: 'AUTH_STATE_ERROR' });
+  }
 });
 
-app.post(`${basePath}/api/auth/setup`, async (req, res) => {
+app.post(`${basePath}/api/auth/reika`, authRateLimiter, async (req, res) => {
+  if (!validReikaEmbedToken(req)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  try {
+    const { token } = await createSession({ allowUnconfigured: true });
+    setAuthCookie(res, token);
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ ok: false, error: 'Could not create the embedded session.', code: 'AUTH_STATE_ERROR' });
+  }
+});
+
+app.post(`${basePath}/api/auth/setup`, authRateLimiter, async (req, res) => {
+  if (config.relayOnlyMode) {
+    return res.status(404).json({ ok: false, error: 'Password setup is unavailable in relay-only mode.', code: 'RELAY_ONLY_MODE' });
+  }
+  if (!remoteSetupAllowed(req, config.allowRemoteSetup)) {
+    return res.status(403).json({ ok: false, error: 'Initial password setup is only available from the local machine.', code: 'REMOTE_SETUP_FORBIDDEN' });
+  }
   const auth = await loadUiAuthConfig();
   if (auth.enabled) return res.status(400).json({ ok: false, error: 'Password already set' });
   const password = String(req.body?.password || '');
-  if (password.length < 6) return res.status(400).json({ ok: false, error: 'Password must be at least 6 characters' });
-  await setUiPassword(password);
-  const token = createSessionToken();
-  createSession(token);
-  setAuthCookie(res, token);
-  res.json({ ok: true });
+  if (password.length < 10) return res.status(400).json({ ok: false, error: 'Password must be at least 10 characters' });
+  try {
+    await setUiPassword(password, { onlyIfUnset: true });
+    const { token } = await createSession();
+    setAuthCookie(res, token);
+    res.json({ ok: true });
+  } catch (err) {
+    if (err?.code === 'PASSWORD_ALREADY_SET') return res.status(409).json({ ok: false, error: 'Password already set', code: err.code });
+    res.status(500).json({ ok: false, error: 'Could not save the new password.', code: 'AUTH_STATE_ERROR' });
+  }
 });
 
-app.post(`${basePath}/api/auth/login`, async (req, res) => {
-  const auth = await loadUiAuthConfig();
-  if (!auth.enabled) return res.json({ ok: true, passwordSet: false });
-  const password = String(req.body?.password || '');
-  if (!checkPassword(password, auth.passwordHash)) return res.status(401).json({ ok: false, error: 'Invalid password' });
-  const token = createSessionToken();
-  createSession(token);
-  setAuthCookie(res, token);
-  res.json({ ok: true, passwordSet: true });
+app.post(`${basePath}/api/auth/login`, authRateLimiter, async (req, res) => {
+  try {
+    const auth = await loadUiAuthConfig();
+    if (!auth.enabled) return res.json({ ok: true, passwordSet: false });
+    const password = String(req.body?.password || '');
+    if (!checkPassword(password, auth.passwordHash)) return res.status(401).json({ ok: false, error: 'Invalid password' });
+    const { token } = await createSession();
+    setAuthCookie(res, token);
+    res.json({ ok: true, passwordSet: true });
+  } catch {
+    res.status(500).json({ ok: false, error: 'Could not complete login.', code: 'AUTH_STATE_ERROR' });
+  }
 });
 
 app.post(`${basePath}/api/auth/change-password`, async (req, res) => {
   const auth = await loadUiAuthConfig();
   const token = parseCookies(req).cc_auth;
-  if (auth.enabled && !isValidSession(token)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
+  if (!auth.enabled) return res.status(403).json({ ok: false, error: 'Password setup is required before changing passwords.', code: 'SETUP_REQUIRED' });
+  if (!await isValidSession(token)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
   const currentPassword = String(req.body?.currentPassword || '');
   const newPassword = String(req.body?.newPassword || '');
   if (auth.enabled && !checkPassword(currentPassword, auth.passwordHash)) return res.status(401).json({ ok: false, error: 'Current password is incorrect' });
-  if (newPassword.length < 6) return res.status(400).json({ ok: false, error: 'New password must be at least 6 characters' });
-  await setUiPassword(newPassword);
-  res.json({ ok: true });
+  if (newPassword.length < 10) return res.status(400).json({ ok: false, error: 'New password must be at least 10 characters' });
+  try {
+    await setUiPassword(newPassword);
+    const { token: nextToken } = await createSession();
+    setAuthCookie(res, nextToken);
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ ok: false, error: 'Could not update password.', code: 'AUTH_STATE_ERROR' });
+  }
 });
 
 app.post(`${basePath}/api/auth/logout`, async (req, res) => {
   const token = parseCookies(req).cc_auth;
-  revokeSession(token);
+  await revokeSession(token);
   clearAuthCookie(res);
   res.json({ ok: true });
-});
-
-app.use(async (req, res, next) => {
-  if (!req.path.startsWith(`${basePath}/api/`)) return next();
-  if (req.path.startsWith(`${basePath}/api/auth/`)) return next();
-  if (req.path.startsWith(`${basePath}/api/v1/`)) return next();
-  const configuredApiKey = String(config.apiKey || '').trim();
-  const authHeader = String(req.headers.authorization || '').trim();
-  const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
-  if (configuredApiKey && bearerToken === configuredApiKey) return next();
-  const auth = await loadUiAuthConfig();
-  if (!auth.enabled) return res.status(403).json({ ok: false, error: 'Operator password setup is required.', code: 'SETUP_REQUIRED' });
-  const token = parseCookies(req).cc_auth;
-  if (!isValidSession(token)) return res.status(401).json({ ok: false, error: 'Unauthorized' });
-  return next();
 });
 
 app.post(`${basePath}/api/relay/v1/pairings`, async (req, res) => {
@@ -838,7 +885,7 @@ app.post(`${basePath}/api/settings/update`, async (req, res) => {
     const existing = await loadUpdateSettings();
     const saved = await saveUpdateSettings({
       ...existing,
-      autoUpdateEnabled: req.body?.autoUpdateEnabled !== false,
+      autoUpdateEnabled: req.body?.autoUpdateEnabled === true,
       checkIntervalHours: req.body?.checkIntervalHours !== undefined ? req.body.checkIntervalHours : existing.checkIntervalHours,
     });
     return res.json({ ok: true, settings: saved });
@@ -912,7 +959,7 @@ app.post(`${basePath}/api/settings/direct-chat`, async (req, res) => {
 });
 
 app.get(`${basePath}/api/settings/agents`, async (_req, res) => {
-  return res.json({ ok: true, ...(buildAgentSettingsPayload()) });
+  return res.json({ ok: true, ...(await buildAgentSettingsPayload()) });
 });
 
 app.post(`${basePath}/api/settings/agents/detect`, async (req, res) => {
@@ -926,7 +973,7 @@ app.post(`${basePath}/api/settings/agents/detect`, async (req, res) => {
     }
     if (source === 'hermes') {
       await setEnvKeyInDotenv('HERMES_BRIDGE_ENABLED', 'true');
-      const detected = detectAgentSources();
+      const detected = await detectAgentSources({ includeHermes: true });
       const first = detected.hermes.agents[0] || null;
       if (first) {
         await setEnvKeyInDotenv('HERMES_AGENT_ID', String(first.id || 'hermes'));
@@ -934,7 +981,7 @@ app.post(`${basePath}/api/settings/agents/detect`, async (req, res) => {
         await setEnvKeyInDotenv('HERMES_AGENT_NAME', String(first.name || first.label || 'Hermes'));
       }
     }
-    return res.json({ ok: true, source, ...(buildAgentSettingsPayload()) });
+    return res.json({ ok: true, source, ...(await buildAgentSettingsPayload()) });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message || 'Could not detect agents' });
   }
@@ -946,12 +993,15 @@ app.use(`${basePath}/media/branding`, express.static(getBrandingDir()));
 app.use(`${basePath}/docs`, requireUiAuthPage);
 app.use(basePath || '/', express.static(join(__dirname, '..', 'public')));
 app.use(`${basePath}/api/v1`, requireApiAuth);
-await ensureCompanionRegistry();
-await ensureMusicStorage();
-await ensureIntroStorage();
-await ensureAppearanceStorage();
-await ensureBrandingStorage();
-await initializeControlPlane();
+
+async function initializeApplicationStorage() {
+  await ensureCompanionRegistry();
+  await ensureMusicStorage();
+  await ensureIntroStorage();
+  await ensureAppearanceStorage();
+  await ensureBrandingStorage();
+  await initializeControlPlane();
+}
 
 const liveGeminiSessions = new Map();
 const liveGeminiWatchdogs = new Map();
@@ -1038,9 +1088,9 @@ function getRoleplayAgentFileStatus(agent = {}) {
   };
 }
 
-function buildAgentSettingsPayload() {
+async function buildAgentSettingsPayload() {
   const roster = getRoster();
-  const detected = detectAgentSources();
+  const detected = await detectAgentSources();
   const bySource = {
     openclaw: roster.agents.filter((agent) => agent.source === 'openclaw' || agent.bridge === 'openclaw'),
     hermes: roster.agents.filter((agent) => agent.source === 'hermes' || agent.bridge === 'hermes'),
@@ -1122,7 +1172,7 @@ async function runImageLookupTask({ query, agent, session }) {
       'agent', '--agent', chosenAgent, '--thinking', 'low', '--message', prompt,
     ], {
       timeout: 8 * 60 * 1000,
-      env: { ...process.env, PATH: process.env.HOME + '/.local/bin:' + process.env.PATH },
+      env: { ...process.env, PATH: `${USER_HOME}/.local/bin:${process.env.PATH || ''}` },
       maxBuffer: 3 * 1024 * 1024,
     }, (err, stdout, stderr) => {
       if (err) return resolve({ ok: false, agent: chosenAgent, error: String(stderr || err.message || 'Image lookup failed').slice(0, 600) });
@@ -1430,7 +1480,7 @@ async function maybeQueueFairyMemoryUpdate(session = null) {
     'agent', '--agent', agent, '--thinking', 'low', '--message', prompt,
   ], {
     timeout: 8 * 60 * 1000,
-    env: { ...process.env, PATH: process.env.HOME + '/.local/bin:' + process.env.PATH },
+    env: { ...process.env, PATH: `${USER_HOME}/.local/bin:${process.env.PATH || ''}` },
     maxBuffer: 3 * 1024 * 1024,
   }, async (err, stdout, stderr) => {
     if (err) {
@@ -2188,20 +2238,23 @@ app.get(`${basePath}/api/status`, async (req, res) => {
   const voiceSettings = await loadVoiceSettings();
   const issues = [];
   const configuredDemo = !!bridgeStatus.configuredDemo;
-  const fellBackToDemo = !configuredDemo && bridgeStatus.mode === 'demo';
-  const liveConnected = !configuredDemo && bridgeStatus.mode === 'live' && bridgeStatus.connected;
+  const relayOnlyMode = !!bridgeStatus.relayOnlyMode;
+  const fellBackToDemo = !configuredDemo && !relayOnlyMode && bridgeStatus.mode === 'demo';
+  const liveConnected = !configuredDemo && !relayOnlyMode && bridgeStatus.mode === 'live' && bridgeStatus.connected;
 
-  if (configuredDemo) {
+  if (relayOnlyMode) {
+    issues.push({ level: 'info', code: 'RELAY_ONLY_MODE_ENABLED', message: 'CommandCenter is running in relay-only mode. Local OpenClaw gateway connectivity is intentionally disabled.' });
+  } else if (configuredDemo) {
     issues.push({ level: 'info', code: 'DEMO_MODE_ENABLED', message: 'CommandCenter is running in demo mode. Agent activity may be simulated.' });
   } else if (fellBackToDemo) {
     issues.push({ level: 'warn', code: 'FALLBACK_TO_DEMO', message: `Live gateway connection failed, so CommandCenter fell back to demo mode${bridgeStatus.lastFallbackReason ? ` (${bridgeStatus.lastFallbackReason})` : ''}.` });
   }
 
-  if (!configuredDemo && !bridgeStatus.gatewayTokenConfigured) {
+  if (!configuredDemo && !relayOnlyMode && !bridgeStatus.gatewayTokenConfigured) {
     issues.push({ level: 'warn', code: 'GATEWAY_TOKEN_MISSING', message: 'No gateway token is configured for live OpenClaw mode.' });
   }
 
-  if (bridgeStatus.lastAuthError) {
+  if (!relayOnlyMode && bridgeStatus.lastAuthError) {
     issues.push({ level: 'error', code: 'GATEWAY_AUTH_FAILED', message: `Gateway authentication failed: ${bridgeStatus.lastAuthError}` });
   }
 
@@ -2217,9 +2270,10 @@ app.get(`${basePath}/api/status`, async (req, res) => {
     agents: roster.agents,
     primaryAgentId: roster.primaryAgentId,
     setup: {
-      mode: configuredDemo ? 'demo' : fellBackToDemo ? 'demo-fallback' : liveConnected ? 'live' : 'connecting',
-      modeLabel: configuredDemo ? 'Demo mode' : fellBackToDemo ? 'Demo fallback' : liveConnected ? 'Live OpenClaw' : 'Connecting to OpenClaw',
+      mode: relayOnlyMode ? 'relay-only' : configuredDemo ? 'demo' : fellBackToDemo ? 'demo-fallback' : liveConnected ? 'live' : 'connecting',
+      modeLabel: relayOnlyMode ? 'Relay-only mode' : configuredDemo ? 'Demo mode' : fellBackToDemo ? 'Demo fallback' : liveConnected ? 'Live OpenClaw' : 'Connecting to OpenClaw',
       demoMode: configuredDemo,
+      relayOnlyMode,
       requestedMode: bridgeStatus.requestedMode,
       actualMode: bridgeStatus.mode,
       gatewayConnected: bridgeStatus.connected,
@@ -2602,7 +2656,7 @@ app.get(`${basePath}/api/v1/files`, async (req, res) => {
   }
 });
 
-app.post(`${basePath}/api/v1/files/upload`, upload.array('files', 10), async (req, res) => {
+app.post(`${basePath}/api/v1/files/upload`, upload.array('files', 10), enforceUploadBudget({ maxFiles: 10, maxBytes: 25 * 1024 * 1024 }), async (req, res) => {
   try {
     await ensureChatLibrary();
     const files = Array.isArray(req.files) ? req.files : [];
@@ -2642,10 +2696,10 @@ app.post(`${basePath}/api/v1/files/upload`, upload.array('files', 10), async (re
 
 app.post(`${basePath}/api/v1/files/link`, async (req, res) => {
   try {
-    const sourceUrl = String(req.body?.url || '').trim();
+    const sourceUrl = normalizeExternalUrl(req.body?.url);
     const name = String(req.body?.name || '').trim() || sourceUrl;
     const notes = String(req.body?.notes || '').trim();
-    if (!sourceUrl) return res.status(400).json({ ok: false, error: 'url is required', code: 'BAD_REQUEST' });
+    if (!sourceUrl) return res.status(400).json({ ok: false, error: 'url must be a valid HTTP or HTTPS URL', code: 'BAD_REQUEST' });
 
     const manifest = await readChatManifest();
     const item = {
@@ -2674,9 +2728,14 @@ app.get(`${basePath}/api/v1/files/:id/download`, async (req, res) => {
     const manifest = await readChatManifest();
     const item = manifest.items.find((entry) => String(entry.id) === String(req.params.id));
     if (!item) return res.status(404).json({ ok: false, error: 'File not found', code: 'FILE_NOT_FOUND' });
-    if (item.kind === 'link') return res.redirect(item.sourceUrl);
-    if (!item.path || !existsSync(item.path)) return res.status(404).json({ ok: false, error: 'Stored file missing', code: 'FILE_NOT_FOUND' });
-    res.download(item.path, item.originalName || item.name || 'download');
+    if (item.kind === 'link') {
+      const sourceUrl = normalizeExternalUrl(item.sourceUrl);
+      if (!sourceUrl) return res.status(400).json({ ok: false, error: 'Saved link is invalid', code: 'INVALID_LINK' });
+      return res.redirect(sourceUrl);
+    }
+    const filePath = managedChatFilePath(item);
+    if (!filePath) return res.status(404).json({ ok: false, error: 'Stored file missing', code: 'FILE_NOT_FOUND' });
+    res.download(filePath, item.originalName || item.name || 'download');
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message, code: 'INTERNAL_ERROR' });
   }
@@ -3034,7 +3093,7 @@ async function importUniversalVisualFromDir(sourceRoot = '', publicBase = basePa
   const vrmFile = files.find((file) => extname(file).toLowerCase() === '.vrm');
   if (vrmFile) {
     const slug = visualSlugFromPath('vrm', vrmFile);
-    const destDir = join(__dirname, '..', 'data', 'companions', 'imports', slug);
+    const destDir = dataPath('companions', 'imports', slug);
     await copyImportTree(sourceRoot, destDir);
     const relative = pathRelativeTo(sourceRoot.replace(/\\/g, '/'), vrmFile.replace(/\\/g, '/'));
     const item = await upsertStoredCompanionItem({
@@ -3055,7 +3114,7 @@ async function importUniversalVisualFromDir(sourceRoot = '', publicBase = basePa
     || live2dCandidates.find((file) => /model/i.test(basename(file)) && !/items|physics|pose|cdi|vtube/i.test(basename(file)));
   if (live2dFile) {
     const slug = visualSlugFromPath('live2d', live2dFile);
-    const destDir = join(__dirname, '..', 'data', 'companions', 'imports', slug);
+    const destDir = dataPath('companions', 'imports', slug);
     await copyImportTree(sourceRoot, destDir);
     const relative = pathRelativeTo(sourceRoot.replace(/\\/g, '/'), live2dFile.replace(/\\/g, '/'));
     const item = await upsertStoredCompanionItem({
@@ -3101,7 +3160,7 @@ async function assignImportedVisualToAgent(agentId = '', imported = null) {
   return null;
 }
 
-app.post(`${basePath}/api/companions/import-universal`, upload.array('files', 500), async (req, res) => {
+app.post(`${basePath}/api/companions/import-universal`, upload.array('files', 100), enforceUploadBudget({ maxFiles: 100, maxBytes: 100 * 1024 * 1024 }), async (req, res) => {
   let tempDir = '';
   try {
     const files = Array.isArray(req.files) ? req.files : [];
@@ -3144,7 +3203,7 @@ app.post(`${basePath}/api/companions/import`, async (req, res) => {
   }
 });
 
-app.post(`${basePath}/api/companions/import-zip`, upload.single('package'), async (req, res) => {
+app.post(`${basePath}/api/companions/import-zip`, upload.single('package'), enforceUploadBudget({ maxFiles: 1, maxBytes: 25 * 1024 * 1024 }), async (req, res) => {
   try {
     const file = req.file;
     if (!file?.buffer?.length) {
@@ -3177,7 +3236,7 @@ app.post(`${basePath}/api/companions/import-zip`, upload.single('package'), asyn
   }
 });
 
-app.post(`${basePath}/api/companions/import-folder`, upload.array('files', 500), async (req, res) => {
+app.post(`${basePath}/api/companions/import-folder`, upload.array('files', 100), enforceUploadBudget({ maxFiles: 100, maxBytes: 100 * 1024 * 1024 }), async (req, res) => {
   try {
     const files = Array.isArray(req.files) ? req.files : [];
     if (!files.length) {
@@ -3219,7 +3278,7 @@ app.get(`${basePath}/api/companions/imports/:slug/*`, async (req, res) => {
   const slug = basename(String(req.params.slug || ''));
   const file = String(req.params[0] || '').replace(/\\/g, '/').replace(/^\/+/, '');
   if (!file || file.includes('..')) return res.status(400).json({ ok: false, error: 'Invalid import asset path', code: 'BAD_REQUEST' });
-  const fullPath = join(__dirname, '..', 'data', 'companions', 'imports', slug, file);
+  const fullPath = dataPath('companions', 'imports', slug, file);
   if (!existsSync(fullPath)) return res.status(404).json({ ok: false, error: 'Imported companion asset not found', code: 'NOT_FOUND' });
   res.sendFile(fullPath);
 });
@@ -4008,7 +4067,7 @@ function runOpenClawWebSearch(query, { agentId } = {}) {
       '--message', prompt,
     ], {
       timeout: 90000,
-      env: { ...process.env, PATH: process.env.HOME + '/.local/bin:' + process.env.PATH },
+      env: { ...process.env, PATH: `${USER_HOME}/.local/bin:${process.env.PATH || ''}` },
       maxBuffer: 2 * 1024 * 1024,
     }, (err, stdout, stderr) => {
       if (err) {
@@ -4089,7 +4148,7 @@ function sendToAgent(agentId, message, options = {}) {
     '--message', cleanMessage,
   ], {
     timeout: 90000,
-    env: { ...process.env, PATH: process.env.HOME + '/.local/bin:' + process.env.PATH },
+    env: { ...process.env, PATH: `${USER_HOME}/.local/bin:${process.env.PATH || ''}` },
   }, (err, stdout, stderr) => {
     if (err) {
       console.error(`[agent] Error from ${target}:`, err.message);
@@ -4286,7 +4345,7 @@ app.get(`${basePath}/api/chat/files`, async (req, res) => {
   }
 });
 
-app.post(`${basePath}/api/chat/files/upload`, upload.array('files', 10), async (req, res) => {
+app.post(`${basePath}/api/chat/files/upload`, upload.array('files', 10), enforceUploadBudget({ maxFiles: 10, maxBytes: 25 * 1024 * 1024 }), async (req, res) => {
   try {
     await ensureChatLibrary();
     const files = Array.isArray(req.files) ? req.files : [];
@@ -4326,10 +4385,10 @@ app.post(`${basePath}/api/chat/files/upload`, upload.array('files', 10), async (
 
 app.post(`${basePath}/api/chat/files/link`, async (req, res) => {
   try {
-    const sourceUrl = String(req.body?.url || '').trim();
+    const sourceUrl = normalizeExternalUrl(req.body?.url);
     const name = String(req.body?.name || '').trim() || sourceUrl;
     const notes = String(req.body?.notes || '').trim();
-    if (!sourceUrl) return res.status(400).json({ error: 'url is required' });
+    if (!sourceUrl) return res.status(400).json({ error: 'url must be a valid HTTP or HTTPS URL' });
 
     const manifest = await readChatManifest();
     const item = {
@@ -4358,9 +4417,14 @@ app.get(`${basePath}/api/chat/files/:id/download`, async (req, res) => {
     const manifest = await readChatManifest();
     const item = manifest.items.find((entry) => String(entry.id) === String(req.params.id));
     if (!item) return res.status(404).json({ error: 'File not found' });
-    if (item.kind === 'link') return res.redirect(item.sourceUrl);
-    if (!item.path || !existsSync(item.path)) return res.status(404).json({ error: 'Stored file missing' });
-    res.download(item.path, item.originalName || item.name || 'download');
+    if (item.kind === 'link') {
+      const sourceUrl = normalizeExternalUrl(item.sourceUrl);
+      if (!sourceUrl) return res.status(400).json({ error: 'Saved link is invalid', code: 'INVALID_LINK' });
+      return res.redirect(sourceUrl);
+    }
+    const filePath = managedChatFilePath(item);
+    if (!filePath) return res.status(404).json({ error: 'Stored file missing' });
+    res.download(filePath, item.originalName || item.name || 'download');
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -4373,8 +4437,9 @@ app.delete(`${basePath}/api/chat/files/:id`, async (req, res) => {
     if (index === -1) return res.status(404).json({ error: 'File not found' });
     const [item] = manifest.items.splice(index, 1);
     await writeChatManifest(manifest);
-    if (item.kind !== 'link' && item.path && existsSync(item.path)) {
-      await fsp.unlink(item.path).catch(() => {});
+    if (item.kind !== 'link') {
+      const filePath = managedChatFilePath(item);
+      if (filePath) await fsp.unlink(filePath).catch(() => {});
     }
     res.json({ ok: true, id: item.id });
   } catch (err) {
@@ -6464,7 +6529,7 @@ server.on('upgrade', async (req, socket, head) => {
       socket.destroy();
       return;
     }
-    const authorization = authorizeWebSocketRequest(req, { validateSession: isValidSession });
+    const authorization = await authorizeWebSocketRequest(req, { validateSession: isValidSession });
     if (!authorization.ok) {
       socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       socket.destroy();
@@ -6498,13 +6563,13 @@ wss.on('connection', async (ws, req) => {
 
   // Low-latency mic uplink: the browser streams call audio over this socket
   // instead of one HTTP POST per VAD chunk. Authenticated UI sessions only.
-  ws.on('message', (raw) => {
+  ws.on('message', async (raw) => {
     let msg = null;
     try { msg = JSON.parse(String(raw)); } catch { return; }
     if (msg?.type !== 'call:audio') return;
     try {
       const cookies = parseCookies(req);
-      if (!isValidSession(cookies.cc_auth)) return;
+      if (!await isValidSession(cookies.cc_auth)) return;
     } catch { return; }
     const sessionId = String(msg.data?.sessionId || '');
     const pcm16Base64 = String(msg.data?.pcm16Base64 || '');
@@ -6626,24 +6691,26 @@ let machineSampleTimer = setInterval(() => {
 }, MACHINE_SAMPLE_INTERVAL_MS);
 machineSampleTimer.unref?.();
 
-try {
-  await getSpacesStore().ensureDefaultSpace();
-} catch (error) {
-  console.error('[spaces] Could not ensure default Space:', error?.message || error);
-}
-
-// Warm the roster + harness caches so the first UI overview loads fast.
-try {
-  loadAgentRoster();
-} catch {}
+// External CLI discovery runs after the listener is available, so startup never
+// waits on a slow Hermes/OpenClaw process. Requests see a safe fallback roster.
 import('./harnesses.js').then((module) => module.listHarnesses().catch(() => {})).catch(() => {});
 
 export { broadcast, wss };
 
 const bridge = new OpenClawBridge();
-await relayAgentSource.configure(await loadDirectChatSettings().catch(() => ({})));
-const stopSessionMonitor = startSessionMonitor({ broadcast, roster, emitResponses: true });
-const stopHermesSessionMonitor = startHermesSessionMonitor({ broadcast, roster });
+let stopSessionMonitor = { stop() {} };
+let stopHermesSessionMonitor = { stop() {} };
+
+function stopOptionalRuntime() {
+  stopSessionMonitor.stop();
+  stopHermesSessionMonitor.stop();
+  relayAgentSource.stop();
+  stopWakeTranscriber();
+  stopWakeKeywordDetector();
+  clearInterval(machineSampleTimer);
+  for (const timer of liveGeminiWatchdogs.values()) clearTimeout(timer);
+  for (const timer of liveScreenChangePrompts.values()) clearTimeout(timer);
+}
 
 app.get(`${basePath}/api/session-monitor/debug`, (req, res) => {
   res.json({ ok: true, agents: typeof stopSessionMonitor.getDebugState === 'function' ? stopSessionMonitor.getDebugState() : [] });
@@ -6758,6 +6825,16 @@ app.use((err, req, res, next) => {
 server.listen(config.port, config.host, () => {
   console.log(`[server] Command Center listening on ${config.host}:${config.port}${basePath || ''}`);
   console.log(`[server] Protocol: ${useHttps ? 'https' : 'http'}`);
+  void initializeApplicationStorage().catch((error) => console.error('[startup] Application storage initialization failed:', error?.message || error));
+  void getSpacesStore().ensureDefaultSpace().catch((error) => console.error('[spaces] Could not ensure default Space:', error?.message || error));
+  void refreshAgentRoster().then((nextRoster) => { roster = nextRoster; }).catch(() => {});
+  void loadDirectChatSettings()
+    .then((settings) => relayAgentSource.configure(settings))
+    .then(() => {
+      stopSessionMonitor = startSessionMonitor({ broadcast, roster, emitResponses: true });
+      stopHermesSessionMonitor = startHermesSessionMonitor({ broadcast, roster });
+    })
+    .catch((error) => console.error('[relay] Optional runtime initialization failed:', error?.message || error));
   finalizePostRestartUpdateState().catch((err) => {
     console.error('[update] Failed to finalize post-restart update state:', err.message);
   });
@@ -6790,3 +6867,19 @@ if (config.localApiEnabled && localApiServer) {
     console.log(`[server] Local API listener ready on ${config.localApiHost}:${config.localApiPort}${basePath || ''}/api/v1 (loopback-only, no bearer token required)`);
   });
 }
+
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  stopOptionalRuntime();
+  const close = (httpServer) => new Promise((resolve) => {
+    if (!httpServer?.listening) return resolve();
+    httpServer.close(() => resolve());
+  });
+  await Promise.all([close(server), close(localApiServer)]);
+  if (signal) process.exitCode = 0;
+}
+
+process.once('SIGINT', () => { void shutdown('SIGINT'); });
+process.once('SIGTERM', () => { void shutdown('SIGTERM'); });

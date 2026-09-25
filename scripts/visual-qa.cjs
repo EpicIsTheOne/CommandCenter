@@ -7,7 +7,7 @@ const fs = require('fs');
 
 const OUT = 'C:/Users/Epic/AppData/Local/Temp/cc-qa-shots';
 fs.mkdirSync(OUT, { recursive: true });
-const BASE_URL = 'http://127.0.0.1:3100';
+const BASE_URL = process.env.QA_BASE_URL || `http://127.0.0.1:${process.env.QA_PORT || 3100}`;
 
 async function login(page) {
   await page.goto(BASE_URL + '/', { waitUntil: 'domcontentloaded' });
@@ -16,8 +16,9 @@ async function login(page) {
   const passwordInput = page.locator('#auth-password');
   try {
     await passwordInput.waitFor({ state: 'visible', timeout: 8000 });
-    await passwordInput.fill('qa-pass-2026');
+    await passwordInput.fill('qa-pass-2026-long');
     await page.click('#auth-submit-btn');
+    await page.waitForFunction(() => document.querySelector('#auth-modal')?.classList.contains('hidden'), null, { timeout: 10000 });
   } catch {
     console.log('[login] no auth modal appeared (maybe already authed)');
   }
@@ -63,7 +64,7 @@ async function inspectorTitle(page) {
 
 async function main() {
   const browser = await chromium.launch({
-    executablePath: 'C:/Users/Epic/AppData/Local/ms-playwright/chromium-1208/chrome-win64/chrome.exe',
+    executablePath: process.env.CHROMIUM_PATH || undefined,
     headless: true,
   });
   const results = [];

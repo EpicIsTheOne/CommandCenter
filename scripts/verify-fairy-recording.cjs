@@ -72,7 +72,7 @@ async function dispatchFairyEvent(page, sessionId, event) {
 (async () => {
   const browser = await chromium.launch({
     headless: true,
-    executablePath: process.env.CHROMIUM_PATH || '/usr/bin/chromium',
+    executablePath: process.env.CHROMIUM_PATH || undefined,
     args: [
       '--use-fake-ui-for-media-stream',
       '--use-fake-device-for-media-stream',

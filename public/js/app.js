@@ -18,7 +18,7 @@ import * as ops from './ops.js';
 import * as palette from './palette.js';
 import { registerDefaultActions } from './default-actions.js';
 
-const APP_BUILD = '20260813-fairy-performance1';
+const APP_BUILD = '20260925-audit1';
 console.log('[CommandCenter] app build:', APP_BUILD);
 
 let roster = { agents: [], primaryAgentId: 'main' };
@@ -140,15 +140,18 @@ function renderUpdatePayload(data = null) {
   const current = update.currentCommit || {};
   const latest = update.latestCommit || current || {};
   const pendingCount = Number(update.behind || commits.length || 0) || 0;
-  const statusTone = state.status === 'applying'
-    ? 'Applying update and restarting CommandCenter…'
-    : update.dirty
-      ? 'Update paused. Local repo has uncommitted changes that need attention first.'
-      : update.pending
-        ? `New update ready from ${repo.remote || 'origin'}/${repo.branch || 'main'}.`
-        : state.message || 'CommandCenter is fully up to date.';
+  const updaterSupported = data?.capability?.supported !== false;
+  const statusTone = !updaterSupported
+    ? data.capability.reason || 'Updates are unavailable on this platform.'
+    : state.status === 'applying'
+      ? 'Applying update and restarting CommandCenter…'
+      : update.dirty
+        ? 'Update paused. Local repo has uncommitted changes that need attention first.'
+        : update.pending
+          ? `New update ready from ${repo.remote || 'origin'}/${repo.branch || 'main'}.`
+          : state.message || 'CommandCenter is fully up to date.';
 
-  if (autoUpdate) autoUpdate.checked = settings.autoUpdateEnabled !== false;
+  if (autoUpdate) autoUpdate.checked = settings.autoUpdateEnabled === true;
   if (pill) {
     pill.textContent = state.status === 'applying'
       ? 'Updating…'
@@ -161,8 +164,8 @@ function renderUpdatePayload(data = null) {
   }
   if (statusEl) statusEl.textContent = statusTone;
   if (applyBtn) {
-    applyBtn.disabled = !update.pending || state.status === 'applying' || update.dirty;
-    applyBtn.textContent = state.status === 'applying' ? 'UPDATING…' : update.pending ? 'UPDATE NOW' : 'NO UPDATE NEEDED';
+    applyBtn.disabled = !updaterSupported || !update.pending || state.status === 'applying' || update.dirty;
+    applyBtn.textContent = !updaterSupported ? 'UNAVAILABLE ON THIS PLATFORM' : state.status === 'applying' ? 'UPDATING…' : update.pending ? 'UPDATE NOW' : 'NO UPDATE NEEDED';
   }
   if (commitsSummaryEl) commitsSummaryEl.textContent = commits.length ? `${commits.length} commit${commits.length === 1 ? '' : 's'} incoming` : 'No incoming commits';
   if (filesSummaryEl) filesSummaryEl.textContent = changedFiles.length ? `${changedFiles.length} file${changedFiles.length === 1 ? '' : 's'} changed` : 'No changed files';
@@ -170,7 +173,7 @@ function renderUpdatePayload(data = null) {
 
   if (metaEl) {
     metaEl.innerHTML = [
-      renderUpdateSummaryCard('Auto update', settings.autoUpdateEnabled !== false ? 'Enabled' : 'Disabled', settings.autoUpdateEnabled !== false ? 'Scheduled background checks are on.' : 'Only manual updates will run.'),
+      renderUpdateSummaryCard('Auto update', settings.autoUpdateEnabled === true ? 'Enabled' : 'Disabled', settings.autoUpdateEnabled === true ? 'Scheduled background checks are on.' : 'Only manual updates will run.'),
       renderUpdateSummaryCard('Repo', repo.branch || 'main', repo.remoteUrl || repo.remote || 'unknown remote'),
       renderUpdateSummaryCard('Current version', current.shortSha || String(repo.localSha || '').slice(0, 7) || 'unknown', current.subject || 'No local commit title found.'),
       renderUpdateSummaryCard('Latest remote', latest.shortSha || String(state.targetSha || '').slice(0, 7) || 'unknown', latest.subject || 'No remote commit title found.'),
@@ -230,7 +233,7 @@ async function refreshUpdateSettings(refresh = true) {
 
 async function saveUpdatePreferences() {
   const input = document.getElementById('auto-update-enabled');
-  const autoUpdateEnabled = input?.checked !== false;
+  const autoUpdateEnabled = input?.checked === true;
   try {
     const data = await fetchJson(`${BASE}/api/settings/update`, {
       method: 'POST',
@@ -1029,8 +1032,8 @@ async function submitAuthModal() {
     return false;
   }
   if (mode === 'setup') {
-    if (password.length < 6) {
-      setAuthStatus('Password must be at least 6 characters.', true);
+    if (password.length < 10) {
+      setAuthStatus('Password must be at least 10 characters.', true);
       passwordInput?.focus();
       return false;
     }
@@ -1071,11 +1074,19 @@ function waitForAuthSubmit() {
 }
 
 async function ensureUiAuth() {
+  let reikaExchangeAttempted = false;
   while (true) {
     const status = await fetchJson(`${BASE}/api/auth/status`);
     if (status?.authenticated) {
       closeAuthModal();
       return;
+    }
+    if (!reikaExchangeAttempted) {
+      reikaExchangeAttempted = true;
+      try {
+        await fetchJson(`${BASE}/api/auth/reika`, { method: 'POST' });
+        continue;
+      } catch {}
     }
     openAuthModal({ mode: status?.passwordSet ? 'login' : 'setup' });
     // eslint-disable-next-line no-await-in-loop
@@ -1092,13 +1103,15 @@ async function loadSetupStatus() {
     const hasError = issues.some((issue) => issue.level === 'error');
     const hasWarn = issues.some((issue) => issue.level === 'warn');
     const tone = hasError ? 'error' : hasWarn ? 'warn' : 'ok';
-    const pillText = setup.demoMode
-      ? 'Demo Mode'
-      : bridge.mode === 'live'
-        ? 'Live Connected'
-        : bridge.mode === 'demo'
-          ? 'Demo Fallback'
-          : 'Connecting';
+    const pillText = setup.relayOnlyMode || bridge.relayOnlyMode || bridge.mode === 'relay-only'
+      ? 'Relay Connected'
+      : setup.demoMode
+        ? 'Demo Mode'
+        : bridge.mode === 'live'
+          ? 'Live Connected'
+          : bridge.mode === 'demo'
+            ? 'Demo Fallback'
+            : 'Connecting';
     const summary = `${setup.modeLabel || 'Unknown mode'} • STT: ${String(setup.sttMode || 'api').toUpperCase()}${setup.sttMode === 'api' ? ` → ${setup.sttProvider || 'fish'}` : ''} • TTS: ${setup.ttsProvider || 'elevenlabs'}${bridge.gatewayTokenSource ? ` • Gateway token: ${bridge.gatewayTokenSource}` : ''}`;
     setSetupStatus(summary, issues, tone, pillText);
     return data;
@@ -1157,7 +1170,10 @@ async function requestFullscreen() {
   }
 }
 
-function bootSequence() {
+function bootSequence(status = null) {
+  const bridge = status?.bridge || {};
+  const setup = status?.setup || {};
+  const relayOnly = setup.relayOnlyMode || bridge.relayOnlyMode || bridge.mode === 'relay-only';
   const lines = [
     ['[sys] OpenClaw Command Center v1.0', 'system'],
     ['[sys] Initializing display modules...', 'system'],
@@ -1167,7 +1183,7 @@ function bootSequence() {
     [`[sys] Voice: tap mascot for ${getAgentLabel(getPrimaryAgent())}, tap any agent in office`, 'agent'],
     ['[sys] Wake mode: local whisper name detection', 'agent'],
     [`[sys] Agents: ${roster.agents.map(a => `${a.id}(${a.label})`).join(' | ') || 'main(Main)'}`, 'info'],
-    ['[sys] Connecting to OpenClaw gateway...', 'system'],
+    [relayOnly ? '[sys] Connecting to Reika Relay...' : '[sys] Connecting to OpenClaw gateway...', 'system'],
   ];
 
   let i = 0;
@@ -2765,8 +2781,8 @@ async function changePasswordFromSettings() {
     setPasswordModalStatus('New password required.', true);
     return;
   }
-  if (newPassword.length < 6) {
-    setPasswordModalStatus('New password must be at least 6 characters.', true);
+  if (newPassword.length < 10) {
+    setPasswordModalStatus('New password must be at least 10 characters.', true);
     return;
   }
   if (newPassword !== confirmPassword) {
@@ -2990,6 +3006,10 @@ function bindEarlyAuthUi() {
 async function main() {
   bindEarlyAuthUi();
   await ensureUiAuth();
+  controlPlane.init({ base: BASE });
+  ops.init();
+  palette.init();
+  import('./default-actions.js').then((module) => module.registerDefaultActions({ ops })).catch(() => {});
   applyVignetteStrength(loadVignetteStrength());
   loadDirectionalVignette();
   terminal.init('terminal-output');
@@ -3010,10 +3030,6 @@ async function main() {
   directChat.init();
   singleAgent.init();
   fairyLive.init();
-  controlPlane.init({ base: BASE });
-  ops.init();
-  palette.init();
-  import('./default-actions.js').then((module) => module.registerDefaultActions({ ops })).catch(() => {});
   agentComms.initAgentComms({ base: BASE, fetchJson, initialRoster: roster });
   window.addEventListener('commandcenter:fairy-status', (event) => {
     const detail = event?.detail || {};
@@ -3301,8 +3317,8 @@ async function main() {
   terminal.log('[wake] Wake mode: local whisper name detection', 'info', true);
   setConnectionState('connecting', 'CONNECTING');
   setWakeButtonState('off');
-  bootSequence();
-  loadSetupStatus().catch(() => {});
+  const initialSetupStatus = await loadSetupStatus().catch(() => null);
+  bootSequence(initialSetupStatus);
   setSetupTestResult('No setup test run yet.', [], 'ok');
   connect();
 

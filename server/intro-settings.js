@@ -1,11 +1,10 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { readJsonStore, writeJsonStore } from './json-store.js';
+import { dataPath } from './runtime-paths.js';
 
-const ROOT = process.cwd();
-const DATA_DIR = join(ROOT, 'data');
-const INTRO_DIR = join(DATA_DIR, 'intros');
-const SETTINGS_FILE = join(DATA_DIR, 'intro-settings.json');
+const DATA_DIR = dataPath();
+const INTRO_DIR = dataPath('intros');
+const SETTINGS_FILE = dataPath('intro-settings.json');
 
 export const DEFAULT_INTRO_SETTINGS = {
   enabled: true,
@@ -34,18 +33,14 @@ export async function ensureIntroStorage() {
 export async function loadIntroSettings() {
   try {
     await ensureIntroStorage();
-    if (!existsSync(SETTINGS_FILE)) return { ...DEFAULT_INTRO_SETTINGS };
-    const raw = await readFile(SETTINGS_FILE, 'utf8');
-    return { ...DEFAULT_INTRO_SETTINGS, ...normalize(JSON.parse(raw)) };
-  } catch {
-    return { ...DEFAULT_INTRO_SETTINGS };
-  }
+    return { ...DEFAULT_INTRO_SETTINGS, ...normalize(await readJsonStore(SETTINGS_FILE, { defaultValue: DEFAULT_INTRO_SETTINGS })) };
+  } catch { return { ...DEFAULT_INTRO_SETTINGS }; }
 }
 
 export async function saveIntroSettings(input) {
   const settings = normalize(input);
   await ensureIntroStorage();
-  await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+  await writeJsonStore(SETTINGS_FILE, settings);
   return settings;
 }
 

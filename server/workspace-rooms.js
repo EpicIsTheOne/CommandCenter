@@ -1,9 +1,7 @@
-import { readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readJsonStore, writeJsonStore } from './json-store.js';
+import { dataPath } from './runtime-paths.js';
 
-const ROOT = process.cwd();
-const SETTINGS_FILE = join(ROOT, 'data', 'agent-workspace-rooms.json');
+const SETTINGS_FILE = dataPath('agent-workspace-rooms.json');
 const DEFAULT_ROOM_SIZE = 5;
 
 const DEFAULTS = {
@@ -96,16 +94,12 @@ export function normalizeWorkspaceRooms(input = {}, roster = { agents: [] }) {
 
 export async function loadWorkspaceRooms(roster = { agents: [] }) {
   try {
-    if (!existsSync(SETTINGS_FILE)) return buildDefaultRooms(roster);
-    const raw = await readFile(SETTINGS_FILE, 'utf8');
-    return normalizeWorkspaceRooms(JSON.parse(raw), roster);
-  } catch {
-    return buildDefaultRooms(roster);
-  }
+    return normalizeWorkspaceRooms(await readJsonStore(SETTINGS_FILE, { defaultValue: buildDefaultRooms(roster) }), roster);
+  } catch { return buildDefaultRooms(roster); }
 }
 
 export async function saveWorkspaceRooms(input = {}, roster = { agents: [] }) {
   const settings = normalizeWorkspaceRooms(input, roster);
-  await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+  await writeJsonStore(SETTINGS_FILE, settings);
   return settings;
 }

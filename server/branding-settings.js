@@ -1,11 +1,10 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { readJsonStore, writeJsonStore } from './json-store.js';
+import { dataPath } from './runtime-paths.js';
 
-const ROOT = process.cwd();
-const DATA_DIR = join(ROOT, 'data');
-const BRANDING_DIR = join(DATA_DIR, 'branding');
-const SETTINGS_FILE = join(DATA_DIR, 'branding-settings.json');
+const DATA_DIR = dataPath();
+const BRANDING_DIR = dataPath('branding');
+const SETTINGS_FILE = dataPath('branding-settings.json');
 
 const DEFAULTS = {
   title: 'OpenClaw Command Center',
@@ -28,15 +27,12 @@ export function getBrandingDir() { return BRANDING_DIR; }
 export async function loadBrandingSettings() {
   try {
     await ensureBrandingStorage();
-    if (!existsSync(SETTINGS_FILE)) return { ...DEFAULTS };
-    return { ...DEFAULTS, ...normalize(JSON.parse(await readFile(SETTINGS_FILE, 'utf8'))) };
-  } catch {
-    return { ...DEFAULTS };
-  }
+    return { ...DEFAULTS, ...normalize(await readJsonStore(SETTINGS_FILE, { defaultValue: DEFAULTS })) };
+  } catch { return { ...DEFAULTS }; }
 }
 export async function saveBrandingSettings(input) {
   const settings = normalize(input);
   await ensureBrandingStorage();
-  await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+  await writeJsonStore(SETTINGS_FILE, settings);
   return settings;
 }

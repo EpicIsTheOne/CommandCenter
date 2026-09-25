@@ -1,8 +1,9 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
-const HOME = process.env.HOME || '/root';
+const HOME = process.env.USERPROFILE || process.env.HOME || homedir();
 
 function safeJsonParse(text) {
   try { return JSON.parse(text); } catch { return null; }

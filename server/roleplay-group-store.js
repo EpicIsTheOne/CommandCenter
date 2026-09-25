@@ -1,28 +1,24 @@
 import { promises as fsp } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
+import { readJsonStore, updateJsonStore, writeJsonStore } from './json-store.js';
+import { dataPath } from './runtime-paths.js';
 import { randomUUID } from 'node:crypto';
 
-const DATA_PATH = join(process.cwd(), 'data', 'roleplay-groups.json');
+const DATA_PATH = dataPath('roleplay-groups.json');
 
 async function ensureStore() {
   await fsp.mkdir(dirname(DATA_PATH), { recursive: true });
-  try { await fsp.access(DATA_PATH); }
-  catch { await fsp.writeFile(DATA_PATH, JSON.stringify({ groups: [] }, null, 2)); }
 }
 
 async function readStore() {
   await ensureStore();
-  try {
-    const parsed = JSON.parse(await fsp.readFile(DATA_PATH, 'utf8'));
-    return { groups: Array.isArray(parsed.groups) ? parsed.groups : [] };
-  } catch {
-    return { groups: [] };
-  }
+  const parsed = await readJsonStore(DATA_PATH, { defaultValue: { groups: [] } });
+  return { groups: Array.isArray(parsed.groups) ? parsed.groups : [] };
 }
 
 async function writeStore(store) {
   await ensureStore();
-  await fsp.writeFile(DATA_PATH, JSON.stringify({ groups: Array.isArray(store.groups) ? store.groups : [] }, null, 2));
+  await writeJsonStore(DATA_PATH, { groups: Array.isArray(store.groups) ? store.groups : [] });
 }
 
 export async function listRoleplayGroups({ limit = 50 } = {}) {
@@ -59,16 +55,13 @@ export async function createRoleplayGroup({ name = '', scenario = '', agents = [
     createdAt: now,
     updatedAt: now,
   };
-  const store = await readStore();
-  store.groups.unshift(group);
-  await writeStore(store);
+  await updateJsonStore(DATA_PATH, { defaultValue: { groups: [] } }, async (store) => ({
+    groups: [group, ...(Array.isArray(store.groups) ? store.groups : [])],
+  }));
   return group;
 }
 
 export async function appendRoleplayGroupMessages(id = '', messages = []) {
-  const store = await readStore();
-  const idx = store.groups.findIndex((group) => group.id === id);
-  if (idx === -1) return null;
   const now = new Date().toISOString();
   const clean = (Array.isArray(messages) ? messages : [messages]).map((message) => ({
     id: message.id || `rpgm_${randomUUID()}`,
@@ -79,31 +72,43 @@ export async function appendRoleplayGroupMessages(id = '', messages = []) {
     model: String(message.model || '').trim(),
     createdAt: message.createdAt || now,
   })).filter((message) => message.speakerId && message.text);
-  store.groups[idx].messages = [...(store.groups[idx].messages || []), ...clean].slice(-300);
-  store.groups[idx].updatedAt = now;
-  await writeStore(store);
-  return store.groups[idx];
+  let updated = null;
+  await updateJsonStore(DATA_PATH, { defaultValue: { groups: [] } }, async (store) => {
+    const groups = Array.isArray(store.groups) ? [...store.groups] : [];
+    const index = groups.findIndex((group) => group.id === id);
+    if (index === -1) return { groups };
+    groups[index] = {
+      ...groups[index],
+      messages: [...(groups[index].messages || []), ...clean].slice(-300),
+      updatedAt: now,
+    };
+    updated = groups[index];
+    return { groups };
+  });
+  return updated;
 }
 
 export async function saveRoleplayGroup(group = {}) {
-  const store = await readStore();
-  const idx = store.groups.findIndex((item) => item.id === group.id);
-  if (idx === -1) return null;
-  const next = {
-    ...store.groups[idx],
-    ...group,
-    updatedAt: new Date().toISOString(),
-  };
-  store.groups[idx] = next;
-  await writeStore(store);
-  return next;
+  let updated = null;
+  await updateJsonStore(DATA_PATH, { defaultValue: { groups: [] } }, async (store) => {
+    const groups = Array.isArray(store.groups) ? [...store.groups] : [];
+    const index = groups.findIndex((item) => item.id === group.id);
+    if (index === -1) return { groups };
+    const next = { ...groups[index], ...group, updatedAt: new Date().toISOString() };
+    groups[index] = next;
+    updated = next;
+    return { groups };
+  });
+  return updated;
 }
 
 export async function deleteRoleplayGroup(id = '') {
-  const store = await readStore();
-  const idx = store.groups.findIndex((group) => group.id === id);
-  if (idx === -1) return false;
-  store.groups.splice(idx, 1);
-  await writeStore(store);
-  return true;
+  let removed = false;
+  await updateJsonStore(DATA_PATH, { defaultValue: { groups: [] } }, async (store) => {
+    const groups = Array.isArray(store.groups) ? store.groups : [];
+    const next = groups.filter((group) => group.id !== id);
+    removed = next.length !== groups.length;
+    return { groups: next };
+  });
+  return removed;
 }

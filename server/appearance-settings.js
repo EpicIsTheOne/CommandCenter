@@ -1,12 +1,11 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { readJsonStore, writeJsonStore } from './json-store.js';
+import { dataPath } from './runtime-paths.js';
 
-const ROOT = process.cwd();
-const DATA_DIR = join(ROOT, 'data');
-const APPEARANCE_DIR = join(DATA_DIR, 'appearance');
-const BACKGROUND_DIR = join(APPEARANCE_DIR, 'backgrounds');
-const SETTINGS_FILE = join(DATA_DIR, 'appearance-settings.json');
+const DATA_DIR = dataPath();
+const APPEARANCE_DIR = dataPath('appearance');
+const BACKGROUND_DIR = dataPath('appearance', 'backgrounds');
+const SETTINGS_FILE = dataPath('appearance-settings.json');
 
 export const DEFAULT_THEME_ID = 'default-ember';
 export const DEFAULT_WORKSPACE_ID = 'default-office';
@@ -141,18 +140,14 @@ export async function ensureAppearanceStorage() {
 export async function loadAppearanceSettings() {
   try {
     await ensureAppearanceStorage();
-    if (!existsSync(SETTINGS_FILE)) return { ...DEFAULT_SETTINGS };
-    const raw = await readFile(SETTINGS_FILE, 'utf8');
-    return { ...DEFAULT_SETTINGS, ...normalize(JSON.parse(raw)) };
-  } catch {
-    return { ...DEFAULT_SETTINGS };
-  }
+    return { ...DEFAULT_SETTINGS, ...normalize(await readJsonStore(SETTINGS_FILE, { defaultValue: DEFAULT_SETTINGS })) };
+  } catch { return { ...DEFAULT_SETTINGS }; }
 }
 
 export async function saveAppearanceSettings(input) {
   const settings = normalize(input);
   await ensureAppearanceStorage();
-  await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+  await writeJsonStore(SETTINGS_FILE, settings);
   return settings;
 }
 

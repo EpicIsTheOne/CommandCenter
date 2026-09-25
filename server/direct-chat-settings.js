@@ -1,10 +1,9 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { readJsonStore, writeJsonStore } from './json-store.js';
+import { dataPath } from './runtime-paths.js';
 
-const ROOT = process.cwd();
-const DATA_DIR = join(ROOT, 'data');
-const SETTINGS_FILE = join(DATA_DIR, 'direct-chat-settings.json');
+const DATA_DIR = dataPath();
+const SETTINGS_FILE = dataPath('direct-chat-settings.json');
 export const DEFAULT_PAWAN_ROLEPLAY_MODEL = 'pkrd/cosmosrp-2.1';
 
 export const DIRECT_CHAT_DEFAULTS = {
@@ -58,18 +57,15 @@ export function normalizeDirectChatSettings(input = {}) {
 
 export async function loadDirectChatSettings() {
   try {
-    if (!existsSync(SETTINGS_FILE)) return { ...DIRECT_CHAT_DEFAULTS };
-    return normalizeDirectChatSettings({ ...DIRECT_CHAT_DEFAULTS, ...JSON.parse(await readFile(SETTINGS_FILE, 'utf8')) });
-  } catch {
-    return { ...DIRECT_CHAT_DEFAULTS };
-  }
+    return normalizeDirectChatSettings({ ...DIRECT_CHAT_DEFAULTS, ...await readJsonStore(SETTINGS_FILE, { defaultValue: DIRECT_CHAT_DEFAULTS }) });
+  } catch { return { ...DIRECT_CHAT_DEFAULTS }; }
 }
 
 export async function saveDirectChatSettings(input = {}) {
   const existing = await loadDirectChatSettings();
   const settings = normalizeDirectChatSettings({ ...existing, ...(input || {}) });
   await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+  await writeJsonStore(SETTINGS_FILE, settings);
   return settings;
 }
 

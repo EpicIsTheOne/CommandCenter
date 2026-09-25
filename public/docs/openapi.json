@@ -149,9 +149,6 @@
           "downloadUrl": {
             "type": "string"
           },
-          "path": {
-            "type": "string"
-          },
           "notes": {
             "type": "string"
           }

@@ -1,8 +1,10 @@
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, readdir, writeFile, copyFile, rm } from 'node:fs/promises';
 import { dirname, basename, join, extname } from 'node:path';
+import { dataPath } from './runtime-paths.js';
+import { readJsonStore, updateJsonStore, writeJsonStore } from './json-store.js';
 
-const DATA_DIR = join(process.cwd(), 'data', 'companions');
+const DATA_DIR = dataPath('companions');
 const COMPANIONS_DIR = join(DATA_DIR, 'library');
 const IMPORTS_DIR = join(DATA_DIR, 'imports');
 const REGISTRY_FILE = join(DATA_DIR, 'registry.json');
@@ -328,12 +330,8 @@ async function loadImportedCompanions(publicBase = '') {
 
 export async function loadCompanionSettings() {
   try {
-    if (!existsSync(SETTINGS_FILE)) return { ...DEFAULT_SETTINGS };
-    const raw = await readFile(SETTINGS_FILE, 'utf8');
-    return { ...DEFAULT_SETTINGS, ...normalizeSettings(JSON.parse(raw)) };
-  } catch {
-    return { ...DEFAULT_SETTINGS };
-  }
+    return { ...DEFAULT_SETTINGS, ...normalizeSettings(await readJsonStore(SETTINGS_FILE, { defaultValue: DEFAULT_SETTINGS })) };
+  } catch { return { ...DEFAULT_SETTINGS }; }
 }
 
 function normalizeVisualMap(input = {}) {
@@ -359,41 +357,36 @@ function normalizeSettings(input = {}) {
 export async function saveCompanionSettings(input = {}) {
   const settings = normalizeSettings(input);
   await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+  await writeJsonStore(SETTINGS_FILE, settings);
   return settings;
 }
 
 async function writeStoredCompanionItems(items = []) {
   await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(REGISTRY_FILE, JSON.stringify({ items: items || [] }, null, 2) + '\n', { mode: 0o600 });
+  await writeJsonStore(REGISTRY_FILE, { items: items || [] });
 }
 
 async function loadStoredCompanionItems() {
   try {
-    if (!existsSync(REGISTRY_FILE)) return [];
-    const raw = await readFile(REGISTRY_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
+    const parsed = await readJsonStore(REGISTRY_FILE, { defaultValue: { items: [] } });
     return Array.isArray(parsed?.items) ? parsed.items : [];
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
 
 export async function upsertStoredCompanionItem(item = {}) {
   if (!item?.id) throw new Error('Companion item id is required');
-  const stored = await loadStoredCompanionItems();
-  const next = stored.filter((entry) => String(entry?.id || '') !== String(item.id));
-  next.push(item);
-  await writeStoredCompanionItems(next);
+  await updateJsonStore(REGISTRY_FILE, { defaultValue: { items: [] } }, async (store) => ({
+    items: [...(Array.isArray(store.items) ? store.items : []).filter((entry) => String(entry?.id || '') !== String(item.id)), item],
+  }));
   return item;
 }
 
 export async function removeStoredCompanionItem(companionId = '') {
   const id = String(companionId || '').trim();
   if (!id) return;
-  const stored = await loadStoredCompanionItems();
-  const next = stored.filter((entry) => String(entry?.id || '') !== id);
-  if (next.length !== stored.length) await writeStoredCompanionItems(next);
+  await updateJsonStore(REGISTRY_FILE, { defaultValue: { items: [] } }, async (store) => ({
+    items: (Array.isArray(store.items) ? store.items : []).filter((entry) => String(entry?.id || '') !== id),
+  }));
 }
 
 export async function deleteImportedCompanionPackage(companionId = '', publicBase = '') {
@@ -445,7 +438,7 @@ export async function ensureCompanionRegistry() {
   await mkdir(COMPANIONS_DIR, { recursive: true });
   await mkdir(IMPORTS_DIR, { recursive: true });
   if (existsSync(REGISTRY_FILE)) return;
-  await writeFile(REGISTRY_FILE, JSON.stringify({ items: BUILT_IN_COMPANIONS }, null, 2) + '\n');
+  await writeJsonStore(REGISTRY_FILE, { items: BUILT_IN_COMPANIONS });
 }
 
 export async function importCodexPetPackageFromDir(sourceDir = '', publicBase = '') {

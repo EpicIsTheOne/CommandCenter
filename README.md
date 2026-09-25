@@ -71,7 +71,7 @@ npm start
 # Open http://localhost:3000
 ```
 
-With zero config, the app runs in **demo mode** with simulated agent activity.
+With zero config, the app runs in **live/connecting mode**. Set `DEMO_MODE=true` explicitly for simulated activity.
 
 > Need the full install/config flow, troubleshooting, and live-mode details?
 > See **[SETUP.md](./SETUP.md)** for the complete setup guide.
@@ -168,7 +168,7 @@ Additional panels and modals provide:
 ### Built-in updater
 
 - Update section inside **Settings**.
-- **Auto update toggle** enabled by default.
+- **Auto update toggle** disabled by default and opt-in.
 - Manual **Update Now** flow with confirmation modal before applying changes.
 - Git-backed update checks against the configured repo/branch.
 - Pending commit list with commit subjects/body text when available.
@@ -177,6 +177,7 @@ Additional panels and modals provide:
 - Dirty-working-tree protection so CommandCenter does not blindly stomp local uncommitted changes.
 - Automatic restart after successful update apply.
 - Post-restart update-state tracking so the UI can report when the update actually landed.
+- Update application is supported only on Linux; non-Linux instances expose a clean unsupported result instead of invoking shell update code.
 
 ### Companion visuals and Codex pet imports
 

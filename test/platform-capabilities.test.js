@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { pythonCandidates, updaterCapability } from '../server/platform-capabilities.js';
-import { buildRestartScript } from '../server/updater.js';
+import { applyUpdate, buildRestartScript, runAutoUpdateCheck, startAutoUpdateScheduler } from '../server/updater.js';
 
 test('Windows Python resolution order is explicit bin, venv, py, python3, python', () => {
   const candidates = pythonCandidates({ platform: 'win32', env: { PYTHON_BIN: 'C:\\Python\\python.exe' }, root: 'Z:\\missing-project' });
@@ -20,4 +20,15 @@ test('Linux updater script uses lockfile install and rollback SHA without touchi
   assert.match(script, /npm ci/);
   assert.match(script, /git reset --hard "abc123"/);
   assert.match(script, /git pull --ff-only/);
+});
+
+test('updater operations fail cleanly on unsupported platforms', async () => {
+  if (process.platform === 'linux') return;
+  const result = await applyUpdate();
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'unsupported-platform');
+  assert.equal((await runAutoUpdateCheck()).reason, 'unsupported-platform');
+  const scheduler = await startAutoUpdateScheduler();
+  assert.equal(scheduler.intervalMs, 0);
+  assert.equal(scheduler.capability.supported, false);
 });

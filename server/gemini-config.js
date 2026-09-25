@@ -1,10 +1,9 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { readJsonStore, writeJsonStore } from './json-store.js';
+import { dataPath } from './runtime-paths.js';
 
-const ROOT = process.cwd();
-const DATA_DIR = join(ROOT, 'data');
-const SETTINGS_FILE = join(DATA_DIR, 'gemini-settings.json');
+const DATA_DIR = dataPath();
+const SETTINGS_FILE = dataPath('gemini-settings.json');
 
 export const FAIRY_CALL_MODE_OPTIONS = ['universal', 'gaming', 'observe', 'assist', 'guide', 'operator', 'record'];
 
@@ -111,18 +110,14 @@ function normalizeGeminiSettings(input = {}) {
 
 export async function loadGeminiSettings() {
   try {
-    if (!existsSync(SETTINGS_FILE)) return { ...DEFAULT_GEMINI_SETTINGS };
-    const raw = await readFile(SETTINGS_FILE, 'utf8');
-    return { ...DEFAULT_GEMINI_SETTINGS, ...normalizeGeminiSettings(JSON.parse(raw)) };
-  } catch {
-    return { ...DEFAULT_GEMINI_SETTINGS };
-  }
+    return { ...DEFAULT_GEMINI_SETTINGS, ...normalizeGeminiSettings(await readJsonStore(SETTINGS_FILE, { defaultValue: DEFAULT_GEMINI_SETTINGS })) };
+  } catch { return { ...DEFAULT_GEMINI_SETTINGS }; }
 }
 
 export async function saveGeminiSettings(input = {}) {
   const settings = normalizeGeminiSettings(input);
   await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+  await writeJsonStore(SETTINGS_FILE, settings);
   return settings;
 }
 

@@ -1,11 +1,9 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readJsonStore, writeJsonStore } from './json-store.js';
+import { dataPath } from './runtime-paths.js';
 import { randomUUID } from 'node:crypto';
 
-const ROOT = process.cwd();
-const DATA_DIR = join(ROOT, 'data');
-const MEMORY_FILE = join(DATA_DIR, 'fairy-memory.json');
+const DATA_DIR = dataPath();
+const MEMORY_FILE = dataPath('fairy-memory.json');
 const MAX_ENTRIES = 160;
 const MAX_ENTRY_CHARS = 1200;
 const MAX_CONTEXT_CHARS = 6000;
@@ -72,18 +70,13 @@ function scoreEntry(entry = {}, query = '', scope = DEFAULT_SCOPE) {
 
 export async function loadFairyMemory() {
   try {
-    if (!existsSync(MEMORY_FILE)) return { version: 1, entries: [] };
-    const raw = await readFile(MEMORY_FILE, 'utf8');
-    return normalizeStore(JSON.parse(raw));
-  } catch {
-    return { version: 1, entries: [] };
-  }
+    return normalizeStore(await readJsonStore(MEMORY_FILE, { defaultValue: { version: 1, entries: [] } }));
+  } catch { return { version: 1, entries: [] }; }
 }
 
 export async function saveFairyMemory(store = {}) {
   const normalized = normalizeStore(store);
-  await mkdir(DATA_DIR, { recursive: true });
-  await writeFile(MEMORY_FILE, JSON.stringify(normalized, null, 2) + '\n', { mode: 0o600 });
+  await writeJsonStore(MEMORY_FILE, normalized);
   return normalized;
 }
 

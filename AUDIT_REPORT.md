@@ -1,8 +1,21 @@
 # Command Center Audit
 
-Audit date: 2026-07-12
-Audited commit: `7abf34e` (`main`, matching `origin/main` at clone time)
+Audit date: 2026-09-25
+Audited baseline: `c408828` (local `main`; this remediation is committed separately)
 Audit environment: Windows 11 workstation; the application remains Linux-first by design.
+
+## Current remediation status (2026-09-25)
+
+This section supersedes the historical status text below. The project now has a substantially stronger production baseline:
+
+- The full Node test suite passes with 96 tests, syntax checks pass, `npm ci` completes, and `npm audit --omit=dev` reports zero vulnerabilities.
+- Startup, authentication, WebSocket, control-plane, relay, browser regression, and mission-board smoke paths pass on the local Windows environment.
+- First-run setup is local-only unless explicitly overridden, passwords are at least 10 characters, auth attempts are rate-limited, Reika/relay-only sessions are isolated, and live security headers are mounted.
+- Runtime data paths are centralized, mutable JSON stores use serialized atomic writes with backups, API session identifiers are path-validated, and upload routes have bounded per-file and aggregate budgets.
+- Agent discovery is non-blocking and Hermes CLI work is skipped when the bridge is disabled. The updater is opt-in, Linux-only, clean-tree gated, and health-checks the restarted process before declaring success; non-Linux calls return a clean unsupported result.
+- The CI workflow uses Node 22/24, and test discovery is cross-platform through Node's built-in test runner.
+
+The remaining intentional limits are architectural, not hidden test failures: `server/index.js` and `public/js/app.js` are still large, external live providers were not exercised without credentials, and this checkout has no KVM2 deployment to update.
 
 ## Executive summary
 
@@ -166,13 +179,13 @@ Recommended fix:
 
 Evidence:
 
-- `server/updater.js:188-207` builds a Bash script using `sleep`, `kill`, `nohup`, and shell redirection.
-- `server/updater.js:241-247` runs that script via `bash -lc`.
-- Auto-update is enabled by default and the pulled branch is installed and restarted without a signature, release pin, or post-update test gate.
+- `server/updater.js` builds a Bash script using `sleep`, `kill`, `nohup`, and shell redirection on supported Linux hosts.
+- Update application and automatic checks are explicitly gated off on unsupported platforms; the API returns an unsupported result without spawning `bash`.
+- Auto-update is disabled by default, and supported Linux updates are clean-tree gated with dependency installation, a restart health check, and rollback handling.
 
 Impact:
 
-The updater cannot work natively on Windows. On Linux, compromise or accidental breakage of the tracked branch becomes automatic code execution on deployed hosts.
+The updater cannot work natively on Windows. On Linux, an operator must still opt in because the tracked branch remains executable application code.
 
 Recommended fix:
 
@@ -271,9 +284,9 @@ Recommended fix:
 - P1 Windows/optional workers: `server/platform-capabilities.js`, both wake worker wrappers, `server/hermes-session-monitor.js`, `test/platform-capabilities.test.js`, and `test/startup.test.js` cover resolution order and missing-Python startup.
 - P1 attachments: `server/attachment-bundle.js`, `server/api-chat-runner.js`, and `test/attachment-bundle.test.js` cover bounded TXT/source/PDF extraction, PNG/JPEG image arguments, unsupported binary files, missing files, traversal, limits, and honest unsupported backend results.
 - P1 dependencies/uploads: `package.json`, `package-lock.json`, Multer 2 disk storage in `server/index.js`, `server/upload-policy.js`, and the aggregate-limit test remove the known high/critical production advisories and memory-backed bulk buffering.
-- P1 UI authentication: `server/ui-auth.js`, `server/request-security.js`, and auth routes in `server/index.js` implement 12-character passwords, loopback-only setup, generic failures, throttling, session invalidation, and pruning.
+- P1 UI authentication: `server/ui-auth.js`, `server/request-security.js`, and auth routes in `server/index.js` implement 10-character passwords, loopback-only setup, generic failures, throttling, session invalidation, relay-only unconfigured-session isolation, and pruning.
 - P2 updater (partial): `server/platform-capabilities.js`, `server/updater.js`, and `server/update-settings.js` make apply Linux-only, require a clean tree, use `npm ci` with a lockfile, retain the prior SHA for install rollback, and make auto-update opt-in. A full post-restart health rollback remains future work.
 - P2 persistence (partial): `server/json-store.js` plus migrated UI auth, API sessions/index, chat manifest/history, Fairy memory, live tasks, recordings, voice settings, and updater stores provide serialized temp-write/fsync/rename, restrictive modes, backups, and explicit corruption reporting. Lower-risk appearance/branding/layout stores still need migration.
-- P2 tests/tooling: `scripts/check-syntax.cjs`, `scripts/startup-smoke.cjs`, portable `scripts/verify-fairy-recording.cjs`, package scripts, and `.github/workflows/ci.yml` cover Windows/Ubuntu and Node 20/22.
+- P2 tests/tooling: `scripts/check-syntax.cjs`, `scripts/startup-smoke.cjs`, portable `scripts/verify-fairy-recording.cjs`, package scripts, and `.github/workflows/ci.yml` cover Windows/Ubuntu and Node 22/24.
 
 The P0 network boundary is now remediated and covered by negative tests. Internet-facing deployments should still use TLS and an authenticating reverse proxy or trusted VPN; the remaining partial P2 updater and lower-risk JSON-store migrations are tracked above.

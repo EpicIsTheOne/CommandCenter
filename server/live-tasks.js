@@ -4,6 +4,7 @@ import { getHermesAgent } from './agents.js';
 import { runApiChatTurn } from './api-chat-runner.js';
 import relayAgentSource from './relay-agent-source.js';
 import { ControlPlaneError, controlPlane, initializeControlPlane, projectLegacyTask } from './control-plane.js';
+import { USER_HOME } from './runtime-paths.js';
 
 const activeExecutions = new Map();
 const CANCEL_ACK_TIMEOUT_MS = 15_000;
@@ -340,7 +341,7 @@ export function runLiveTask(task, { broadcast, roster }) {
         '--message', task.prompt,
       ];
 
-  const env = { ...process.env, PATH: process.env.HOME + '/.local/bin:' + process.env.PATH };
+  const env = { ...process.env, PATH: `${USER_HOME}/.local/bin:${process.env.PATH || ''}` };
   const startedAt = Date.now();
   let stdout = '';
   let stderr = '';

@@ -9,8 +9,8 @@ async function fixture() {
   config.apiKey = 'test-bearer-secret';
   const server = createServer();
   const wss = new WebSocketServer({ noServer: true });
-  server.on('upgrade', (req, socket, head) => {
-    const auth = authorizeWebSocketRequest(req, { validateSession: (token) => token === 'valid-cookie' });
+  server.on('upgrade', async (req, socket, head) => {
+    const auth = await authorizeWebSocketRequest(req, { validateSession: (token) => token === 'valid-cookie' });
     if (!auth.ok) {
       socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
       socket.destroy();

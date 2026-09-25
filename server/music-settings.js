@@ -1,11 +1,10 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdir } from 'node:fs/promises';
+import { readJsonStore, writeJsonStore } from './json-store.js';
+import { dataPath } from './runtime-paths.js';
 
-const ROOT = process.cwd();
-const DATA_DIR = join(ROOT, 'data');
-const MUSIC_DIR = join(DATA_DIR, 'music');
-const SETTINGS_FILE = join(DATA_DIR, 'music-settings.json');
+const DATA_DIR = dataPath();
+const MUSIC_DIR = dataPath('music');
+const SETTINGS_FILE = dataPath('music-settings.json');
 
 export const DEFAULT_MUSIC_SETTINGS = {
   enabled: false,
@@ -44,18 +43,14 @@ export async function ensureMusicStorage() {
 export async function loadMusicSettings() {
   try {
     await ensureMusicStorage();
-    if (!existsSync(SETTINGS_FILE)) return { ...DEFAULT_MUSIC_SETTINGS };
-    const raw = await readFile(SETTINGS_FILE, 'utf8');
-    return { ...DEFAULT_MUSIC_SETTINGS, ...normalize(JSON.parse(raw)) };
-  } catch {
-    return { ...DEFAULT_MUSIC_SETTINGS };
-  }
+    return { ...DEFAULT_MUSIC_SETTINGS, ...normalize(await readJsonStore(SETTINGS_FILE, { defaultValue: DEFAULT_MUSIC_SETTINGS })) };
+  } catch { return { ...DEFAULT_MUSIC_SETTINGS }; }
 }
 
 export async function saveMusicSettings(input) {
   const settings = normalize(input);
   await ensureMusicStorage();
-  await writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+  await writeJsonStore(SETTINGS_FILE, settings);
   return settings;
 }
 
