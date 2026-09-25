@@ -57,9 +57,11 @@ test('firstRunnable prefers existing absolute candidates and falls back to bare 
 test('candidate lists put the Windows venv binaries first on win32', () => {
   const bins = hermesBinCandidates();
   const pythons = hermesPythonCandidates();
-  assert.ok(bins.length >= 2);
+  assert.ok(bins.length >= 1);
   assert.ok(pythons.length >= 2);
   if (process.platform === 'win32') {
+    assert.ok(bins.length >= 3);
+    assert.ok(pythons.length >= 3);
     assert.match(bins[0], /hermes-agent[\\/]venv[\\/]Scripts[\\/]hermes\.exe$/);
     assert.match(pythons[0], /venv[\\/]Scripts[\\/]python\.exe$/);
   }
